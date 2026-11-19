@@ -248,6 +248,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         override_ability: None,
         morphed_from: None,
         morphed_from_entity: None,
+        replaced_card_def_id: None,
         owner,
         cost: row.cost,
         ongoing_cost: 0,
@@ -279,7 +280,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         merged_to: None,
         drawn_turn: None,
         turn_played: 0,
-        watches: Vec::new(),
+        attached_abilities: crate::game::initial_attachments(def),
         state: def.initial_state.map(|init| init()),
     })
 }
@@ -788,7 +789,16 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                     runs += repetitions(&game, source, id) as usize * base * (1 + extra);
                 }
             }
-            game.cards[id].watches = vec![(position.turn, lane); runs];
+            let hawkeye = game.cards[id].def.id == "Hawkeye";
+            for _ in 0..runs {
+                game.cards[id].attach_watch(
+                    id,
+                    position.turn,
+                    lane,
+                    hawkeye,
+                    if hawkeye { 4 } else { 5 },
+                );
+            }
         }
     }
     // The client CardStatUpdate exposes stat, operation, value, player and
@@ -944,7 +954,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
 pub fn state_json(game: &Game<'_>) -> Value {
     let card = |id: usize| {
         let c = &game.cards[id];
-        json!({"id": c.def.id, "owner": c.owner, "cost": game.card_cost(id), "power": c.power(), "revealed": c.revealed, "turn_played": c.turn_played, "watches": c.watches})
+        json!({"id": c.def.id, "owner": c.owner, "cost": game.card_cost(id), "power": c.power(), "revealed": c.revealed, "turn_played": c.turn_played, "watches": c.watch_contexts()})
     };
     json!({ "turn": game.turn, "total_turns": game.total_turns, "priority": game.reveal_priority,
         "players": game.players.iter().map(|p| json!({"energy": p.energy, "pending_power": p.next_play_power, "hand": p.hand.iter().map(|&id| card(id)).collect::<Vec<_>>(), "deck": p.deck.iter().map(|&id| game.cards[id].def.id).collect::<Vec<_>>() })).collect::<Vec<_>>(),

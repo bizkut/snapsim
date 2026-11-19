@@ -21,8 +21,8 @@ fn pending_watches_obey_historic_reveal_conditions() {
     let game = build_game(&p, &mut rng).unwrap();
     let hawkeye = game.lanes[0].cards[0];
     let jessica = game.lanes[1].cards[0];
-    assert_eq!(game.cards[hawkeye].watches, vec![(3, 0), (3, 0)]);
-    assert!(game.cards[jessica].watches.is_empty());
+    assert_eq!(game.cards[hawkeye].watch_contexts(), vec![(3, 0), (3, 0)]);
+    assert!(game.cards[jessica].watch_contexts().is_empty());
     assert_eq!(game.reveal_priority, Some(1));
 }
 

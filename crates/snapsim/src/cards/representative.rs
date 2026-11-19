@@ -3,12 +3,10 @@ use crate::game::Game;
 
 pub const HAWKEYE: CardDef = CardDef {
     reveal: Some(watch),
-    end_turn: Some(hawkeye_end),
     ..CardDef::vanilla("Hawkeye")
 };
 pub const JESSICA_JONES: CardDef = CardDef {
     reveal: Some(watch),
-    end_turn: Some(jessica_end),
     ..CardDef::vanilla("JessicaJones")
 };
 pub const MEDUSA: CardDef = CardDef {
@@ -70,27 +68,8 @@ pub const COSMO: CardDef = CardDef {
 
 fn watch(g: &mut Game, id: usize) {
     let lane = g.cards[id].lane.unwrap();
-    g.cards[id].watches.push((g.turn + 1, lane));
-}
-fn resolve_watch(g: &mut Game, id: usize, expect: bool, power: i32) {
-    let owner = g.cards[id].owner;
-    let watches = std::mem::take(&mut g.cards[id].watches);
-    for (turn, lane) in watches {
-        if turn == g.turn {
-            let played = g.played_at(owner, lane);
-            if played == expect {
-                g.add_power(id, power, owner);
-            }
-        } else {
-            g.cards[id].watches.push((turn, lane));
-        }
-    }
-}
-fn hawkeye_end(g: &mut Game, id: usize) {
-    resolve_watch(g, id, true, 4);
-}
-fn jessica_end(g: &mut Game, id: usize) {
-    resolve_watch(g, id, false, 5);
+    let hawkeye = g.cards[id].ability_def().id == "Hawkeye";
+    g.cards[id].attach_watch(id, g.turn + 1, lane, hawkeye, if hawkeye { 4 } else { 5 });
 }
 fn medusa(g: &mut Game, id: usize) {
     if g.cards[id].lane == Some(1) {

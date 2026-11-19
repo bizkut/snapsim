@@ -1,6 +1,6 @@
 # snapsim
 
-The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (157 deck cards and 34 tokens, skills and spells) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; the cards added since come from the game client's own rule definitions. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
+The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (158 deck cards and 34 tokens, skills and spells) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; the cards added since come from the game client's own rule definitions, and every card in the nine SnapComplete decks of November 2026 (`decks/snapcomplete-2026-11.txt`) is supported. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
 ## Command line
 
@@ -22,6 +22,8 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
 
 The engine exposes location replacement, delayed reveal scheduling, location cost hooks, ability removal, On Reveal and Ongoing repetition, movement, off-board placement, hand swaps and Horde creation. Lasting card costs are stored on cards. `Game::card_cost` mirrors Python's `energy_cost`: revealed locations modify the cost of hand cards only, in lane order, while board and deck cards keep their lasting cost. `Card::has_ongoing`, `can_reduce_power` and `reduce_power` support ability and immunity checks. `Game::copy_card` clones `CardState`, resets temporary board state and invokes the descriptor's optional `clear_reveal_state` hook. `cards::deck_eligible_ids()` matches the reference's sorted `deck_eligible_ids()`, which Agent 13 draws from. Registry membership alone is not a parity proof.
 
+Copied text, merging and attached abilities follow the client. Copying text (`Card::CopyText`) loads the copied definition with fresh state and repeats its On Reveal under reveal-doubling effects; Nico Minoru's prepared spell is her current text, and her preparation trigger is tracked separately. Abilities one card attaches to another (Hawkeye's and Jessica Jones's end-of-turn buff, Web Sling's move-power trigger) are instances on that card with their turn, location and origin: an instance installed by the card's own text is replaced with that text, while one cloned from another card stays. A merge (Symbiote Spider-Man) adds the absorbed card's power from modifiers, copies its text and clones its attached abilities except those the receiver already has by default (`CloneExternalAbilities`).
+
 ## Adding content
 
 1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and list it in that module's descriptor slice (cards; add a new module's `CARDS` and `TOKENS` slices to `cards::GROUPS` and `cards::TOKEN_GROUPS`) or in `locations::REGISTRY`. Tokens, which decks may not contain, go in the module's `TOKENS`. Use the catalog's current printed stats; do not invent stand-in rules.
@@ -34,7 +36,7 @@ Known approximations of client rules:
 * Random choices use the client's candidate set and number and order of rolls, but draw from `game.rng`; the client's own random stream is not reproduced.
 * Effects that create random cards or locations draw only from implemented ones; the client draws from its full pools. Scarlet Witch Queen of Chaos's own pool is complete (13 curated and 11 collectible skills), so she matches the client's skill choice.
 * Nico Minoru's location spell and Omniversal Presence pick locations uniformly, while the client weights the pick (`GetRandomLocationDefId`). Merging of power from the same source, the order of conditional Ongoing effects that depend on each other, and gaps left by cards that cannot shift are not modelled.
-* Symbiote Spider-Man stays unregistered: merging is modelled, but cloning the abilities other cards attached to the merged card (`CloneExternalAbilities`) covers only move grants.
+* Visual-only abilities the client attaches (Tao Mandala, Zombie Galacti) are not modelled. `ReplacedCardDefId` follows the client's copy and clear paths, but no implemented card replaces another, so it is always empty.
 * Live positions use the client's `LatestResolutionOrder` when the reader supplies it, and otherwise derive the order from played turn, priority and slot (see "Live state from SNAP observations"). None of the newly exported live fields has been checked against a live match yet.
 
 ## Advisor and Python binding
@@ -205,4 +207,4 @@ PYTHONPATH=$SNAPSIM_REFERENCE \
   $SNAPSIM_PYTHON "$ROOT/parity/inventory.py"
 ```
 
-As of this commit it reports 191 cards (the reference's 94 plus 97 from the client) and 84 locations implemented, none of the reference's remaining. Set `CARGO_TARGET_DIR` if the inventory binary was built elsewhere.
+As of this commit it reports 192 cards (the reference's 94 plus 98 from the client) and 84 locations implemented, none of the reference's remaining. Set `CARGO_TARGET_DIR` if the inventory binary was built elsewhere.

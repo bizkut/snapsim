@@ -88,20 +88,30 @@ impl Game<'_> {
         true
     }
 
-    /// Clone external player-granted movement permissions from one card to another.
+    /// Card::CloneExternalAbilities (0x7cb244c), predicate 0x7cbf514:
+    /// retain instance context but allocate a new ability index on the receiver.
     pub fn clone_external_abilities(&mut self, receiver: usize, source: usize) {
-        for seat in 0..2 {
-            let copies: Vec<_> = self.players[seat]
-                .move_grants
-                .iter()
-                .filter(|grant| grant.card == Some(source))
-                .cloned()
-                .map(|mut grant| {
-                    grant.card = Some(receiver);
-                    grant
-                })
-                .collect();
-            self.players[seat].move_grants.extend(copies);
+        if self.cards[source].abilities_removed {
+            return;
+        }
+        let replaced = self.cards[source].replaced_card_def_id;
+        let copies: Vec<_> = self.cards[source]
+            .attached_abilities
+            .iter()
+            .filter(|ability| {
+                replaced != Some(ability.owner_def)
+                    && !self.cards[receiver]
+                        .attached_abilities
+                        .iter()
+                        .any(|existing| {
+                            existing.id == ability.id
+                                && self.is_default_attached(receiver, existing)
+                        })
+            })
+            .cloned()
+            .collect();
+        for ability in copies {
+            self.cards[receiver].attach_ability(ability);
         }
     }
 

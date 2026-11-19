@@ -63,12 +63,12 @@ fn move_watch_and_destroy_hooks() {
     assert!(g.move_card(moving, 0));
     assert_eq!(g.cards[kraven].permanent, before + 2);
     let hawkeye = play(&mut g, "Hawkeye", 0, 1);
-    assert_eq!(g.cards[hawkeye].watches.len(), 2);
+    assert_eq!(g.cards[hawkeye].watch_contexts(), vec![(g.turn + 1, 1); 2]);
     g.turn += 1;
     g.played = Default::default();
     play(&mut g, "Wasp", 0, 1);
     let before = g.cards[hawkeye].permanent;
-    (g.cards[hawkeye].def.end_turn.unwrap())(&mut g, hawkeye);
+    g.resolve_attached_watches(hawkeye);
     assert_eq!(g.cards[hawkeye].permanent, before + 8);
     let ally = play(&mut g, "Shocker", 0, 2);
     let carnage = play(&mut g, "Carnage", 0, 2);
@@ -196,7 +196,7 @@ fn copied_text_keeps_identity_and_can_resolve() {
     assert!(g.copy_text(target, source, true));
     assert_eq!(g.cards[target].def.id, "MistyKnight");
     assert_eq!(g.cards[target].ability_def().id, "Medusa");
-    assert_eq!(g.cards[target].permanent, 6);
+    assert_eq!(g.cards[target].permanent, 9); // copied resolve repeats at Kamar-Taj
     assert!(!g.copy_text(target, source, true));
 }
 
@@ -215,6 +215,21 @@ fn morph_retains_or_discards_permanent_modifiers() {
     assert_eq!(g.cards[card].cost, 6);
     assert!(g.transform_card_without_modifiers(card, "Shocker"));
     assert_eq!(g.cards[card].permanent, 4);
+}
+
+#[test]
+fn replacement_provenance_follows_copy_and_is_cleared_by_morph() {
+    let mut rng = PythonRandom::seed(110);
+    let mut g = game(&mut rng);
+    let source = g.create_card("Hawkeye", 0);
+    g.cards[source].replaced_card_def_id = Some("NicoMinoru");
+    let copied = g.copy_card(source, 0);
+    assert_eq!(g.cards[copied].replaced_card_def_id, Some("NicoMinoru"));
+    let morphed = g.create_card("MistyKnight", 0);
+    assert!(g.transform_into_copy(morphed, source));
+    assert_eq!(g.cards[morphed].replaced_card_def_id, Some("NicoMinoru"));
+    assert!(g.transform_card(morphed, "Hulk"));
+    assert_eq!(g.cards[morphed].replaced_card_def_id, None);
 }
 
 #[test]

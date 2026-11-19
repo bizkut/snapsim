@@ -33,12 +33,7 @@ pub(crate) static CARDS: &[CardDef] = &[
         end_turn: Some(hydra_bob),
         ..CardDef::vanilla("HydraBob")
     },
-    CardDef {
-        reveal: Some(nico_reveal),
-        on_event: Some(nico_event),
-        initial_state: Some(nico_state),
-        ..CardDef::vanilla("NicoMinoru")
-    },
+    CardDef::vanilla("NicoMinoru"),
     CardDef {
         reveal: Some(spell01),
         ..CardDef::vanilla("Spell01NicoMinoru")
@@ -210,45 +205,49 @@ fn iron_lad(game: &mut Game<'_>, card: usize) {
     }
 }
 
-fn nico_state() -> Box<dyn crate::game::CardState> {
-    Box::new((0u8, 0u8))
-}
-
-fn nico_event(game: &mut Game<'_>, card: usize, event: Event) {
-    if !matches!(event, Event::TurnStart) {
-        return;
-    }
-    let owner = game.cards[card].owner;
-    let in_hand = game.players[owner].hand.contains(&card);
-    let in_deck = game.players[owner].deck.contains(&card);
-    let (mut used, _) = game.cards[card]
-        .state
-        .as_ref()
-        .and_then(|s| s.as_any().downcast_ref::<(u8, u8)>())
-        .copied()
-        .unwrap_or_default();
-    // PrepareNewSpell (0x7f0c9e8) picks once in deck, each turn in hand.
-    if !in_hand && (!in_deck || used != 0) {
-        return;
-    }
-    if used == 0x7f {
-        used = 0;
-    }
-    let available: Vec<_> = (0..7).filter(|&i| used & (1 << i) == 0).collect();
-    let index = game.rng.borrow_mut().randbelow(available.len());
-    let spell = available[index] as u8 + 1;
-    used |= 1 << (spell - 1);
-    game.cards[card].state = Some(Box::new((used, spell)));
-}
-
-fn nico_reveal(game: &mut Game<'_>, card: usize) {
-    let spell = game.cards[card]
-        .state
-        .as_ref()
-        .and_then(|s| s.as_any().downcast_ref::<(u8, u8)>())
-        .and_then(|&(used, spell)| (used != 0).then_some(spell));
-    if let Some(spell) = spell {
-        install_spell(game, card, spell);
+impl Game<'_> {
+    pub(crate) fn prepare_nico(&mut self, card: usize, index: usize) {
+        let owner = self.cards[card].owner;
+        let in_hand = self.players[owner].hand.contains(&card);
+        let in_deck = self.players[owner].deck.contains(&card);
+        let crate::game::AttachedAbilityKind::NicoPrepare { mut used } =
+            self.cards[card].attached_abilities[index].kind
+        else {
+            return;
+        };
+        // PrepareNewSpell (0x7f0c9e8) retains the trigger and its context
+        // after loading the selected spell as the card's current text.
+        if !in_hand && (!in_deck || used != 0) {
+            return;
+        }
+        if used == 0x7f {
+            used = 0;
+        }
+        let count = 7 - used.count_ones() as usize;
+        let pick = self.rng.borrow_mut().randbelow(count);
+        let spell = (0..7)
+            .filter(|&i| used & (1 << i) == 0)
+            .nth(pick)
+            .expect("selected an available spell") as u8
+            + 1;
+        used |= 1 << (spell - 1);
+        self.cards[card].attached_abilities[index].kind =
+            crate::game::AttachedAbilityKind::NicoPrepare { used };
+        if self.cards[card].attached_abilities[index].origin.is_none() {
+            self.cards[card].attached_abilities[index].origin = Some(card);
+        }
+        let ids = [
+            "Spell01NicoMinoru",
+            "Spell02NicoMinoru",
+            "Spell03NicoMinoru",
+            "Spell04NicoMinoru",
+            "Spell05NicoMinoru",
+            "Spell06NicoMinoru",
+            "Spell07NicoMinoru",
+        ];
+        let def = super::get(ids[usize::from(spell - 1)]).expect("registered Nico spell");
+        self.cards[card].override_ability = Some(def);
+        self.cards[card].state = def.initial_state.map(|init| init());
     }
 }
 
@@ -521,27 +520,24 @@ mod tests {
         let nico = game.players[0].hand[0];
         let mut seen = 0u8;
         for _ in 0..7 {
-            nico_event(&mut game, nico, Event::TurnStart);
-            let &(used, spell) = game.cards[nico]
-                .state
-                .as_ref()
-                .unwrap()
-                .as_any()
-                .downcast_ref::<(u8, u8)>()
-                .unwrap();
-            let bit = 1 << (spell - 1);
+            game.prepare_nico(nico, 0);
+            let spell = game.cards[nico].ability_def().id;
+            let bit = 1 << (spell.as_bytes()[6] - b'1');
             assert_eq!(seen & bit, 0);
             seen |= bit;
+            let crate::game::AttachedAbilityKind::NicoPrepare { used } =
+                game.cards[nico].attached_abilities[0].kind
+            else {
+                panic!("missing prepare trigger")
+            };
             assert_eq!(used, seen);
         }
-        nico_event(&mut game, nico, Event::TurnStart);
-        let &(used, _) = game.cards[nico]
-            .state
-            .as_ref()
-            .unwrap()
-            .as_any()
-            .downcast_ref::<(u8, u8)>()
-            .unwrap();
+        game.prepare_nico(nico, 0);
+        let crate::game::AttachedAbilityKind::NicoPrepare { used } =
+            game.cards[nico].attached_abilities[0].kind
+        else {
+            panic!("missing prepare trigger")
+        };
         assert_eq!(used.count_ones(), 1);
     }
 
@@ -690,5 +686,84 @@ mod tests {
         jane(&mut game, jane_id);
         assert_eq!(game.cards[ally].power(), ally_power + 5);
         assert_eq!(game.cards[enemy].power(), enemy_power - 5);
+    }
+
+    #[test]
+    fn iron_lad_copies_prepared_nico_spell_not_prepare_context() {
+        let p = position(json!([{"id":"IronLad"}]), json!([]));
+        let mut rng = PythonRandom::seed(23);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let lad = game.lanes[0].cards[0];
+        let nico = game.create_card("NicoMinoru", 0);
+        game.players[0].hand.push(nico);
+        game.prepare_nico(nico, 0);
+        let spell = game.cards[nico].ability_def().id;
+        game.players[0].hand.retain(|&id| id != nico);
+        game.players[0].deck.insert(0, nico);
+        iron_lad(&mut game, lad);
+        assert_eq!(game.cards[lad].ability_def().id, spell);
+        assert!(game.cards[lad].attached_abilities.is_empty());
+        assert_eq!(game.players[0].pending_effects.len(), 1);
+    }
+
+    #[test]
+    fn iron_lad_gets_fresh_surge_context() {
+        let p = position(json!([{"id":"IronLad"}]), json!([]));
+        let mut rng = PythonRandom::seed(24);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let lad = game.lanes[0].cards[0];
+        let surge = game.create_card("Surge", 0);
+        game.cards[surge].state = Some(Box::new(Some(usize::MAX)));
+        game.players[0].deck.insert(0, surge);
+        iron_lad(&mut game, lad);
+        let state = game.cards[lad]
+            .state
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Option<usize>>()
+            .unwrap();
+        assert_eq!(*state, Some(surge));
+    }
+
+    #[test]
+    fn copied_resolve_repeats_at_kamar_taj() {
+        let mut p = position(json!([{"id":"IronLad"}]), json!([]));
+        p.locations[0].id = Some("KamarTaj".into());
+        let mut rng = PythonRandom::seed(25);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let lad = game.lanes[0].cards[0];
+        // Use a 1-cost Hawkeye to observe the number of copied resolve activations.
+        let hawkeye = game.create_card("Hawkeye", 0);
+        game.players[0].deck.insert(0, hawkeye);
+        iron_lad(&mut game, lad);
+        assert_eq!(game.cards[lad].watch_contexts().len(), 2);
+    }
+
+    #[test]
+    fn iron_lad_copies_completed_objective_with_fresh_progress() {
+        let p = position(
+            json!([{"id":"IronLad"}, {"id":"PolarisHorseman"}]),
+            json!([{"id":"Hulk"}]),
+        );
+        let mut rng = PythonRandom::seed(26);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let lad = game.lanes[0].cards[0];
+        let polaris = game.lanes[0].cards[1];
+        let enemy = game.lanes[0].cards[2];
+        game.add_power(enemy, -5, 0);
+        game.ongoing();
+        game.players[0].hand.clear();
+        let first = game.create_card("Wasp", 0);
+        game.players[0].hand.push(first);
+        game.end_turn_effects();
+        assert_eq!(game.cards[first].lane, Some(0));
+        assert!(game.take_from_board(polaris));
+        game.players[0].deck.insert(0, polaris);
+        let second = game.create_card("Wasp", 0);
+        game.players[0].hand.push(second);
+        iron_lad(&mut game, lad);
+        game.end_turn_effects();
+        assert_eq!(game.cards[second].lane, Some(0));
     }
 }

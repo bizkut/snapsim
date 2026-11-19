@@ -6,7 +6,14 @@ use crate::{
     random::GameRng,
 };
 use serde::Serialize;
-use std::{cell::RefCell, collections::HashMap, sync::LazyLock};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 pub trait CardState: std::any::Any {
     fn clone_box(&self) -> Box<dyn CardState>;
     fn as_any(&self) -> &dyn std::any::Any;
@@ -52,6 +59,87 @@ pub struct CardStatUpdate {
     pub ongoing: bool,
 }
 
+static NEXT_ATTACHED_ABILITY_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Card-owned ability instances retain context independently of the card's text.
+#[derive(Clone)]
+pub struct AttachedAbility {
+    pub id: &'static str,
+    pub owner_def: &'static str,
+    pub origin: Option<usize>,
+    pub index: u64,
+    pub kind: AttachedAbilityKind,
+}
+
+#[derive(Clone, Copy)]
+pub enum AttachedAbilityKind {
+    Watch {
+        turn: u8,
+        lane: usize,
+        expect: bool,
+        power: i32,
+    },
+    MovePower {
+        source: usize,
+        turn: u8,
+        hook: crate::cards::PlayHook,
+    },
+    NicoPrepare {
+        used: u8,
+    },
+}
+
+pub fn initial_attachments(def: &'static CardDef) -> Vec<AttachedAbility> {
+    if def.id == "NicoMinoru" {
+        vec![AttachedAbility {
+            id: "NicoMinoruStartOfTurnTrigger",
+            owner_def: "NicoMinoru",
+            origin: None,
+            index: NEXT_ATTACHED_ABILITY_ID.fetch_add(1, Ordering::Relaxed),
+            kind: AttachedAbilityKind::NicoPrepare { used: 0 },
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+impl Card {
+    pub fn attach_ability(&mut self, mut ability: AttachedAbility) {
+        ability.index = NEXT_ATTACHED_ABILITY_ID.fetch_add(1, Ordering::Relaxed);
+        self.attached_abilities.push(ability);
+    }
+
+    pub fn attach_watch(&mut self, origin: usize, turn: u8, lane: usize, expect: bool, power: i32) {
+        let owner_def = if expect { "Hawkeye" } else { "JessicaJones" };
+        self.attach_ability(AttachedAbility {
+            id: if expect {
+                "HawkeyePreEndOfTurnTrigger"
+            } else {
+                "JessicaJonesPreEndOfTurnTrigger"
+            },
+            owner_def,
+            origin: Some(origin),
+            index: 0,
+            kind: AttachedAbilityKind::Watch {
+                turn,
+                lane,
+                expect,
+                power,
+            },
+        });
+    }
+
+    pub fn watch_contexts(&self) -> Vec<(u8, usize)> {
+        self.attached_abilities
+            .iter()
+            .filter_map(|ability| match ability.kind {
+                AttachedAbilityKind::Watch { turn, lane, .. } => Some((turn, lane)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct Card {
     pub def: &'static CardDef,
@@ -59,6 +147,7 @@ pub struct Card {
     pub override_ability: Option<&'static CardDef>,
     pub morphed_from: Option<&'static str>,
     pub morphed_from_entity: Option<usize>,
+    pub replaced_card_def_id: Option<&'static str>,
     pub owner: usize,
     pub cost: i32,
     pub ongoing_cost: i32,
@@ -95,7 +184,7 @@ pub struct Card {
     pub observed_can_activate: Option<bool>,
     pub observed_move_targets: Option<u8>,
     pub merged_to: Option<usize>,
-    pub watches: Vec<(u8, usize)>,
+    pub attached_abilities: Vec<AttachedAbility>,
     pub state: Option<Box<dyn CardState>>,
 }
 impl Card {
@@ -196,7 +285,6 @@ pub enum Action {
 #[derive(Clone)]
 struct StagedAction {
     action: Action,
-    grant: Option<MoveGrant>,
 }
 
 #[derive(Clone, Default)]
@@ -403,7 +491,9 @@ impl<'a> Game<'a> {
             .iter()
             .flat_map(|lane| lane.cards.iter().copied())
             .filter(|&id| {
-                self.cards[id].revealed && self.cards[id].ability_def().on_event.is_some()
+                self.cards[id].revealed
+                    && self.cards[id].ability_def().id != "NicoMinoru"
+                    && self.cards[id].ability_def().on_event.is_some()
             })
             .collect();
         for card in observers {
@@ -422,13 +512,42 @@ impl<'a> Game<'a> {
                 .players
                 .iter()
                 .flat_map(|player| player.hand.iter().chain(&player.deck).copied())
-                .filter(|&id| self.cards[id].ability_def().on_event.is_some())
+                .filter(|&id| {
+                    self.cards[id].ability_def().id != "NicoMinoru"
+                        && self.cards[id].ability_def().on_event.is_some()
+                })
                 .collect();
             for card in observers {
                 if !self.cards[card].abilities_removed
                     && let Some(hook) = self.cards[card].ability_def().on_event
                 {
                     hook(self, card, event);
+                }
+            }
+        }
+        if matches!(event, Event::TurnStart) {
+            let cards: Vec<_> = self
+                .players
+                .iter()
+                .flat_map(|p| p.hand.iter().chain(&p.deck).copied())
+                .chain(
+                    self.lanes
+                        .iter()
+                        .flat_map(|lane| lane.cards.iter().copied()),
+                )
+                .filter(|&id| !self.cards[id].abilities_removed)
+                .collect();
+            for card in cards {
+                let indices: Vec<_> = self.cards[card]
+                    .attached_abilities
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, ability)| {
+                        matches!(ability.kind, AttachedAbilityKind::NicoPrepare { .. }).then_some(i)
+                    })
+                    .collect();
+                for index in indices {
+                    self.prepare_nico(card, index);
                 }
             }
         }
@@ -876,6 +995,7 @@ impl<'a> Game<'a> {
                     override_ability: None,
                     morphed_from: None,
                     morphed_from_entity: None,
+                    replaced_card_def_id: None,
                     owner: seat,
                     cost: data.cost,
                     ongoing_cost: 0,
@@ -907,7 +1027,7 @@ impl<'a> Game<'a> {
                     observed_can_activate: None,
                     observed_move_targets: None,
                     merged_to: None,
-                    watches: Vec::new(),
+                    attached_abilities: initial_attachments(def),
                     state: def.initial_state.map(|init| init()),
                 });
                 players[seat].deck.push(index);
@@ -995,6 +1115,7 @@ impl<'a> Game<'a> {
             override_ability: None,
             morphed_from: None,
             morphed_from_entity: None,
+            replaced_card_def_id: None,
             owner,
             ongoing_cost: 0,
             temporary_hand_cost: None,
@@ -1026,7 +1147,7 @@ impl<'a> Game<'a> {
             observed_can_activate: None,
             observed_move_targets: None,
             merged_to: None,
-            watches: Vec::new(),
+            attached_abilities: initial_attachments(def),
             state: def.initial_state.map(|init| init()),
         });
         index
@@ -1047,6 +1168,8 @@ impl<'a> Game<'a> {
         self.cards[card].override_ability = self.cards[source].override_ability;
         self.cards[card].morphed_from = self.cards[source].morphed_from;
         self.cards[card].morphed_from_entity = self.cards[source].morphed_from_entity;
+        // Card::Copy (0x7caed0c) carries replacement provenance.
+        self.cards[card].replaced_card_def_id = self.cards[source].replaced_card_def_id;
         self.cards[card].state = self.cards[source]
             .state
             .as_deref()
@@ -1056,6 +1179,18 @@ impl<'a> Game<'a> {
         }
         card
     }
+    /// GetDefaultAbilities predicate (0x7cbe110): static IDs and abilities
+    /// originating from a card with the receiver's original CardDefId.
+    pub(crate) fn is_default_attached(&self, card: usize, ability: &AttachedAbility) -> bool {
+        let receiver = &self.cards[card];
+        (ability.id == "NicoMinoruStartOfTurnTrigger"
+            && (receiver.def.id == "NicoMinoru" || receiver.ability_def().id == "NicoMinoru"))
+            || ability
+                .origin
+                .and_then(|origin| self.cards.get(origin))
+                .is_some_and(|origin| origin.def.id == receiver.def.id)
+    }
+
     /// Copy the source's current text without changing this card's identity or stats.
     /// CopyTextAndActivateResolveAbility (0x7cbb3f4) refreshes ongoing before resolve.
     pub fn copy_text(&mut self, card: usize, source: usize, activate_reveal: bool) -> bool {
@@ -1067,20 +1202,26 @@ impl<'a> Game<'a> {
         {
             return false;
         }
+        let mut abilities = std::mem::take(&mut self.cards[card].attached_abilities);
+        abilities.retain(|ability| !self.is_default_attached(card, ability));
+        self.cards[card].attached_abilities = abilities;
         let removed = self.cards[source].abilities_removed;
-        let state = self.cards[source]
-            .state
-            .as_deref()
-            .map(CardState::clone_box);
         self.cards[card].override_ability = Some(def);
         self.cards[card].abilities_removed = removed;
-        self.cards[card].state = state.or_else(|| def.initial_state.map(|init| init()));
+        self.cards[card].state = def.initial_state.map(|init| init());
+        if removed {
+            self.cards[card].attached_abilities.clear();
+        } else if def.id == "NicoMinoru" {
+            for mut ability in initial_attachments(def) {
+                ability.origin = Some(card);
+                self.cards[card].attach_ability(ability);
+            }
+        }
         self.ongoing();
-        if activate_reveal
-            && !removed
-            && let Some(hook) = def.reveal
-        {
-            hook(self, card);
+        if activate_reveal && !removed {
+            // ActivateTextResolveAbility (0x7cbb424) uses the resolve count
+            // from GetTriggerAbilityActivateCount (0x7cb2d1c).
+            self.trigger_on_reveal(card);
         }
         true
     }
@@ -1115,12 +1256,16 @@ impl<'a> Game<'a> {
         target.def = def;
         target.morphed_from = Some(old);
         target.morphed_from_entity = None;
+        // ClearAbilityOverrides (0x7cbba80) clears replacement provenance.
+        target.replaced_card_def_id = None;
         target.override_ability = None;
         target.abilities_removed = false;
         target.state = def.initial_state.map(|init| init());
         target.permanent = power;
         target.cost = cost;
-        target.watches.clear();
+        target
+            .attached_abilities
+            .retain(|a| !matches!(a.kind, AttachedAbilityKind::Watch { .. }));
         self.ongoing();
         // CompleteMorph (0x7cbb714) activates the new resolve text when eligible.
         if self.cards[card].lane.is_some() && self.cards[card].revealed {
@@ -1159,18 +1304,22 @@ impl<'a> Game<'a> {
             .collect();
         let cost = self.cards[source].cost;
         let power = self.cards[source].permanent;
+        let replaced_card_def_id = self.cards[source].replaced_card_def_id;
         let removed = self.cards[source].abilities_removed;
         let target = &mut self.cards[card];
         target.def = def;
         target.morphed_from = Some(old);
         target.morphed_from_entity = Some(source);
+        target.replaced_card_def_id = replaced_card_def_id;
         target.override_ability = override_ability;
         target.state = state;
         target.stat_updates = updates;
         target.cost = cost;
         target.permanent = power;
         target.abilities_removed = removed;
-        target.watches.clear();
+        target
+            .attached_abilities
+            .retain(|a| !matches!(a.kind, AttachedAbilityKind::Watch { .. }));
         self.ongoing();
         if self.cards[card].lane.is_some() && self.cards[card].revealed {
             self.trigger_on_reveal(card);
@@ -1479,10 +1628,9 @@ impl<'a> Game<'a> {
                 self.played[seat].push((card, lane));
                 self.lanes[lane].cards.push(card);
                 self.notify_added(card, lane);
-                self.players[seat].staged_actions.push(StagedAction {
-                    action,
-                    grant: None,
-                });
+                self.players[seat]
+                    .staged_actions
+                    .push(StagedAction { action });
             }
             Action::Move { card, lane } => {
                 let from = self.cards[card].lane.unwrap();
@@ -1491,6 +1639,21 @@ impl<'a> Game<'a> {
                     grant.remaining -= 1;
                     grant.clone()
                 });
+                if let Some(grant) = grant
+                    && let Some(hook) = grant.on_move
+                {
+                    self.cards[card].attach_ability(AttachedAbility {
+                        id: "WebSlingThisCardMovedTrigger",
+                        owner_def: "WebSling",
+                        origin: Some(card),
+                        index: 0,
+                        kind: AttachedAbilityKind::MovePower {
+                            source: grant.source,
+                            turn: self.turn,
+                            hook,
+                        },
+                    });
+                }
                 if self.cards[card].ability_def().move_limit > 0 {
                     self.cards[card].player_moves_used =
                         self.cards[card].player_moves_used.saturating_add(1);
@@ -1502,17 +1665,16 @@ impl<'a> Game<'a> {
                 self.cards[card].lane = Some(lane);
                 self.players[seat]
                     .staged_actions
-                    .push(StagedAction { action, grant });
+                    .push(StagedAction { action });
                 self.ongoing();
             }
             Action::Activate { card } => {
                 self.set_energy(seat, self.players[seat].energy - cost);
                 self.players[seat].energy_spent_this_turn += cost;
                 self.cards[card].activate_staged = true;
-                self.players[seat].staged_actions.push(StagedAction {
-                    action,
-                    grant: None,
-                });
+                self.players[seat]
+                    .staged_actions
+                    .push(StagedAction { action });
                 self.ongoing();
             }
         }
@@ -1538,11 +1700,6 @@ impl<'a> Game<'a> {
                             (self.cards[card].last_lane, self.cards[card].lane)
                         {
                             self.finish_move(card, from, lane);
-                            if let Some(grant) = staged.grant
-                                && let Some(hook) = grant.on_move
-                            {
-                                hook(self, grant.source, card);
-                            }
                         }
                     }
                     Action::Activate { card } => {
@@ -1597,6 +1754,18 @@ impl<'a> Game<'a> {
         self.cards[card].move_turns.push(self.turn);
         if let Some(hook) = self.cards[card].ability_def().on_move {
             hook(self, card, source);
+        }
+        let abilities = std::mem::take(&mut self.cards[card].attached_abilities);
+        if !self.cards[card].abilities_removed {
+            for ability in abilities {
+                if let AttachedAbilityKind::MovePower { source, turn, hook } = ability.kind
+                    && turn == self.turn
+                {
+                    hook(self, source, card);
+                } else {
+                    self.cards[card].attached_abilities.push(ability);
+                }
+            }
         }
         let observers = self.lanes[destination].cards.clone();
         for observer in observers {
@@ -1835,7 +2004,9 @@ impl<'a> Game<'a> {
         self.cards[card].turn_played = 0;
         self.cards[card].ongoing = 0;
         self.cards[card].location_power = 0;
-        self.cards[card].watches.clear();
+        self.cards[card]
+            .attached_abilities
+            .retain(|a| !matches!(a.kind, AttachedAbilityKind::Watch { .. }));
         if let Some(clear) = self.cards[card].ability_def().clear_reveal_state {
             clear(&mut self.cards[card]);
         }
@@ -1899,7 +2070,9 @@ impl<'a> Game<'a> {
             .ability_def()
             .initial_state
             .map(|init| init());
-        self.cards[card].watches.clear();
+        self.cards[card]
+            .attached_abilities
+            .retain(|a| !matches!(a.kind, AttachedAbilityKind::Watch { .. }));
         self.cards[card].turn_played = 0;
         self.cards[card].ongoing = 0;
         self.cards[card].location_power = 0;
@@ -2579,6 +2752,32 @@ impl<'a> Game<'a> {
         }
     }
 
+    /// Dispatch card-owned proximity triggers independently of current text.
+    pub fn resolve_attached_watches(&mut self, card: usize) {
+        if self.cards[card].abilities_removed {
+            self.cards[card].attached_abilities.clear();
+            return;
+        }
+        let owner = self.cards[card].owner;
+        let abilities = std::mem::take(&mut self.cards[card].attached_abilities);
+        for ability in abilities {
+            if let AttachedAbilityKind::Watch {
+                turn,
+                lane,
+                expect,
+                power,
+            } = ability.kind
+                && turn == self.turn
+            {
+                if self.played_at(owner, lane) == expect {
+                    self.add_power(card, power, owner);
+                }
+            } else {
+                self.cards[card].attached_abilities.push(ability);
+            }
+        }
+    }
+
     /// Apply the effects at the end of an already-revealed turn.
     pub fn end_turn_effects(&mut self) {
         let observers: Vec<_> = self
@@ -2588,6 +2787,11 @@ impl<'a> Game<'a> {
             .filter(|&id| self.cards[id].revealed)
             .collect();
         for id in observers {
+            let turn = self.turn;
+            self.cards[id].attached_abilities.retain(|ability| !matches!(
+                ability.kind, AttachedAbilityKind::MovePower { turn: expiration, .. } if expiration <= turn
+            ));
+            self.resolve_attached_watches(id);
             if let Some(hook) = self.cards[id].ability_def().end_turn {
                 hook(self, id);
             }

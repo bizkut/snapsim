@@ -5,6 +5,11 @@
 use super::CardDef;
 use crate::game::Game;
 
+// Hawkeye/Jessica's pending watches now survive copied-text replacement only
+// when externally originated (CopyText 0x7cbadb4; predicate 0x7cbe110).
+// The frozen reference has no merge-and-copy or text-replacement cards, so
+// ordinary reference matches need no alternate descriptors for this interaction.
+
 pub(crate) static CARDS: &[CardDef] = &[CardDef {
     reveal: Some(wolfsbane),
     ..CardDef::vanilla("Wolfsbane")

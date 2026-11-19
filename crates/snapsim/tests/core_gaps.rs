@@ -97,10 +97,10 @@ fn copies_preserve_custom_state_but_clear_hawkeye_watches() {
     let mut rng = PythonRandom::seed(21);
     let mut game = game(&mut rng);
     let hawkeye = play(&mut game, "Hawkeye", 0, 0);
-    assert!(!game.cards[hawkeye].watches.is_empty());
+    assert!(!game.cards[hawkeye].watch_contexts().is_empty());
     game.cards[hawkeye].state = Some(Box::new(vec![3_i32, 5]));
     let copy = game.copy_card(hawkeye, 1);
-    assert!(game.cards[copy].watches.is_empty());
+    assert!(game.cards[copy].watch_contexts().is_empty());
     assert_eq!(
         game.cards[copy]
             .state
@@ -154,7 +154,7 @@ fn joaquin_and_odin_repeat_eligible_reveals() {
     let mut game = game(&mut rng);
     play(&mut game, "JoaquinTorres", 0, 0);
     let hawkeye = play(&mut game, "Hawkeye", 0, 0);
-    assert_eq!(game.cards[hawkeye].watches.len(), 2);
+    assert_eq!(game.cards[hawkeye].watch_contexts().len(), 2);
     play(&mut game, "Odin", 0, 0);
-    assert_eq!(game.cards[hawkeye].watches.len(), 4);
+    assert_eq!(game.cards[hawkeye].watch_contexts().len(), 4);
 }

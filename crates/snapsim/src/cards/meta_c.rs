@@ -30,8 +30,46 @@ pub(crate) static CARDS: &[CardDef] = &[
         move_limit: 1,
         ..CardDef::vanilla("JeffTheBabyDolphin")
     },
+    CardDef {
+        on_activate: Some(symbiote),
+        ..CardDef::vanilla("SymbioteSpiderMan")
+    },
 ];
 pub(crate) static TOKENS: &[&str] = &[];
+fn symbiote(game: &mut Game<'_>, card: usize) {
+    let Some(lane) = game.cards[card].lane else {
+        return;
+    };
+    let owner = game.cards[card].owner;
+    let mut lowest = i32::MAX;
+    let mut tied = [0; 4];
+    let mut count = 0;
+    for &id in &game.lanes[lane].cards {
+        if id == card || game.cards[id].owner != owner || !game.cards[id].revealed {
+            continue;
+        }
+        let cost = game.card_cost(id);
+        if cost < lowest {
+            lowest = cost;
+            count = 0;
+        }
+        if cost == lowest {
+            tied[count] = id;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    // MergeLowestCostIntoSelf (0x7cd1b78) rolls even for a single lowest-cost ally.
+    let index = game.rng.borrow_mut().randbelow(count);
+    let target = tied[index];
+    if game.merge_card(card, target) {
+        game.copy_text(card, target, false);
+        game.clone_external_abilities(card, target);
+        game.trigger_on_reveal(card);
+    }
+}
 
 fn karima(game: &mut Game<'_>, card: usize) {
     if game.cards[card].lane.is_none() {
@@ -416,5 +454,170 @@ mod tests {
         assert_eq!(game.cards[target].power(), power + 1);
         assert_eq!(game.cards[enemy].power(), power);
         assert_eq!(game.cards[elsewhere].power(), power);
+    }
+
+    #[test]
+    fn symbiote_copies_nico_spell_and_preparation_context() {
+        let mut rng = PythonRandom::seed(17);
+        let mut game = game(&mut rng);
+        let nico = game.create_card("NicoMinoru", 0);
+        game.players[0].hand.push(nico);
+        game.prepare_nico(nico, 0);
+        let spell = game.cards[nico].ability_def().id;
+        game.players[0].hand.retain(|&id| id != nico);
+        game.cards[nico].lane = Some(0);
+        game.cards[nico].revealed = true;
+        game.lanes[0].cards.push(nico);
+        let sym = place(&mut game, "SymbioteSpiderMan", 0, 0, true);
+        symbiote(&mut game, sym);
+        assert_eq!(game.cards[sym].ability_def().id, spell);
+        assert_eq!(game.cards[nico].merged_to, Some(sym));
+        assert_eq!(game.players[0].pending_effects.len(), 1);
+        assert!(matches!(game.cards[sym].attached_abilities[0].kind,
+            crate::game::AttachedAbilityKind::NicoPrepare { used } if used.count_ones() == 1));
+        assert!(game.take_from_board(sym));
+        game.players[0].hand.push(sym);
+        game.prepare_nico(sym, 0);
+        assert_ne!(game.cards[sym].ability_def().id, spell);
+    }
+
+    #[test]
+    fn symbiote_clones_watches_and_adds_copied_reveal() {
+        for name in ["Hawkeye", "JessicaJones"] {
+            let mut rng = PythonRandom::seed(19);
+            let mut game = game(&mut rng);
+            let target = place(&mut game, name, 0, 0, true);
+            game.trigger_on_reveal(target);
+            let sym = place(&mut game, "SymbioteSpiderMan", 0, 0, true);
+            symbiote(&mut game, sym);
+            assert_eq!(
+                game.cards[sym].watch_contexts(),
+                vec![(game.turn + 1, 0); 2]
+            );
+            game.turn += 1;
+            if name == "Hawkeye" {
+                let play = place(&mut game, "Wasp", 0, 0, false);
+                game.cards[play].turn_played = game.turn;
+                game.played[0].push((play, 0));
+            }
+            let before = game.cards[sym].power();
+            game.resolve_attached_watches(sym);
+            assert_eq!(
+                game.cards[sym].power(),
+                before + if name == "Hawkeye" { 8 } else { 10 }
+            );
+            assert!(game.cards[sym].watch_contexts().is_empty());
+        }
+    }
+
+    #[test]
+    fn symbiote_copies_removed_text_and_modifier_only_power() {
+        let mut rng = PythonRandom::seed(21);
+        let mut game = game(&mut rng);
+        let target = place(&mut game, "Hawkeye", 0, 0, true);
+        game.add_power(target, 3, 0);
+        game.cards[target].ongoing = 5;
+        game.cards[target].location_power = 2;
+        game.cards[target].abilities_removed = true;
+        let sym = place(&mut game, "SymbioteSpiderMan", 0, 0, true);
+        let before = game.cards[sym].permanent;
+        let permanent = game.cards[target].permanent;
+        symbiote(&mut game, sym);
+        assert_eq!(game.cards[sym].permanent, before + permanent);
+        assert!(game.cards[sym].abilities_removed);
+        assert!(game.cards[sym].watch_contexts().is_empty());
+    }
+
+    #[test]
+    fn symbiote_clones_staged_web_sling_trigger() {
+        use crate::game::{Action, MoveGrant};
+        fn power(game: &mut Game<'_>, source: usize, target: usize) {
+            game.add_power(target, 1, game.cards[source].owner);
+        }
+        let mut rng = PythonRandom::seed(20);
+        let mut game = game(&mut rng);
+        let skill = game.create_card("WebSling", 0);
+        let target = place(&mut game, "Nightcrawler", 0, 0, true);
+        let sym = place(&mut game, "SymbioteSpiderMan", 0, 1, true);
+        game.grant_move(MoveGrant {
+            seat: 0,
+            source: skill,
+            card: Some(target),
+            lane: None,
+            start_turn: game.turn,
+            end_turn: game.turn,
+            remaining: 1,
+            on_move: Some(power),
+        });
+        game.stage_action(
+            0,
+            Action::Move {
+                card: target,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        symbiote(&mut game, sym);
+        let before = game.cards[sym].permanent;
+        assert!(game.move_card(sym, 2));
+        assert_eq!(game.cards[sym].permanent, before + 1);
+    }
+
+    #[test]
+    fn external_clone_filters_default_id_and_replaced_owner() {
+        let mut rng = PythonRandom::seed(22);
+        let mut game = game(&mut rng);
+        let source = game.create_card("NicoMinoru", 0);
+        let receiver = game.create_card("NicoMinoru", 0);
+        game.clone_external_abilities(receiver, source);
+        assert_eq!(game.cards[receiver].attached_abilities.len(), 1);
+        let other = game.create_card("SymbioteSpiderMan", 0);
+        game.cards[source].replaced_card_def_id = Some("NicoMinoru");
+        game.clone_external_abilities(other, source);
+        assert!(game.cards[other].attached_abilities.is_empty());
+    }
+
+    #[test]
+    fn copied_text_removes_self_origin_watch_but_keeps_cloned_watch() {
+        let mut rng = PythonRandom::seed(27);
+        let mut game = game(&mut rng);
+        let source = place(&mut game, "Hawkeye", 0, 0, true);
+        game.trigger_on_reveal(source);
+        let receiver = place(&mut game, "SymbioteSpiderMan", 0, 0, true);
+        symbiote(&mut game, receiver);
+        assert_eq!(game.cards[receiver].watch_contexts().len(), 2);
+        let replacement = game.create_card("Medusa", 0);
+        game.copy_text(receiver, replacement, false);
+        assert_eq!(
+            game.cards[receiver].watch_contexts(),
+            vec![(game.turn + 1, 0)]
+        );
+        assert_eq!(
+            game.cards[receiver].attached_abilities[0].origin,
+            Some(source)
+        );
+    }
+
+    #[test]
+    fn clone_duplicate_id_only_blocks_receiver_default_ability() {
+        let mut rng = PythonRandom::seed(28);
+        let mut game = game(&mut rng);
+        let source = place(&mut game, "Hawkeye", 0, 0, true);
+        game.trigger_on_reveal(source);
+        let receiver = place(&mut game, "SymbioteSpiderMan", 0, 0, true);
+        game.clone_external_abilities(receiver, source);
+        game.clone_external_abilities(receiver, source);
+        assert_eq!(game.cards[receiver].watch_contexts().len(), 2);
+        assert_ne!(
+            game.cards[receiver].attached_abilities[0].index,
+            game.cards[receiver].attached_abilities[1].index
+        );
+        assert_ne!(
+            game.cards[receiver].attached_abilities[0].index,
+            game.cards[source].attached_abilities[0].index
+        );
+        game.cards[receiver].attach_watch(receiver, game.turn + 1, 0, true, 4);
+        game.clone_external_abilities(receiver, source);
+        assert_eq!(game.cards[receiver].watch_contexts().len(), 3);
     }
 }

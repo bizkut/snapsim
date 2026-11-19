@@ -287,7 +287,16 @@ pub(super) fn simulate(
                         runs += repetitions(&game, source, index) as usize * base * (1 + extra);
                     }
                 }
-                game.cards[index].watches = vec![(start.turn as u8, lane); runs];
+                let hawkeye = game.cards[index].def.id == "Hawkeye";
+                for _ in 0..runs {
+                    game.cards[index].attach_watch(
+                        index,
+                        start.turn as u8,
+                        lane,
+                        hawkeye,
+                        if hawkeye { 4 } else { 5 },
+                    );
+                }
             }
         }
     }
