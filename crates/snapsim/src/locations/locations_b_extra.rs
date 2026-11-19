@@ -92,8 +92,8 @@ fn stark_island(game: &mut Game<'_>, _: usize) {
             .collect();
         if !candidates.is_empty() {
             let index = game.rng.borrow_mut().randbelow(candidates.len());
-            let card = &mut game.cards[candidates[index]];
-            card.cost = (card.cost - 1).max(0);
+            let card = candidates[index];
+            game.set_cost(card, (game.cards[card].cost - 1).max(0), seat);
         }
     }
 }
@@ -103,7 +103,7 @@ fn ice_box(game: &mut Game<'_>, _: usize) {
         if len != 0 {
             let index = game.rng.borrow_mut().randbelow(len);
             let card = game.players[seat].hand[index];
-            game.cards[card].cost += 1;
+            game.add_cost(card, 1, seat);
         }
     }
 }

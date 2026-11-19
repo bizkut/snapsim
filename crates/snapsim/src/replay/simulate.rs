@@ -175,6 +175,7 @@ pub(super) fn simulate(
             .zip(&start.location_turns)
             .any(|(id, turn)| id == "Lemuria" && turn.as_i64() == Some(start.turn)),
         delayed_reveals: Default::default(),
+        deferred_added_reveals: Vec::new(),
         current_location,
         location_reveal_order: [order[0], order[1], order[2]],
         destroyed: Some(Vec::new()),

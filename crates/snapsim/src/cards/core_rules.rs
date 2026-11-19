@@ -106,8 +106,14 @@ fn hulkbuster(game: &mut Game<'_>, card: usize) {
         return;
     }
     let choice = game.rng.borrow_mut().randbelow(allies.len());
-    game.cards[allies[choice]].permanent += game.cards[card].permanent;
+    game.add_power(
+        allies[choice],
+        game.cards[card].permanent,
+        game.cards[card].owner,
+    );
     game.lanes[lane].cards.retain(|&id| id != card);
+    game.cards[card].merged_to = Some(allies[choice]);
+    game.cards[card].last_lane = Some(lane);
     game.cards[card].lane = None;
 }
 

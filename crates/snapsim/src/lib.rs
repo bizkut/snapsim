@@ -16,3 +16,4 @@ pub mod replay;
 pub mod snap;
 pub mod trace;
 pub mod validation;
+pub mod zones;

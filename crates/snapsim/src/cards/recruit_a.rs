@@ -104,7 +104,7 @@ pub const FORGE: CardDef = CardDef {
 
 fn chavez(g: &mut Game<'_>, id: usize) {
     if let Some(&top) = g.players[g.cards[id].owner].deck.first() {
-        g.cards[top].permanent += 3;
+        g.add_power(top, 3, g.cards[id].owner);
     }
 }
 fn ant_man(g: &mut Game<'_>, id: usize) {
@@ -115,15 +115,15 @@ fn ant_man(g: &mut Game<'_>, id: usize) {
         .filter(|&&other| g.cards[other].revealed && g.cards[other].owner == card.owner)
         .count();
     if count >= 4 {
-        g.cards[id].ongoing += 4;
+        g.add_ongoing_power(id, 4, g.cards[id].owner);
     }
 }
 fn apocalypse(g: &mut Game<'_>, id: usize) {
-    g.cards[id].permanent += 4;
+    g.add_power(id, 4, g.cards[id].owner);
     g.add_hand(g.cards[id].owner, id, false);
 }
 fn panther(g: &mut Game<'_>, id: usize) {
-    g.cards[id].permanent *= 2;
+    g.multiply_power(id, 2, g.cards[id].owner);
 }
 fn forge(g: &mut Game<'_>, id: usize) {
     g.players[g.cards[id].owner].next_play_power += 2;
@@ -138,13 +138,14 @@ fn cable(g: &mut Game<'_>, id: usize) {
 fn captain(g: &mut Game<'_>, id: usize) {
     let lane = g.cards[id].lane.unwrap();
     let owner = g.cards[id].owner;
-    for &other in &g.lanes[lane].cards {
+    for index in 0..g.lanes[lane].cards.len() {
+        let other = g.lanes[lane].cards[index];
         if other != id
             && g.cards[other].revealed
             && g.cards[other].owner == owner
             && g.cards[other].has_ongoing()
         {
-            g.cards[other].ongoing += 2;
+            g.add_ongoing_power(other, 2, owner);
         }
     }
 }
@@ -162,7 +163,11 @@ fn deathlok(g: &mut Game<'_>, id: usize) {
     }
 }
 fn dinosaur(g: &mut Game<'_>, id: usize) {
-    g.cards[id].ongoing += 2 * g.players[g.cards[id].owner].hand.len() as i32;
+    g.add_ongoing_power(
+        id,
+        2 * g.players[g.cards[id].owner].hand.len() as i32,
+        g.cards[id].owner,
+    );
 }
 fn elektra(g: &mut Game<'_>, id: usize) {
     let lane = g.cards[id].lane.unwrap();
@@ -184,7 +189,7 @@ fn guardian(g: &mut Game<'_>, id: usize) {
     let owner = g.cards[id].owner;
     let lane = g.cards[id].lane.unwrap();
     if g.played_at(1 - owner, lane) {
-        g.cards[id].permanent += 4;
+        g.add_power(id, 4, owner);
     }
 }
 fn hood(g: &mut Game<'_>, id: usize) {
@@ -207,7 +212,7 @@ fn ironheart(g: &mut Game<'_>, id: usize) {
         .borrow_mut()
         .sample_indices(allies.len(), allies.len().min(2));
     for index in selected {
-        g.cards[allies[index]].permanent += 3;
+        g.add_power(allies[index], 3, owner);
     }
 }
 fn korg(g: &mut Game<'_>, id: usize) {
@@ -247,7 +252,7 @@ fn iceman(g: &mut Game<'_>, id: usize) {
         .collect();
     if !candidates.is_empty() {
         let index = g.rng.borrow_mut().randbelow(candidates.len());
-        g.cards[candidates[index]].cost += 1;
+        g.add_cost(candidates[index], 1, 1 - opponent);
     }
 }
 fn lizard(g: &mut Game<'_>, id: usize) {
@@ -258,6 +263,6 @@ fn lizard(g: &mut Game<'_>, id: usize) {
         .filter(|&&other| g.cards[other].revealed && g.cards[other].owner != card.owner)
         .count();
     if count >= 4 {
-        g.cards[id].ongoing -= 4;
+        g.add_ongoing_power(id, -4, g.cards[id].owner);
     }
 }

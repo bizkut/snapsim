@@ -104,26 +104,29 @@ fn highest(game: &Game<'_>, lane: usize) -> Option<i32> {
         .max()
 }
 fn washington_dc(game: &mut Game<'_>, lane: usize) {
-    for &id in &game.lanes[lane].cards {
+    for index in 0..game.lanes[lane].cards.len() {
+        let id = game.lanes[lane].cards[index];
         if game.cards[id].revealed && game.cards[id].has_no_ability() {
-            game.cards[id].location_power += 3;
+            game.add_location_power(id, 3);
         }
     }
 }
 fn monster_metropolis(game: &mut Game<'_>, lane: usize) {
     if let Some(max) = highest(game, lane) {
-        for &id in &game.lanes[lane].cards {
+        for index in 0..game.lanes[lane].cards.len() {
+            let id = game.lanes[lane].cards[index];
             if game.cards[id].revealed && game.cards[id].power() == max {
-                game.cards[id].location_power += 3;
+                game.add_location_power(id, 3);
             }
         }
     }
 }
 fn throne_room(game: &mut Game<'_>, lane: usize) {
     if let Some(max) = highest(game, lane) {
-        for &id in &game.lanes[lane].cards {
+        for index in 0..game.lanes[lane].cards.len() {
+            let id = game.lanes[lane].cards[index];
             if game.cards[id].revealed && game.cards[id].power() == max {
-                game.cards[id].location_power += max;
+                game.add_location_power(id, max);
             }
         }
     }
@@ -158,18 +161,20 @@ fn olympia(game: &mut Game<'_>, _: usize) {
     }
 }
 fn embassy(game: &mut Game<'_>, _: usize) {
-    for player in &game.players {
-        for &id in &player.hand {
-            game.cards[id].permanent += 2;
+    for seat in 0..2 {
+        for index in 0..game.players[seat].hand.len() {
+            let id = game.players[seat].hand[index];
+            game.add_power(id, 2, seat);
         }
     }
 }
 fn mosh_pit(game: &mut Game<'_>, lane: usize) {
     let mut counts = [0; 2];
-    for &id in &game.lanes[lane].cards {
+    for index in 0..game.lanes[lane].cards.len() {
+        let id = game.lanes[lane].cards[index];
         let owner = game.cards[id].owner;
         if counts[owner] < 2 {
-            game.cards[id].permanent += 1;
+            game.add_power(id, 1, owner);
             counts[owner] += 1;
         }
     }
@@ -186,9 +191,10 @@ fn rocket_pad(game: &mut Game<'_>, lane: usize) {
         let powers = game.powers()[lane];
         if powers[0] != powers[1] {
             let winner = usize::from(powers[1] > powers[0]);
-            for &id in &game.lanes[lane].cards {
+            for index in 0..game.lanes[lane].cards.len() {
+                let id = game.lanes[lane].cards[index];
                 if game.cards[id].owner == winner {
-                    game.cards[id].permanent += 1;
+                    game.add_power(id, 1, winner);
                 }
             }
         }
@@ -199,30 +205,32 @@ fn stark_industries(game: &mut Game<'_>, lane: usize) {
     if game.turn != 4 || n == 0 {
         return;
     }
-    for &id in &game.lanes[lane].cards {
-        game.cards[id].permanent += (8 / n) as i32;
+    for index in 0..game.lanes[lane].cards.len() {
+        let id = game.lanes[lane].cards[index];
+        game.add_power(id, (8 / n) as i32, game.cards[id].owner);
     }
     let remainder = 8 % n;
     if remainder != 0 {
         let selected = game.rng.borrow_mut().sample_indices(n, remainder);
         for index in selected {
             let id = game.lanes[lane].cards[index];
-            game.cards[id].permanent += 1;
+            game.add_power(id, 1, game.cards[id].owner);
         }
     }
 }
 fn stark_tower(game: &mut Game<'_>, lane: usize) {
     if game.turn == 5 {
-        for &id in &game.lanes[lane].cards {
-            game.cards[id].permanent += 2;
+        for index in 0..game.lanes[lane].cards.len() {
+            let id = game.lanes[lane].cards[index];
+            game.add_power(id, 2, game.cards[id].owner);
         }
     }
 }
 fn proscenium(game: &mut Game<'_>, _: usize, card: usize) {
-    game.cards[card].permanent += 2;
+    game.add_power(card, 2, game.cards[card].owner);
 }
 fn shuris_lab(game: &mut Game<'_>, _: usize, card: usize) {
-    game.cards[card].permanent += game.cards[card].power();
+    game.add_power(card, game.cards[card].power(), game.cards[card].owner);
 }
 fn orchis_forge(game: &mut Game<'_>, _: usize, card: usize) {
     let seat = game.cards[card].owner;

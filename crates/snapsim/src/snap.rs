@@ -318,7 +318,9 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         let mut mine = Vec::new();
         let mut theirs = Vec::new();
         let mut face_down = 0;
-        for card in array(&location["cards"]) {
+        let mut board_cards: Vec<_> = array(&location["cards"]).iter().collect();
+        board_cards.sort_by_key(|card| card["zone_position"].as_i64().unwrap_or(i64::MAX));
+        for card in board_cards {
             if card["owner_entity_id"] == local["entity_id"] {
                 mine.push(card_ref(card, true));
                 visible.push(card);

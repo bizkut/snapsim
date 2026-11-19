@@ -7,7 +7,8 @@ pub const MUIR_ISLAND: LocationDef = LocationDef {
 };
 
 fn muir_island(game: &mut Game<'_>, lane: usize) {
-    for &card in &game.lanes[lane].cards {
-        game.cards[card].permanent += 1;
+    for index in 0..game.lanes[lane].cards.len() {
+        let card = game.lanes[lane].cards[index];
+        game.add_power(card, 1, game.cards[card].owner);
     }
 }

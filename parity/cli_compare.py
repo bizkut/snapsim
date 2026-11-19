@@ -24,9 +24,17 @@ def main():
         ['benchmark', '--mode', 'recruit', '--games', '1', '--rollouts', '1', '--seed', '11'],
         ['benchmark', '--mode', 'recruit', '--games', '1', '--rollouts', '2', '--seed', '19', '--opponent', 'spread'],
     ]
+    added = []
     for args in cases:
         expected = invoke([sys.executable, str(REFERENCE / 'advise.py'), *args])
         actual = invoke([str(BINARY), *args])
+        if args[0] == 'coverage':
+            # Rules added after the reference froze are new content: every reference card must
+            # still be listed, and nothing else may differ.
+            missing = sorted(set(expected['cards']) - set(actual['cards']))
+            assert not missing, (args, 'reference cards no longer supported', missing)
+            added = sorted(set(actual['cards']) - set(expected['cards']))
+            actual['cards'] = expected['cards']
         if args[0] == 'compare':
             expected.pop('elapsed_seconds', None)
             actual.pop('elapsed_seconds', None)
@@ -34,7 +42,7 @@ def main():
                 for side in ('a', 'b'):
                     result['config'][side].pop('engine', None)
         assert expected == actual, (args, expected, actual)
-    print(f'CLI parity: {len(cases)} cases passed')
+    print(f'CLI parity: {len(cases)} cases passed ({len(added)} cards beyond the reference)')
 
 
 if __name__ == '__main__':

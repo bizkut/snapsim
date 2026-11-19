@@ -10,6 +10,9 @@ pub struct CardData {
     pub ability: String,
     pub status: String,
     pub source: String,
+    #[serde(rename = "type")]
+    pub card_type: String,
+    pub random_pool_excluded: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

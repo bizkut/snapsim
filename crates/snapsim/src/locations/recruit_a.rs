@@ -171,7 +171,7 @@ fn atlantis(game: &mut Game<'_>, lane: usize) {
             && cards.next().is_none()
             && game.cards[id].revealed
         {
-            game.cards[id].location_power += 5;
+            game.add_location_power(id, 5);
         }
     }
 }
@@ -222,7 +222,7 @@ fn eternity(game: &mut Game<'_>, lane: usize) {
     }
 }
 fn fisk(game: &mut Game<'_>, _: usize, card: usize, _: usize) {
-    game.cards[card].reduce_power(4);
+    game.add_power(card, -4, game.cards[card].owner);
 }
 fn flooded(_: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
     false
@@ -279,7 +279,7 @@ fn hellfire(game: &Game<'_>, _: usize, card: usize, _: usize, _: usize) -> bool 
     game.card_cost(card) != 1
 }
 fn kun_lun(game: &mut Game<'_>, _: usize, card: usize, _: usize) {
-    game.cards[card].permanent += 2;
+    game.add_power(card, 2, game.cards[card].owner);
 }
 fn kyln(game: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
     game.turn <= 4
@@ -288,9 +288,10 @@ fn lab(game: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
     !(3..=5).contains(&game.turn)
 }
 fn lake(game: &mut Game<'_>, lane: usize) {
-    for &id in &game.lanes[lane].cards {
+    for index in 0..game.lanes[lane].cards.len() {
+        let id = game.lanes[lane].cards[index];
         if game.cards[id].revealed && game.cards[id].cost == 1 {
-            game.cards[id].location_power += 2;
+            game.add_location_power(id, 2);
         }
     }
 }
@@ -301,9 +302,10 @@ fn madripoor(game: &mut Game<'_>, lane: usize) {
         .map(|&id| game.cards[id].cost)
         .max()
     {
-        for &id in &game.lanes[lane].cards {
+        for index in 0..game.lanes[lane].cards.len() {
+            let id = game.lanes[lane].cards[index];
             if game.cards[id].cost == highest {
-                game.cards[id].permanent += 2;
+                game.add_power(id, 2, game.cards[id].owner);
             }
         }
     }

@@ -8,6 +8,10 @@ mod agent13;
 mod core_rules;
 mod meta_a1;
 mod meta_a2;
+mod meta_b1;
+mod meta_b2;
+mod meta_b3a;
+mod meta_b3b;
 mod recruit_a;
 mod recruit_b;
 mod representative;
@@ -29,7 +33,15 @@ const BASE_TOKENS: &[&str] = &[
 ];
 
 /// Token IDs, one slice per card-group module.
-static TOKEN_GROUPS: &[&[&str]] = &[BASE_TOKENS, meta_a1::TOKENS, meta_a2::TOKENS];
+static TOKEN_GROUPS: &[&[&str]] = &[
+    BASE_TOKENS,
+    meta_a1::TOKENS,
+    meta_a2::TOKENS,
+    meta_b1::TOKENS,
+    meta_b2::TOKENS,
+    meta_b3a::TOKENS,
+    meta_b3b::TOKENS,
+];
 
 /// Whether a card is a token, which decks may not contain.
 pub fn is_token(id: &str) -> bool {
@@ -81,11 +93,20 @@ pub fn deck_eligible_ids() -> &'static [&'static str] {
 
 pub type CardHook = fn(&mut Game, usize);
 pub type PlayHook = fn(&mut Game, usize, usize);
+/// Arguments: the guarding card, the card whose cost would change, its old and its new cost.
+pub type CostGuard = fn(&Game<'_>, usize, usize, i32, i32) -> bool;
 
 pub struct CardDef {
     pub id: &'static str,
     pub reveal: Option<CardHook>,
     pub ongoing: Option<CardHook>,
+    pub in_hand_ongoing: Option<CardHook>,
+    /// Ongoing effect evaluated after normal card and location contributions.
+    pub late_ongoing: Option<CardHook>,
+    /// Final hand-cost adjustment after ordinary location modifiers.
+    pub modify_final_cost: Option<fn(&Game<'_>, usize, i32) -> i32>,
+    /// Return false to block a proposed cost transition.
+    pub cost_guard: Option<CostGuard>,
     pub ongoing_ability: bool,
     pub extra_ongoing_runs: u8,
     pub reveal_repetitions: Option<fn(&Game<'_>, usize, usize) -> u8>,
@@ -103,6 +124,8 @@ pub struct CardDef {
     pub clear_reveal_state: Option<fn(&mut crate::game::Card)>,
     pub blocks_reveal: bool,
     pub prevents_destroy: bool,
+    /// Ongoing prohibition on additions not caused by plays or moves.
+    pub blocks_spawns: bool,
     pub locks_lane: bool,
     pub immune_destroy_move: bool,
     pub draw_turn: Option<u8>,
@@ -114,10 +137,15 @@ impl CardDef {
             id,
             reveal: None,
             ongoing: None,
+            in_hand_ongoing: None,
+            late_ongoing: None,
+            modify_final_cost: None,
+            cost_guard: None,
             ongoing_ability: false,
             extra_ongoing_runs: 0,
             reveal_repetitions: None,
             on_play: None,
+            blocks_spawns: false,
             end_turn: None,
             blocks_reveal: false,
             prevents_destroy: false,
@@ -236,7 +264,15 @@ static BASE: &[CardDef] = &[
 ];
 
 /// Rule descriptors, one slice per card-group module.
-static GROUPS: &[&[CardDef]] = &[BASE, meta_a1::CARDS, meta_a2::CARDS];
+static GROUPS: &[&[CardDef]] = &[
+    BASE,
+    meta_a1::CARDS,
+    meta_a2::CARDS,
+    meta_b1::CARDS,
+    meta_b2::CARDS,
+    meta_b3a::CARDS,
+    meta_b3b::CARDS,
+];
 
 /// Every registered card rule.
 pub fn registry() -> impl Iterator<Item = &'static CardDef> {

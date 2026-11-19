@@ -79,7 +79,7 @@ fn resolve_watch(g: &mut Game, id: usize, expect: bool, power: i32) {
         if turn == g.turn {
             let played = g.played_at(owner, lane);
             if played == expect {
-                g.cards[id].permanent += power;
+                g.add_power(id, power, owner);
             }
         } else {
             g.cards[id].watches.push((turn, lane));
@@ -94,7 +94,7 @@ fn jessica_end(g: &mut Game, id: usize) {
 }
 fn medusa(g: &mut Game, id: usize) {
     if g.cards[id].lane == Some(1) {
-        g.cards[id].permanent += 3;
+        g.add_power(id, 3, g.cards[id].owner);
     }
 }
 fn sentinel(g: &mut Game, id: usize) {
@@ -123,9 +123,13 @@ fn iron_man(g: &mut Game, id: usize) {
 }
 fn kazar(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
-    for card in &mut g.cards {
-        if card.lane.is_some() && card.revealed && card.owner == owner && card.cost == 1 {
-            card.ongoing += 1;
+    for other in 0..g.cards.len() {
+        if g.cards[other].lane.is_some()
+            && g.cards[other].revealed
+            && g.cards[other].owner == owner
+            && g.cards[other].cost == 1
+        {
+            g.add_ongoing_power(other, 1, owner);
         }
     }
 }
@@ -149,9 +153,13 @@ fn fantastic(g: &mut Game, id: usize) {
 }
 fn blue_marvel(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
-    for (other, card) in g.cards.iter_mut().enumerate() {
-        if other != id && card.lane.is_some() && card.revealed && card.owner == owner {
-            card.ongoing += 1;
+    for other in 0..g.cards.len() {
+        if other != id
+            && g.cards[other].lane.is_some()
+            && g.cards[other].revealed
+            && g.cards[other].owner == owner
+        {
+            g.add_ongoing_power(other, 1, owner);
         }
     }
 }
@@ -164,16 +172,16 @@ fn angela(g: &mut Game, id: usize, played: usize) {
     if g.played_cards_at(g.cards[id].owner, lane)
         .any(|card| card == played)
     {
-        g.cards[id].permanent += 1;
+        g.add_power(id, 1, g.cards[id].owner);
     }
 }
 fn bishop(g: &mut Game, id: usize, played: usize) {
     if g.cards[id].owner == g.cards[played].owner {
-        g.cards[id].permanent += 1;
+        g.add_power(id, 1, g.cards[id].owner);
     }
 }
 fn kraven(g: &mut Game, id: usize, _moved: usize) {
-    g.cards[id].permanent += 2;
+    g.add_power(id, 2, g.cards[id].owner);
 }
 fn carnage(g: &mut Game, id: usize) {
     let lane = g.cards[id].lane.unwrap();
@@ -187,7 +195,7 @@ fn carnage(g: &mut Game, id: usize) {
         .collect();
     for victim in victims {
         if g.destroy_card(victim) {
-            g.cards[id].permanent += 2;
+            g.add_power(id, 2, owner);
         }
     }
 }

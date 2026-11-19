@@ -101,14 +101,15 @@ fn namor(g: &mut Game, id: usize) {
         .iter()
         .any(|&other| other != id && g.cards[other].revealed && g.cards[other].owner == owner)
     {
-        g.cards[id].ongoing += 5;
+        g.add_ongoing_power(id, 5, owner);
     }
 }
 fn nova(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
-    for card in &mut g.cards {
-        if card.lane.is_some() && card.revealed && card.owner == owner {
-            card.permanent += 1;
+    for other in 0..g.cards.len() {
+        if g.cards[other].lane.is_some() && g.cards[other].revealed && g.cards[other].owner == owner
+        {
+            g.add_power(other, 1, owner);
         }
     }
 }
@@ -119,28 +120,32 @@ fn punisher(g: &mut Game, id: usize) {
         .iter()
         .filter(|&&other| g.cards[other].revealed && g.cards[other].owner != card.owner)
         .count();
-    g.cards[id].ongoing += count as i32;
+    g.add_ongoing_power(id, count as i32, g.cards[id].owner);
 }
 fn prediction(g: &mut Game, id: usize) {
     let card = &g.cards[id];
     if g.played_at(1 - card.owner, card.lane.unwrap()) {
-        g.cards[id].permanent += 4;
+        g.add_power(id, 4, g.cards[id].owner);
     }
 }
 fn spectrum(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
-    for card in &mut g.cards {
-        if card.lane.is_some() && card.revealed && card.owner == owner && card.has_ongoing() {
-            card.permanent += 2;
+    for other in 0..g.cards.len() {
+        if g.cards[other].lane.is_some()
+            && g.cards[other].revealed
+            && g.cards[other].owner == owner
+            && g.cards[other].has_ongoing()
+        {
+            g.add_power(other, 2, owner);
         }
     }
 }
 fn spider_woman(g: &mut Game, id: usize) {
     let lane = g.cards[id].lane;
     let owner = g.cards[id].owner;
-    for card in &mut g.cards {
-        if card.lane == lane && card.revealed && card.owner != owner {
-            card.reduce_power(1);
+    for other in 0..g.cards.len() {
+        if g.cards[other].lane == lane && g.cards[other].revealed && g.cards[other].owner != owner {
+            g.add_power(other, -1, owner);
         }
     }
 }
@@ -155,12 +160,12 @@ fn squirrel_girl(g: &mut Game, id: usize) {
 }
 fn strong_guy(g: &mut Game, id: usize) {
     if g.players[g.cards[id].owner].hand.len() <= 1 {
-        g.cards[id].ongoing += 6;
+        g.add_ongoing_power(id, 6, g.cards[id].owner);
     }
 }
 fn collector(g: &mut Game, id: usize, seat: usize) {
     if g.cards[id].owner == seat {
-        g.cards[id].permanent += 1;
+        g.add_power(id, 1, seat);
     }
 }
 fn wolfsbane(g: &mut Game, id: usize) {
@@ -172,14 +177,18 @@ fn wolfsbane(g: &mut Game, id: usize) {
             other != id && g.cards[other].revealed && g.cards[other].owner == card.owner
         })
         .count();
-    g.cards[id].permanent += 2 * count as i32;
+    g.add_power(id, 2 * count as i32, g.cards[id].owner);
 }
 fn yellowjacket(g: &mut Game, id: usize) {
     let lane = g.cards[id].lane;
     let owner = g.cards[id].owner;
-    for (other, card) in g.cards.iter_mut().enumerate() {
-        if other != id && card.lane == lane && card.revealed && card.owner == owner {
-            card.reduce_power(1);
+    for other in 0..g.cards.len() {
+        if other != id
+            && g.cards[other].lane == lane
+            && g.cards[other].revealed
+            && g.cards[other].owner == owner
+        {
+            g.add_power(other, -1, owner);
         }
     }
 }
@@ -230,7 +239,7 @@ fn mr_sinister(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
     let lane = g.cards[id].lane.unwrap();
     let clone = g.create_card("SinisterClone", owner);
-    g.cards[clone].permanent = g.cards[id].permanent;
+    g.set_power(clone, g.cards[id].permanent, owner);
     g.add_card(clone, lane, owner, true);
 }
 fn white_queen(g: &mut Game, id: usize) {
@@ -266,7 +275,7 @@ fn regenerate(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
     let targets: Vec<_> = (0..3).filter(|&lane| g.can_add(id, lane, owner)).collect();
     if !targets.is_empty() {
-        g.cards[id].permanent += 2;
+        g.add_power(id, 2, owner);
         let choice = g.rng.borrow_mut().randbelow(targets.len());
         g.add_card(id, targets[choice], owner, true);
     }
@@ -281,7 +290,7 @@ fn discard_wolverine(g: &mut Game, id: usize) {
 fn zombie_giant_man(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
     if let Some(horde) = g.horde(g.cards[id].lane.unwrap(), owner, 2) {
-        g.cards[id].permanent += g.cards[horde].power();
+        g.add_power(id, g.cards[horde].power(), owner);
     }
 }
 fn zombie_blade(g: &mut Game, id: usize) {
@@ -293,10 +302,7 @@ fn zombie_blade(g: &mut Game, id: usize) {
         let hand = &g.players[1 - owner].hand;
         if !hand.is_empty() {
             let target = hand[g.rng.borrow_mut().randbelow(hand.len())];
-            if g.cards[target].can_reduce_power() {
-                g.cards[target].reduce_power(1);
-                g.cards[horde].permanent += 1;
-            }
+            g.steal_power(target, horde, 1, owner);
         }
     }
 }
