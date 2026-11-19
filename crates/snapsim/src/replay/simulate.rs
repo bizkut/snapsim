@@ -122,7 +122,7 @@ pub(super) fn simulate(
                 history
                     .lab_spent
                     .contains(&(i, start.location_turns[i].clone(), seat))
-            })) as Box<dyn std::any::Any>)
+            })) as Box<dyn crate::game::CardState>)
         } else {
             def.initial_state.map(|init| init())
         };
@@ -164,6 +164,7 @@ pub(super) fn simulate(
             .filter_map(|id| locations::get(id))
             .collect(),
         turn: start.turn as u8,
+        is_wait_for_staging: true,
         total_turns: start.total_turns.as_u64().unwrap_or(6) as u8,
         reveal_priority: None,
         played: Default::default(),
@@ -254,7 +255,10 @@ pub(super) fn simulate(
                         && game.cards[s].turn_played < before
                 })
                 .collect();
-            if !sources.iter().any(|&s| game.cards[s].def.blocks_reveal) {
+            if !sources
+                .iter()
+                .any(|&s| game.cards[s].ability_def().blocks_reveal)
+            {
                 let active = game.lanes[lane].revealed
                     && game.lanes[lane].revealed_turn.unwrap_or(0) <= before;
                 let base = if active {
@@ -268,14 +272,16 @@ pub(super) fn simulate(
                     1
                 };
                 for &source in &sources {
-                    if let Some(repetitions) = game.cards[source].def.reveal_repetitions {
+                    if let Some(repetitions) = game.cards[source].ability_def().reveal_repetitions {
                         let extra: usize = sources
                             .iter()
                             .filter(|&&other| {
                                 other != source
                                     && game.cards[other].owner == game.cards[source].owner
                             })
-                            .map(|&other| game.cards[other].def.extra_ongoing_runs as usize)
+                            .map(|&other| {
+                                game.cards[other].ability_def().extra_ongoing_runs as usize
+                            })
                             .sum();
                         runs += repetitions(&game, source, index) as usize * base * (1 + extra);
                     }

@@ -44,8 +44,9 @@ fn restores_lemuria_face_down_and_lab_flags() {
     assert_eq!(
         game.lanes[1]
             .state
-            .as_ref()
+            .as_deref()
             .unwrap()
+            .as_any()
             .downcast_ref::<[bool; 2]>(),
         Some(&[true, false])
     );

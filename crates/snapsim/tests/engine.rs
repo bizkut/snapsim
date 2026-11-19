@@ -186,3 +186,113 @@ fn doubling_uses_individual_stat_changes_not_net_power() {
     g.add_cost(enemy, -1, 0);
     assert_eq!(g.double_cost_reductions(enemy, 1), 0);
 }
+
+#[test]
+fn copied_text_keeps_identity_and_can_resolve() {
+    let mut rng = PythonRandom::seed(9);
+    let mut g = game(&mut rng);
+    let target = play(&mut g, "MistyKnight", 0, 1);
+    let source = g.create_card("Medusa", 0);
+    assert!(g.copy_text(target, source, true));
+    assert_eq!(g.cards[target].def.id, "MistyKnight");
+    assert_eq!(g.cards[target].ability_def().id, "Medusa");
+    assert_eq!(g.cards[target].permanent, 6);
+    assert!(!g.copy_text(target, source, true));
+}
+
+#[test]
+fn morph_retains_or_discards_permanent_modifiers() {
+    let mut rng = PythonRandom::seed(10);
+    let mut g = game(&mut rng);
+    let card = g.create_card("MistyKnight", 0);
+    g.add_power(card, 2, 0);
+    g.set_power(card, 9, 0);
+    g.set_cost(card, 9, 0);
+    assert!(g.transform_card(card, "Hulk"));
+    assert_eq!(g.cards[card].def.id, "Hulk");
+    assert_eq!(g.cards[card].morphed_from, Some("MistyKnight"));
+    assert_eq!(g.cards[card].permanent, 16);
+    assert_eq!(g.cards[card].cost, 6);
+    assert!(g.transform_card_without_modifiers(card, "Shocker"));
+    assert_eq!(g.cards[card].permanent, 4);
+}
+
+#[test]
+fn snap_and_extended_quickdraw_are_turn_scoped() {
+    let mut rng = PythonRandom::seed(11);
+    let mut g = game(&mut rng);
+    let card = g.create_card("MistyKnight", 0);
+    g.turn = 3;
+    g.cards[card].drawn_turn = Some(2);
+    assert!(!g.is_quickdraw_active(card));
+    g.cards[card].draw_extends_quickdraw = true;
+    assert!(g.is_quickdraw_active(card));
+    g.players[1].snapped_turns.push(3);
+    assert!(g.snapped_this_turn());
+    g.turn = 4;
+    assert!(!g.snapped_this_turn());
+    assert!(!g.is_quickdraw_active(card));
+}
+
+#[test]
+fn literal_deck_top_differs_from_eligible_draw() {
+    let mut rng = PythonRandom::seed(12);
+    let mut g = game(&mut rng);
+    let domino = g.create_card("Domino", 0);
+    let other = g.create_card("MistyKnight", 0);
+    g.players[0].deck = vec![domino, other];
+    g.turn = 1;
+    assert_eq!(g.top_card(0), Some(domino));
+    g.draw(0);
+    assert!(g.players[0].hand.contains(&other));
+    assert_eq!(g.top_card(0), Some(domino));
+}
+
+#[test]
+fn fork_clones_dynamic_state_and_independent_rng() {
+    let mut rng = PythonRandom::seed(13);
+    let mut game = game(&mut rng);
+    let card = game.create_card("MistyKnight", 0);
+    game.cards[card].state = Some(Box::new(vec![1u8, 2]));
+    game.lanes[0].state = Some(Box::new([true, false]));
+    let mut branch_rng = game.fork_rng();
+    let mut fork = game.fork(branch_rng.as_mut());
+    fork.cards[card]
+        .state
+        .as_deref_mut()
+        .unwrap()
+        .as_any_mut()
+        .downcast_mut::<Vec<u8>>()
+        .unwrap()
+        .push(3);
+    fork.lanes[0]
+        .state
+        .as_deref_mut()
+        .unwrap()
+        .as_any_mut()
+        .downcast_mut::<[bool; 2]>()
+        .unwrap()[0] = false;
+    assert_eq!(
+        game.cards[card]
+            .state
+            .as_deref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Vec<u8>>()
+            .unwrap(),
+        &[1, 2]
+    );
+    assert_eq!(
+        game.lanes[0]
+            .state
+            .as_deref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<[bool; 2]>()
+            .unwrap(),
+        &[true, false]
+    );
+    let branch_roll = fork.rng.borrow_mut().randbelow(1000);
+    let original_roll = game.rng.borrow_mut().randbelow(1000);
+    assert_eq!(branch_roll, original_roll);
+}

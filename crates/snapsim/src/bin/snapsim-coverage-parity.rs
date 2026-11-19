@@ -19,7 +19,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers: 1,
     };
     for (index, line) in io::stdin().lock().lines().enumerate() {
-        let position = Position::from_json(&line?)?;
+        let line = line?;
+        if snapsim::trace::mentions_beyond_reference(&serde_json::from_str(&line)?) {
+            println!("{}", json!({"beyond_reference": true}));
+            continue;
+        }
+        let position = Position::from_json(&line)?;
         let coverage = coverage(&position);
         let incomplete = coverage
             .as_object()

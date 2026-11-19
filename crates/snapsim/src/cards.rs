@@ -12,6 +12,7 @@ mod meta_b1;
 mod meta_b2;
 mod meta_b3a;
 mod meta_b3b;
+mod meta_d;
 mod recruit_a;
 mod recruit_b;
 mod representative;
@@ -41,6 +42,7 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_b2::TOKENS,
     meta_b3a::TOKENS,
     meta_b3b::TOKENS,
+    meta_d::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -91,8 +93,16 @@ pub fn deck_eligible_ids() -> &'static [&'static str] {
     }
 }
 
+/// Whether a card has rules here but not in the frozen Python reference (its deck cards and
+/// base tokens). The reference treated such cards as unsupported stand-ins, so parity gates
+/// report positions containing them as new content instead of comparing them.
+pub fn beyond_reference(id: &str) -> bool {
+    get(id).is_some() && !REFERENCE_IDS.contains(&id) && !BASE_TOKENS.contains(&id)
+}
+
 pub type CardHook = fn(&mut Game, usize);
 pub type PlayHook = fn(&mut Game, usize, usize);
+pub type PlayRequirement = fn(&Game<'_>, usize, usize, usize) -> bool;
 /// Arguments: the guarding card, the card whose cost would change, its old and its new cost.
 pub type CostGuard = fn(&Game<'_>, usize, usize, i32, i32) -> bool;
 
@@ -101,6 +111,10 @@ pub struct CardDef {
     pub reveal: Option<CardHook>,
     pub ongoing: Option<CardHook>,
     pub in_hand_ongoing: Option<CardHook>,
+    /// Refresh objective progress after all ongoing effects have run.
+    pub objective_update: Option<CardHook>,
+    /// Freeze readiness before any post-end-turn objective completes.
+    pub objective_freeze: Option<CardHook>,
     /// Ongoing effect evaluated after normal card and location contributions.
     pub late_ongoing: Option<CardHook>,
     /// Final hand-cost adjustment after ordinary location modifiers.
@@ -111,6 +125,8 @@ pub struct CardDef {
     pub extra_ongoing_runs: u8,
     pub reveal_repetitions: Option<fn(&Game<'_>, usize, usize) -> u8>,
     pub on_play: Option<PlayHook>,
+    /// Arguments: card, destination lane, playing seat.
+    pub can_play: Option<PlayRequirement>,
     pub end_turn: Option<CardHook>,
     pub on_move_here: Option<PlayHook>,
     pub on_move: Option<PlayHook>,
@@ -138,6 +154,8 @@ impl CardDef {
             reveal: None,
             ongoing: None,
             in_hand_ongoing: None,
+            objective_update: None,
+            objective_freeze: None,
             late_ongoing: None,
             modify_final_cost: None,
             cost_guard: None,
@@ -145,6 +163,7 @@ impl CardDef {
             extra_ongoing_runs: 0,
             reveal_repetitions: None,
             on_play: None,
+            can_play: None,
             blocks_spawns: false,
             end_turn: None,
             blocks_reveal: false,
@@ -272,6 +291,7 @@ static GROUPS: &[&[CardDef]] = &[
     meta_b2::CARDS,
     meta_b3a::CARDS,
     meta_b3b::CARDS,
+    meta_d::CARDS,
 ];
 
 /// Every registered card rule.

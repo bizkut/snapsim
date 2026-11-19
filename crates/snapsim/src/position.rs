@@ -79,6 +79,9 @@ pub struct Position {
     pub pending_power: i32,
     #[serde(default)]
     pub deck_count: Option<usize>,
+    /// Per-seat snap state for the current turn, when observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapped_this_turn: Option<[bool; 2]>,
 }
 
 static CARD_DATA: LazyLock<HashMap<String, data::CardData>> = LazyLock::new(|| {
@@ -186,6 +189,9 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         .ok_or_else(|| format!("unknown card ID {id:?}"))?;
     Ok(Card {
         def,
+        override_ability: None,
+        morphed_from: None,
+        morphed_from_entity: None,
         owner,
         cost: row.cost,
         ongoing_cost: 0,
@@ -200,6 +206,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         abilities_removed: false,
         repeating: false,
         move_turns: Vec::new(),
+        draw_extends_quickdraw: false,
         merged_to: None,
         drawn_turn: None,
         turn_played: 0,
@@ -361,7 +368,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             multiplier: [1; 2],
             state: src
                 .ottos_lab_spent
-                .map(|spent| Box::new(spent) as Box<dyn std::any::Any>)
+                .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>)
                 .or_else(|| def.initial_state.map(|init| init())),
         }
     });
@@ -380,6 +387,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             .map(|id| location_def(id).expect("registered location"))
             .collect(),
         turn: position.turn,
+        is_wait_for_staging: true,
         reveal_priority: priority,
         total_turns: position.total_turns,
         played: Default::default(),
@@ -396,6 +404,13 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     // Python's Game._from_position: revealed lanes count as already scheduled, and the
     // remaining reveals follow the hidden lanes in lane order.
     let mut order: Vec<usize> = (0..3).filter(|&lane| game.lanes[lane].revealed).collect();
+    if let Some(snapped) = position.snapped_this_turn {
+        for (seat, did_snap) in snapped.into_iter().enumerate() {
+            if did_snap {
+                game.players[seat].snapped_turns.push(position.turn);
+            }
+        }
+    }
     game.current_location = order.len();
     order.extend((0..3).filter(|&lane| !game.lanes[lane].revealed));
     game.location_reveal_order = [order[0], order[1], order[2]];
@@ -494,7 +509,10 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                         && game.cards[s].turn_played < before
                 })
                 .collect();
-            if sources.iter().any(|&s| game.cards[s].def.blocks_reveal) {
+            if sources
+                .iter()
+                .any(|&s| game.cards[s].ability_def().blocks_reveal)
+            {
                 continue;
             }
             let base = if active {
@@ -508,13 +526,13 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 1
             };
             for &source in &sources {
-                if let Some(repetitions) = game.cards[source].def.reveal_repetitions {
+                if let Some(repetitions) = game.cards[source].ability_def().reveal_repetitions {
                     let extra: usize = sources
                         .iter()
                         .filter(|&&other| {
                             other != source && game.cards[other].owner == game.cards[source].owner
                         })
-                        .map(|&other| game.cards[other].def.extra_ongoing_runs as usize)
+                        .map(|&other| game.cards[other].ability_def().extra_ongoing_runs as usize)
                         .sum();
                     runs += repetitions(&game, source, id) as usize * base * (1 + extra);
                 }
@@ -572,7 +590,7 @@ pub fn state_json(game: &Game<'_>) -> Value {
     };
     json!({ "turn": game.turn, "total_turns": game.total_turns, "priority": game.reveal_priority,
         "players": game.players.iter().map(|p| json!({"energy": p.energy, "pending_power": p.next_play_power, "hand": p.hand.iter().map(|&id| card(id)).collect::<Vec<_>>(), "deck": p.deck.iter().map(|&id| game.cards[id].def.id).collect::<Vec<_>>() })).collect::<Vec<_>>(),
-        "locations": game.lanes.iter().map(|l| json!({"id": l.observed_id.as_deref().unwrap_or(l.def.id), "revealed": l.revealed, "revealed_turn": l.revealed_turn, "spent": l.state.as_ref().and_then(|s| s.downcast_ref::<[bool;2]>()), "cards": l.cards.iter().map(|&id| card(id)).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+        "locations": game.lanes.iter().map(|l| json!({"id": l.observed_id.as_deref().unwrap_or(l.def.id), "revealed": l.revealed, "revealed_turn": l.revealed_turn, "spent": l.state.as_deref().and_then(|s| s.as_any().downcast_ref::<[bool;2]>()), "cards": l.cards.iter().map(|&id| card(id)).collect::<Vec<_>>() })).collect::<Vec<_>>(),
         "pending_reveals": game.delayed_reveals.iter().map(|p| p.iter().map(|&id| json!([game.cards[id].def.id, game.cards[id].lane])).collect::<Vec<_>>()).collect::<Vec<_>>(),
         "played": game.played.iter().map(|p| p.iter().map(|&(id, lane)| json!([game.cards[id].def.id, lane])).collect::<Vec<_>>()).collect::<Vec<_>>() })
 }

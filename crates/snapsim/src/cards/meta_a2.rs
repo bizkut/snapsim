@@ -124,8 +124,8 @@ fn mother_askani(game: &mut Game<'_>, id: usize) {
         return;
     };
     if let Some(copy) = game.copy_card_to_hand(first, owner) {
-        gain_power(game, copy, 2, id);
-        change_cost(game, copy, -1, id);
+        gain_power(game, copy, 2, owner);
+        change_cost(game, copy, -1, owner);
         game.notify_hand_added(owner);
     }
 }
@@ -152,11 +152,13 @@ fn change_cost(game: &mut Game<'_>, card: usize, amount: i32, source: usize) {
 }
 
 fn steal_power(game: &mut Game<'_>, victims: &[usize], card: usize, amount: i32) {
-    game.steal_power_many(victims, card, amount, card);
+    let owner = game.cards[card].owner;
+    game.steal_power_many(victims, card, amount, owner);
 }
 
 fn ongoing_power(game: &mut Game<'_>, card: usize, amount: i32) {
-    game.add_ongoing_power(card, amount, card);
+    let owner = game.cards[card].owner;
+    game.add_ongoing_power(card, amount, owner);
 }
 
 fn laufey(game: &mut Game<'_>, id: usize) {
@@ -244,7 +246,8 @@ fn venom(game: &mut Game<'_>, id: usize) {
         }
     }
     if total != 0 {
-        gain_power(game, id, total, id);
+        let owner = game.cards[id].owner;
+        gain_power(game, id, total, owner);
     }
 }
 
@@ -385,7 +388,7 @@ mod tests {
         let mut g = game(&mut rng);
         let card = place(&mut g, "ArnimZola", 0, 1, true);
         let target = place(&mut g, "Hulk", 0, 1, true);
-        g.add_power(target, 3, card);
+        g.add_power(target, 3, 0);
         let power = g.cards[target].permanent;
         arnim_zola(&mut g, card);
         assert_eq!(g.cards[target].lane, None);
@@ -418,7 +421,7 @@ mod tests {
         let card = place(&mut g, "MotherAskani", 0, 1, true);
         g.players[0].hand.clear();
         let first = g.create_card("Hulk", 0);
-        g.add_power(first, 3, card);
+        g.add_power(first, 3, 0);
         g.players[0].hand.push(first);
         mother_askani(&mut g, card);
         let copy = g.players[0].hand[1];
@@ -437,7 +440,7 @@ mod tests {
         let mut rng = PythonRandom::seed(9);
         let mut g = game(&mut rng);
         let card = place(&mut g, "Nimrod", 0, 1, true);
-        g.add_power(card, 3, card);
+        g.add_power(card, 3, 0);
         let power = g.cards[card].permanent;
         assert!(g.destroy_card(card));
         for lane in [0, 2] {

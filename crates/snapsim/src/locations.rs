@@ -36,7 +36,7 @@ pub struct LocationDef {
     pub energy_bonus: Option<EnergyHook>,
     pub modify_cost: Option<CostHook>,
     pub minimum_turns: u8,
-    pub initial_state: Option<fn() -> Box<dyn std::any::Any>>,
+    pub initial_state: Option<fn() -> Box<dyn crate::game::CardState>>,
 }
 
 pub(crate) const fn location(

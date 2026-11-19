@@ -376,9 +376,19 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     } else {
         options["mode"].clone()
     };
-    Ok(
-        json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode}),
-    )
+    let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    if let (Some(mine), Some(theirs)) = (
+        local["snapped_turns"].as_array(),
+        opponent["snapped_turns"].as_array(),
+    ) {
+        position["snapped_this_turn"] = json!([
+            mine.iter().any(|v| v.as_i64() == Some(turn)),
+            theirs.iter().any(|v| v.as_i64() == Some(turn))
+        ]);
+    } else if let Some(snapped) = options.get("snapped_this_turn") {
+        position["snapped_this_turn"] = snapped.clone();
+    }
+    Ok(position)
 }
 
 #[cfg(test)]

@@ -8,6 +8,8 @@ const M: usize = 397;
 /// Implementations define their own stream; parity uses `PythonRandom`.
 pub trait GameRng {
     fn getrandbits(&mut self, bits: u32) -> u128;
+    /// Clone the generator state for an independent simulation.
+    fn clone_rng(&self) -> Box<dyn GameRng>;
     fn random(&mut self) -> f64;
     fn randbelow(&mut self, n: usize) -> usize;
     fn randrange(&mut self, start: i64, stop: i64, step: i64) -> i64;
@@ -247,6 +249,9 @@ impl PythonRandom {
 }
 
 impl GameRng for PythonRandom {
+    fn clone_rng(&self) -> Box<dyn GameRng> {
+        Box::new(self.clone())
+    }
     fn getrandbits(&mut self, bits: u32) -> u128 {
         PythonRandom::getrandbits(self, bits)
     }

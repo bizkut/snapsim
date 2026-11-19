@@ -42,3 +42,14 @@ pub fn first_divergence(expected: &Value, actual: &Value) -> Option<Divergence> 
     }
     compare(Some(expected), Some(actual), "$")
 }
+
+/// Whether any string in `value` names a card that has rules here but not in the frozen
+/// reference (`cards::beyond_reference`); parity gates report such records as new content.
+pub fn mentions_beyond_reference(value: &Value) -> bool {
+    match value {
+        Value::String(text) => crate::cards::beyond_reference(text),
+        Value::Array(items) => items.iter().any(mentions_beyond_reference),
+        Value::Object(fields) => fields.values().any(mentions_beyond_reference),
+        _ => false,
+    }
+}

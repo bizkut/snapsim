@@ -1,6 +1,6 @@
 # snapsim
 
-The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (84 deck cards and 10 tokens) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`). Before Python was retired, every part matched it on the gates below; the one deliberate difference is that position validation rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
+The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (143 deck cards and 20 tokens, skills and spells) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; the cards added since come from the game client's own rule definitions. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
 ## Command line
 
@@ -24,8 +24,16 @@ The engine exposes location replacement, delayed reveal scheduling, location cos
 ## Adding content
 
 1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and list it in that module's descriptor slice (cards; add a new module's `CARDS` and `TOKENS` slices to `cards::GROUPS` and `cards::TOKEN_GROUPS`) or in `locations::REGISTRY`. Tokens, which decks may not contain, go in the module's `TOKENS`. Use the catalog's current printed stats; do not invent stand-in rules.
-2. Add focused boundary tests. For a random effect, test seeds and the order of random calls. New rules have no Python counterpart: check them against real matches that contain the card or location with `snapsim-replaycheck`.
-3. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and the Python parity gates below. Gates for unchanged content must still pass. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
+2. Take behavior from the Android client (59.15.1), not from card text: the card's ability definitions and the methods they run, including which candidates a random choice draws from and how many rolls it makes (using `game.rng`). Cite the client method and address in a comment. Never commit client binaries, dumps or decompiled code.
+3. Add focused boundary tests. For a random effect, test seeds and the order of random calls. New rules have no Python counterpart: check them against real matches that contain the card or location with `snapsim-replaycheck`.
+4. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `parity/gates.sh`. Gates for unchanged content must still pass. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
+
+Known approximations of client rules:
+
+* Random choices use the client's candidate set and number and order of rolls, but draw from `game.rng`; the client's own random stream is not reproduced.
+* Effects that create random cards or locations draw only from implemented ones; the client draws from its full pools. Scarlet Witch Queen of Chaos therefore stays unregistered until every skill in her pool is implemented.
+* Nico Minoru's location spell picks uniformly, while the client weights the pick (`GetRandomLocationDefId`). Merging of power from the same source, the order of conditional Ongoing effects that depend on each other, and gaps left by cards that cannot shift are not modelled.
+* Activate and Move player actions are not implemented yet, so cards that need them (Karima Shapandar, Kid Omega, King Eitri, Symbiote Spider-Man, Zombie Mister Fantastic, Spider-Man Brand New Day, Jeff the Baby Dolphin) remain unsupported.
 
 ## Advisor and Python binding
 
@@ -129,19 +137,30 @@ The Python simulator (`Marvel-snap-simulator`, branch `stronger-advice` in the `
 
 Registering new cards changes `cards::deck_eligible_ids()`, which Agent 13 draws from and position sampling uses. Gates therefore pin it to `parity/reference-pool.json`, the frozen reference's 84 deck cards: the parity binaries call `cards::use_reference_pool()` themselves, and the CLI, `snapsim-replaycheck` and the Python module do the same under `SNAPSIM_REFERENCE_POOL=1`. Export that variable for every Python-side gate script.
 
+Two kinds of record are reported rather than compared:
+
+* New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
+* Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of one is listed with its exact first-divergence path and reason in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. The changes:
+  * Horde grows every owned Zombie Horde (`ZombieHordeAbilityDef::GrowZombieHorde`), not just the first; it changes one spread game.
+  * A card whose text was removed no longer reacts to events.
+  * Start-of-turn, game-start, draw and Empower events also reach on-event hooks of cards in hand and deck.
+  * `Game::top_card` is the literal top card (`Deck::GetTopCard`), not the next card `draw` would take.
+
+`parity/gates.sh` runs every gate in order and stops at the first failure (inputs: the recorder outputs listed in its header).
+
 | Gate | Command (oracle → Rust check) | Result on the integrated build |
 |---|---|---|
-| Full games | `parity/record.py` → `snapsim-parity`, per policy | 1,000 spread and 1,000 margin games identical |
+| Full games | `parity/record.py` → `snapsim-parity`, per policy | 1,000 margin games identical; 999 spread games identical and 1 known divergence |
 | Position building | `parity/position_record.py` → `snapsim-position-parity` | 2,400 position–seed pairs |
-| Advisor | `parity/record_advisor.py` → `snapsim-advisor-parity` | 898 records (449 per playout), 0 mismatches |
-| Coverage, priors, strict advice | `parity/coverage_parity.py snapsim-coverage-parity POSITIONS ADVISOR` | 3,307 positions, plus 9 approximate edge positions |
+| Advisor | `parity/record_advisor.py` → `snapsim-advisor-parity` | 834 records, 0 mismatches; 64 new-content records |
+| Coverage, priors, strict advice | `parity/coverage_parity.py snapsim-coverage-parity POSITIONS ADVISOR` | 2,603 positions plus 9 approximate edge positions; 704 new-content positions |
 | Position validation | `parity/validation_record.py` → `snapsim-validation-parity` | 4,118 accepted and 2,932 rejected alike; 337 out-of-range rejected (see above) |
 | SNAP adapter and watches | `parity/snap_record.py RECORDINGS` → `snapsim-snap-parity`; `parity/snap_binding.py MODULE ORACLE` | 1,047 recorded frames (190 positions, 857 errors), core and Python module |
-| Deck codes and deck files | `parity/compare_deckcodes.py snapsim-deckcodes-parity` | 40/40 cases |
+| Deck codes and deck files | `SNAPSIM_BIN=snapsim parity/compare_deckcodes.py snapsim-deckcodes-parity` | 31/31 cases; 9 new-content cases |
 | Compare and benchmark harness | `parity/compare_harness.py snapsim-compare-parity` | 100 Recruit deal pairs, 9 harness configurations |
 | Deck builder | `SNAPSIM_PY_PATH=MODULE parity/deckbuild_compare.py`; again with `SNAPSIM_COMPLETE_ONLY=1` | 12 cancellation cut-offs and 1 complete run identical |
 | Command line | `SNAPSIM_BIN=snapsim parity/cli_compare.py`, `cli_deckbuild.py`, `cli_snap.py` | 7 + 1 + 2 cases |
-| Replay checker | `parity/replay_compare.py --python PY --reference REF --rust snapsim-replaycheck RECORDINGS` | 12 recordings byte-identical, one at a time and together; the six Recruit matches give 26 consistent, 0 inconsistent, 5 not checkable |
+| Replay checker | `parity/replay_compare.py --python PY --reference REF --rust snapsim-replaycheck RECORDINGS` | 10 recordings byte-identical, one at a time and together; the 2 recordings with new content replay 4 consistent, 0 inconsistent, 8 not checkable turns |
 
 The Python suite of the frozen checkout (360 tests) also passes against this module.
 
@@ -165,4 +184,4 @@ PYTHONPATH=$SNAPSIM_REFERENCE \
   $SNAPSIM_PYTHON "$ROOT/parity/inventory.py"
 ```
 
-As of this commit it reports 94 cards and 84 locations implemented, none remaining.
+As of this commit it reports 163 cards (the reference's 94 plus 69 from the client) and 84 locations implemented, none of the reference's remaining. Set `CARGO_TARGET_DIR` if the inventory binary was built elsewhere.

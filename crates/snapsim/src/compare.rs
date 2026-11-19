@@ -136,8 +136,8 @@ pub fn search_position(
         }
         let ottos_lab_spent = if lane.revealed && lane.def.id == "OttosLab" {
             lane.state
-                .as_ref()
-                .and_then(|state| state.downcast_ref::<[bool; 2]>())
+                .as_deref()
+                .and_then(|state| state.as_any().downcast_ref::<[bool; 2]>())
                 .map(|spent| [spent[seat], spent[opponent]])
         } else {
             None
@@ -188,6 +188,12 @@ pub fn search_position(
         mode: mode.map(str::to_owned),
         pending_power: player.next_play_power,
         deck_count: None,
+        snapped_this_turn: (player.snapped_turns.contains(&game.turn)
+            || other.snapped_turns.contains(&game.turn))
+        .then_some([
+            player.snapped_turns.contains(&game.turn),
+            other.snapped_turns.contains(&game.turn),
+        ]),
     }
 }
 

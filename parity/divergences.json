@@ -1,0 +1,10 @@
+[
+  {
+    "policy": "spread",
+    "seed": 20261743,
+    "path": "$.turns[2].powers[2][0]",
+    "expected": 5,
+    "actual": 6,
+    "reason": "Horde grows every owned Zombie Horde, as the client's ZombieHordeAbilityDef::GrowZombieHorde (0x7e0f96c) does; the reference grew only the first. Oscorp Tower switched a Horde to player 0, who then had two."
+  }
+]

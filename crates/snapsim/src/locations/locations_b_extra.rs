@@ -182,8 +182,9 @@ fn ottos_lab(game: &mut Game<'_>, lane: usize, card: usize) {
     let owner = game.cards[card].owner;
     let spent = game.lanes[lane]
         .state
-        .as_mut()
+        .as_deref_mut()
         .unwrap()
+        .as_any_mut()
         .downcast_mut::<[bool; 2]>()
         .unwrap();
     if spent[owner] {

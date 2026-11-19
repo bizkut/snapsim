@@ -293,7 +293,7 @@ fn werewolf(game: &mut Game<'_>, card: usize, played: usize) {
     if game.cards[card].abilities_removed
         || game.cards[played].owner != owner
         || game.cards[played].abilities_removed
-        || game.cards[played].def.reveal.is_none()
+        || game.cards[played].ability_def().reveal.is_none()
     {
         return;
     }

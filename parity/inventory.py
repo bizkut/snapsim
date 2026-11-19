@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """List registered and remaining reference rules; run with reference PYTHONPATH."""
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -8,7 +9,8 @@ from factories import implemented_cards
 from location import implemented_location_ids
 
 root = Path(__file__).resolve().parents[1]
-registered = json.loads(subprocess.check_output([root / 'target/release/snapsim-inventory'], text=True))
+target = Path(os.environ.get('CARGO_TARGET_DIR', root / 'target'))
+registered = json.loads(subprocess.check_output([target / 'release/snapsim-inventory'], text=True))
 reference = {'cards': set(implemented_cards()), 'locations': set(implemented_location_ids())}
 for kind in ('cards', 'locations'):
     installed = set(registered[kind])

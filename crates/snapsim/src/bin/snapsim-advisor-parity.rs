@@ -21,12 +21,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = env::args().nth(1).ok_or("expected corpus path")?;
     let mut count = 0;
     let mut mismatches = 0;
+    let mut new_content = 0;
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
         let record: Record = serde_json::from_str(&line)?;
+        count += 1;
+        if snapsim::trace::mentions_beyond_reference(&record.position) {
+            new_content += 1;
+            continue;
+        }
         let actual =
             snapsim::advise::advise_json(&record.position.to_string(), &record.options.to_string());
-        count += 1;
         match actual {
             Ok(result) => {
                 let value: Value = serde_json::from_str(&result)?;
@@ -47,7 +52,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!("{count} records, {mismatches} mismatches");
+    println!(
+        "{} records, {mismatches} mismatches; {new_content} records with cards beyond the reference not compared",
+        count - new_content
+    );
     if mismatches != 0 {
         process::exit(1);
     }
