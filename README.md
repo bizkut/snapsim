@@ -1,6 +1,6 @@
 # snapsim
 
-The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (84 deck cards and 10 tokens) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`); every part was proven identical to it before Python was retired. See "Python reference (frozen)" below.
+The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (84 deck cards and 10 tokens) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`). Before Python was retired, every part matched it on the gates below; the one deliberate difference is that position validation rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
 ## Command line
 
@@ -125,7 +125,7 @@ done
 
 ## Python reference (frozen)
 
-The Python simulator (`Marvel-snap-simulator`, branch `stronger-advice` in the `Marvel-snap-simulator-advice` worktree) is retired and receives no rule changes. It remains the oracle for the gates below. They prove that unchanged content still behaves exactly as it did there, and are expected to differ only where a rule is deliberately changed or added here. The scripts need that checkout on `PYTHONPATH` and a Python with `loguru` (Snapper-Assist's `.venv`). Run them from a temporary directory.
+The Python simulator (`Marvel-snap-simulator`, branch `stronger-advice` in the `Marvel-snap-simulator-advice` worktree) is retired and receives no rule changes. It remains the oracle for the gates below. They prove that unchanged content still behaves exactly as it did there, and are expected to differ only where a rule is deliberately changed or added here. The scripts need that checkout on `PYTHONPATH` and a Python with `loguru` (Snapper-Assist's `.venv`). Run them from a temporary directory. The table abbreviates paths: `parity/...` means `$ROOT/parity/...` and a bare binary means `$ROOT/target/release/<binary>`, where `ROOT` is this repository. Judge each gate by its exit status and success line, not through a pipeline that can hide a failure.
 
 | Gate | Command (oracle → Rust check) | Result on the integrated build |
 |---|---|---|
