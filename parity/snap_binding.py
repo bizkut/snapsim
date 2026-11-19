@@ -17,7 +17,7 @@ def main():
     with args.corpus.open() as source:
         for line in source:
             case = json.loads(line)
-            options = {"deck": case["deck"], "deck_added": case["added"], "revealed_turns": case["turns"]}
+            options = {"deck": case["deck"], "deck_added": case["added"], "revealed_turns": case["turns"], "plays_only": True}
             try:
                 position = json.loads(module.position_from_snap(json.dumps(case["observation"]), json.dumps(options)))
                 actual = {"position": position}

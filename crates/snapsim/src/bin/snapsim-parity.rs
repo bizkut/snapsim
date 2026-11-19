@@ -67,7 +67,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let locations: Vec<_> = game.lanes.iter().map(|lane| lane.def.id).collect();
         let mut turns = Vec::new();
         while game.turn <= game.total_turns {
-            turns.push(game.play_turn(policy));
+            turns.push(game.play_turn_plays_only(policy));
         }
         let actual = json!({"seed": seed, "decks": decks, "locations": locations, "turns": turns, "winner": game.winner()});
         match first_divergence(&expected, &actual) {
@@ -111,6 +111,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 fn main() -> ExitCode {
     snapsim::cards::use_reference_pool();
+    snapsim::cards::use_reference_rules();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -31,6 +31,14 @@ pub struct CardRef {
     pub revealed: bool,
     #[serde(default)]
     pub played_turn: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_moves_used: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_activate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_targets: Option<Vec<usize>>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocationRef {
@@ -195,6 +203,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         owner,
         cost: row.cost,
         ongoing_cost: 0,
+        temporary_hand_cost: None,
         created: false,
         permanent: row.power,
         stat_updates: Vec::new(),
@@ -204,8 +213,15 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         lane: None,
         revealed: false,
         abilities_removed: false,
+        latest_resolution_order: 0,
         repeating: false,
         move_turns: Vec::new(),
+        player_moves_used: 0,
+        activated: false,
+        move_staged: false,
+        activate_staged: false,
+        observed_can_activate: None,
+        observed_move_targets: None,
         draw_extends_quickdraw: false,
         merged_to: None,
         drawn_turn: None,
@@ -387,6 +403,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             .map(|id| location_def(id).expect("registered location"))
             .collect(),
         turn: position.turn,
+        next_resolution_order: 1,
         is_wait_for_staging: true,
         reveal_priority: priority,
         total_turns: position.total_turns,
@@ -463,6 +480,15 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 c.lane = Some(lane);
                 c.turn_played = r.played_turn.unwrap_or(0);
                 c.revealed = r.revealed;
+                c.activated = r.activated.unwrap_or(false);
+                c.player_moves_used = r.player_moves_used.unwrap_or(0);
+                c.observed_can_activate = r.can_activate;
+                c.observed_move_targets = r.move_targets.as_ref().map(|lanes| {
+                    lanes
+                        .iter()
+                        .filter(|&&lane| lane < 3)
+                        .fold(0u8, |mask, &lane| mask | (1 << lane))
+                });
                 let id = game.cards.len();
                 game.cards.push(c);
                 game.lanes[lane].cards.push(id);
@@ -489,6 +515,23 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             game.cards.push(c);
             game.lanes[lane].cards.push(id);
         }
+    }
+    // Historical resolution order is not exposed in the position format. Approximate
+    // it by played turn, current known priority (otherwise seat 0), then lane/slot.
+    let mut resolution_order = revealed.clone();
+    let first = priority.unwrap_or(0);
+    resolution_order.sort_by_key(|&id| {
+        let card = &game.cards[id];
+        (
+            card.turn_played,
+            usize::from(card.owner != first),
+            card.lane.unwrap_or(0),
+            game.zone_position(id).unwrap_or(0),
+        )
+    });
+    for id in resolution_order {
+        game.cards[id].latest_resolution_order = game.next_resolution_order;
+        game.next_resolution_order += 1;
     }
     for id in revealed {
         if matches!(game.cards[id].def.id, "Hawkeye" | "JessicaJones")

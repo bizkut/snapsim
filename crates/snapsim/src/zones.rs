@@ -23,6 +23,88 @@ impl Game<'_> {
         }
     }
 
+    /// Move an existing deck card to a location; its resolve ability happens immediately.
+    pub fn move_deck_card_to_location(&mut self, card: usize, lane: usize) -> bool {
+        let seat = self.cards[card].owner;
+        let Some(slot) = self.players[seat].deck.iter().position(|&id| id == card) else {
+            return false;
+        };
+        if !self.can_add(card, lane, seat) {
+            return false;
+        }
+        self.players[seat].deck.remove(slot);
+        if self.add_card(card, lane, seat, true) {
+            true
+        } else {
+            self.players[seat].deck.insert(slot, card);
+            false
+        }
+    }
+
+    /// Move an ally from its location to its owner's deck without shuffling.
+    pub fn move_card_to_deck(&mut self, card: usize) -> bool {
+        let seat = self.cards[card].owner;
+        if !self.take_from_board(card) {
+            return false;
+        }
+        self.players[seat].deck.push(card);
+        true
+    }
+
+    pub fn shuffle_deck(&mut self, seat: usize) {
+        let mut rng = self.rng.borrow_mut();
+        let deck = &mut self.players[seat].deck;
+        // Deck::Shuffle (0x7cc0ac0) uses Game::Shuffle's forward pass.
+        for index in 0..deck.len().saturating_sub(1) {
+            let other = index + rng.randbelow(deck.len() - index);
+            deck.swap(index, other);
+        }
+    }
+
+    /// Card::Merge (0x7cbbf50) adds modifier-only power, then moves the
+    /// absorbed card to SetAside and emits its post-merge trigger.
+    pub fn merge_card(&mut self, receiver: usize, absorbed: usize) -> bool {
+        if receiver == absorbed {
+            return false;
+        }
+        let owner = self.cards[receiver].owner;
+        let power = self.cards[absorbed].permanent;
+        self.cards[absorbed].merged_to = Some(receiver);
+        self.add_power(receiver, power, owner);
+        if let Some(lane) = self.cards[absorbed].lane.take() {
+            self.cards[absorbed].last_lane = Some(lane);
+            self.lanes[lane].cards.retain(|&id| id != absorbed);
+        }
+        for player in &mut self.players {
+            player.hand.retain(|&id| id != absorbed);
+            player.deck.retain(|&id| id != absorbed);
+            player.discard.retain(|&id| id != absorbed);
+            player.graveyard.retain(|&(id, _)| id != absorbed);
+        }
+        self.players[self.cards[absorbed].owner]
+            .set_aside
+            .push(absorbed);
+        self.emit_merged(receiver, absorbed);
+        true
+    }
+
+    /// Clone external player-granted movement permissions from one card to another.
+    pub fn clone_external_abilities(&mut self, receiver: usize, source: usize) {
+        for seat in 0..2 {
+            let copies: Vec<_> = self.players[seat]
+                .move_grants
+                .iter()
+                .filter(|grant| grant.card == Some(source))
+                .cloned()
+                .map(|mut grant| {
+                    grant.card = Some(receiver);
+                    grant
+                })
+                .collect();
+            self.players[seat].move_grants.extend(copies);
+        }
+    }
+
     /// Copy the persistent card state to a location, with resolution deferred until
     /// the enclosing trigger has finished spawning cards (CompleteCardCreation 0x7daae34).
     pub(crate) fn copy_card_to_location(

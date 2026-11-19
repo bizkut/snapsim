@@ -27,7 +27,7 @@ def main():
     added = []
     for args in cases:
         expected = invoke([sys.executable, str(REFERENCE / 'advise.py'), *args])
-        actual = invoke([str(BINARY), *args])
+        actual = invoke([str(BINARY), *args, *([] if args[0] == 'coverage' else ['--plays-only'])])
         if args[0] == 'coverage':
             # Rules added after the reference froze are new content: every reference card must
             # still be listed, and nothing else may differ.

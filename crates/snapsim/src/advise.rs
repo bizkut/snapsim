@@ -1,7 +1,7 @@
 //! Successive-halving search over sampled hidden-information games.
 use crate::{
     coverage::{coverage, sampling_priors},
-    game::Game,
+    game::{Action, Game},
     policy::Policy,
     position::{Position, build_game},
     random::PythonRandom,
@@ -16,6 +16,38 @@ use std::{
 
 type Play = (usize, usize);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PlanStep {
+    Play {
+        index: usize,
+        lane: usize,
+    },
+    Move {
+        card: usize,
+        from: usize,
+        slot: usize,
+        lane: usize,
+    },
+    Activate {
+        card: usize,
+        from: usize,
+        slot: usize,
+    },
+}
+
+impl PlanStep {
+    fn action(self, game: &Game<'_>) -> Action {
+        match self {
+            Self::Play { index, lane } => Action::Play {
+                card: game.players[0].hand[index],
+                lane,
+            },
+            Self::Move { card, lane, .. } => Action::Move { card, lane },
+            Self::Activate { card, .. } => Action::Activate { card },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct AdviseOptions {
     pub rollouts: usize,
@@ -25,18 +57,21 @@ pub struct AdviseOptions {
     #[serde(default)]
     pub approximate: bool,
     pub playout: String,
+    /// Disable player-chosen moves and activations for frozen-reference comparisons.
+    #[serde(default)]
+    pub plays_only: bool,
     pub workers: usize,
 }
 
 #[derive(Clone)]
 struct Candidate {
-    plays: Vec<Play>,
+    plays: Vec<PlanStep>,
     samples: usize,
     wins: usize,
     draws: usize,
 }
 impl Candidate {
-    fn new(plays: Vec<Play>) -> Self {
+    fn new(plays: Vec<PlanStep>) -> Self {
         Self {
             plays,
             samples: 0,
@@ -60,16 +95,23 @@ impl Candidate {
             .then_with(|| other.plays.len().cmp(&self.plays.len()))
             .then_with(|| self.plays.cmp(&other.plays))
     }
-    fn result(&self, position: &Position) -> Value {
-        let plays: Vec<_> = self
-            .plays
-            .iter()
-            .map(|&(index, lane)| {
-                json!({
-                    "hand_index": index, "card": position.hand[index].id, "location": lane,
-                })
-            })
-            .collect();
+    fn result(&self, position: &Position, plays_only: bool) -> Value {
+        let plays: Vec<_> = self.plays.iter().map(|&step| match step {
+            PlanStep::Play { index, lane } if plays_only => json!({
+                "hand_index": index, "card": position.hand[index].id, "location": lane,
+            }),
+            PlanStep::Play { index, lane } => json!({
+                "kind":"play", "hand_index": index, "card": position.hand[index].id, "location": lane,
+            }),
+            PlanStep::Move { from, slot, lane, .. } => json!({
+                "kind":"move", "from":from, "board_index":slot,
+                "card":position.locations[from].mine[slot].id, "location":lane,
+            }),
+            PlanStep::Activate { from, slot, .. } => json!({
+                "kind":"activate", "from":from, "board_index":slot,
+                "card":position.locations[from].mine[slot].id, "location":from,
+            }),
+        }).collect();
         let samples = self.samples as f64;
         json!({"plays": plays, "win": self.wins as f64 / samples,
             "draw": self.draws as f64 / samples,
@@ -127,21 +169,116 @@ fn legal_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<
     result
 }
 
-fn play_out(game: &mut Game<'_>, position: &Position, plays: &[Play], policy: Policy) -> i32 {
-    let plan: Vec<_> = plays
-        .iter()
-        .map(|&(index, lane)| (game.players[0].hand[index], lane))
-        .collect();
+/// Enumerate ordered plans on independent staging states so moves free slots and
+/// activations consume energy before subsequent actions are considered.
+fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<PlanStep>> {
+    let hand = game.players[0].hand.clone();
+    let mut board = Vec::new();
+    for lane in 0..3 {
+        for (slot, card) in game.lanes[lane]
+            .cards
+            .iter()
+            .copied()
+            .filter(|&card| game.cards[card].owner == 0)
+            .enumerate()
+        {
+            board.push((card, lane, slot));
+        }
+    }
+    fn extend(
+        game: &Game<'_>,
+        hand: &[usize],
+        board: &[(usize, usize, usize)],
+        stopped: &(dyn Fn() -> bool + Sync),
+        plan: &mut Vec<PlanStep>,
+        output: &mut Vec<Vec<PlanStep>>,
+    ) {
+        if stopped() {
+            return;
+        }
+        let mut options = Vec::new();
+        for (index, &card) in hand.iter().enumerate() {
+            if game.players[0].hand.contains(&card) {
+                for lane in 0..3 {
+                    if game.can_play(card, lane, 0, game.players[0].energy, 0) {
+                        options.push((PlanStep::Play { index, lane }, Action::Play { card, lane }));
+                    }
+                }
+            }
+        }
+        for &(card, from, slot) in board {
+            for lane in 0..3 {
+                if game.can_player_move(card, lane, 0) {
+                    options.push((
+                        PlanStep::Move {
+                            card,
+                            from,
+                            slot,
+                            lane,
+                        },
+                        Action::Move { card, lane },
+                    ));
+                }
+            }
+            if game.can_activate(card, 0) {
+                options.push((
+                    PlanStep::Activate { card, from, slot },
+                    Action::Activate { card },
+                ));
+            }
+        }
+        for (step, action) in options {
+            if stopped() {
+                return;
+            }
+            let mut rng = game.fork_rng();
+            let mut next = game.fork(rng.as_mut());
+            if next.stage_action(0, action).is_err() {
+                continue;
+            }
+            plan.push(step);
+            output.push(plan.clone());
+            extend(&next, hand, board, stopped, plan, output);
+            plan.pop();
+        }
+    }
+    let mut output = vec![Vec::new()];
+    extend(game, &hand, &board, stopped, &mut Vec::new(), &mut output);
+    output
+}
+
+fn play_out(
+    game: &mut Game<'_>,
+    position: &Position,
+    plays: &[PlanStep],
+    policy: Policy,
+    plays_only: bool,
+) -> Result<i32, String> {
     let priority = match position.priority.as_deref() {
         Some("me") => Some(0),
         Some("opponent") => Some(1),
         _ => None,
     };
-    game.resolve_position_turn(&plan, policy, priority);
-    while game.turn <= game.total_turns {
-        game.play_turn(policy);
+    if plays_only {
+        let plan: Vec<_> = plays
+            .iter()
+            .map(|step| match *step {
+                PlanStep::Play { index, lane } => (game.players[0].hand[index], lane),
+                _ => unreachable!("plays-only plan contains another action"),
+            })
+            .collect();
+        game.resolve_position_turn(&plan, policy, priority);
+        while game.turn <= game.total_turns {
+            game.play_turn_plays_only(policy);
+        }
+    } else {
+        let actions: Vec<_> = plays.iter().map(|step| step.action(game)).collect();
+        game.resolve_position_actions(&actions, policy, priority)?;
+        while game.turn <= game.total_turns {
+            game.play_turn_actions(policy)?;
+        }
     }
-    game.winner()
+    Ok(game.winner())
 }
 
 /// JSON interface for the self-contained advisor.
@@ -215,7 +352,18 @@ pub fn advise(
     let mut sample_seed = rng.getrandbits(64) as u64;
     let mut first_rng = PythonRandom::seed(sample_seed as i128);
     let mut first_game = build_game(position, &mut first_rng)?;
-    let mut legal = legal_plans(&first_game, &stopped);
+    let mut legal = if options.plays_only {
+        legal_plans(&first_game, &stopped)
+            .into_iter()
+            .map(|plan| {
+                plan.into_iter()
+                    .map(|(index, lane)| PlanStep::Play { index, lane })
+                    .collect()
+            })
+            .collect()
+    } else {
+        legal_action_plans(&first_game, &stopped)
+    };
     let limit = options
         .rollouts
         .min(options.max_plans.max(2).max(options.rollouts / 2));
@@ -268,7 +416,13 @@ pub fn advise(
             }
             cursor += batch_size;
             if first {
-                let winner = play_out(&mut first_game, position, &active[0].plays, policy);
+                let winner = play_out(
+                    &mut first_game,
+                    position,
+                    &active[0].plays,
+                    policy,
+                    options.plays_only,
+                )?;
                 active[0].record(winner);
                 remaining -= 1;
                 continue;
@@ -281,7 +435,13 @@ pub fn advise(
                 let mut game = build_game(position, &mut rng)?;
                 Ok(Some((
                     index,
-                    play_out(&mut game, position, &active[index].plays, policy),
+                    play_out(
+                        &mut game,
+                        position,
+                        &active[index].plays,
+                        policy,
+                        options.plays_only,
+                    )?,
                 )))
             };
             let completed: Vec<_> = if let Some(pool) = &pool {
@@ -314,7 +474,7 @@ pub fn advise(
     let plans: Vec<_> = active
         .iter()
         .take(options.max_plans)
-        .map(|c| c.result(position))
+        .map(|c| c.result(position, options.plays_only))
         .collect();
     Ok(json!({"engine": "simulator-rollout", "status": status,
         "rollouts": options.rollouts - remaining, "plans": plans,

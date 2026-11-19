@@ -12,9 +12,13 @@ mod meta_b1;
 mod meta_b2;
 mod meta_b3a;
 mod meta_b3b;
+mod meta_c;
 mod meta_d;
+mod meta_e1;
+mod meta_e2;
 mod recruit_a;
 mod recruit_b;
+mod reference_rules;
 mod representative;
 mod sword_master;
 pub(crate) use recruit_a::angel_replace;
@@ -42,7 +46,10 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_b2::TOKENS,
     meta_b3a::TOKENS,
     meta_b3b::TOKENS,
+    meta_c::TOKENS,
     meta_d::TOKENS,
+    meta_e1::TOKENS,
+    meta_e2::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -83,6 +90,18 @@ pub fn use_reference_pool() {
     USE_REFERENCE.store(true, Ordering::Relaxed);
 }
 
+static USE_REFERENCE_RULES: AtomicBool = AtomicBool::new(false);
+static ENV_REFERENCE_RULES: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("SNAPSIM_REFERENCE_RULES").is_some_and(|value| value == "1"));
+
+/// For the rest of the process, existing cards whose rule was deliberately changed to match the
+/// client use the frozen reference's rule instead (`cards/reference_rules.rs`). Parity gates
+/// only; live play never sets it. `SNAPSIM_REFERENCE_RULES=1` does the same for the CLI and the
+/// Python module.
+pub fn use_reference_rules() {
+    USE_REFERENCE_RULES.store(true, Ordering::Relaxed);
+}
+
 /// Cards a deck may contain and random-card effects draw from: every registered non-token
 /// card, or the reference list while pinned for parity gates.
 pub fn deck_eligible_ids() -> &'static [&'static str] {
@@ -103,6 +122,7 @@ pub fn beyond_reference(id: &str) -> bool {
 pub type CardHook = fn(&mut Game, usize);
 pub type PlayHook = fn(&mut Game, usize, usize);
 pub type PlayRequirement = fn(&Game<'_>, usize, usize, usize) -> bool;
+pub type ActivateRequirement = fn(&Game<'_>, usize) -> bool;
 /// Arguments: the guarding card, the card whose cost would change, its old and its new cost.
 pub type CostGuard = fn(&Game<'_>, usize, usize, i32, i32) -> bool;
 
@@ -127,6 +147,12 @@ pub struct CardDef {
     pub on_play: Option<PlayHook>,
     /// Arguments: card, destination lane, playing seat.
     pub can_play: Option<PlayRequirement>,
+    /// Once-per-game player activation, and an optional additional requirement.
+    pub on_activate: Option<CardHook>,
+    pub can_activate: Option<ActivateRequirement>,
+    pub activate_cost: i32,
+    /// Total intrinsic voluntary moves available (0 means none, 255 unlimited).
+    pub move_limit: u8,
     pub end_turn: Option<CardHook>,
     pub on_move_here: Option<PlayHook>,
     pub on_move: Option<PlayHook>,
@@ -164,6 +190,10 @@ impl CardDef {
             reveal_repetitions: None,
             on_play: None,
             can_play: None,
+            on_activate: None,
+            can_activate: None,
+            activate_cost: 0,
+            move_limit: 0,
             blocks_spawns: false,
             end_turn: None,
             blocks_reveal: false,
@@ -291,7 +321,10 @@ static GROUPS: &[&[CardDef]] = &[
     meta_b2::CARDS,
     meta_b3a::CARDS,
     meta_b3b::CARDS,
+    meta_c::CARDS,
     meta_d::CARDS,
+    meta_e1::CARDS,
+    meta_e2::CARDS,
 ];
 
 /// Every registered card rule.
@@ -300,5 +333,10 @@ pub fn registry() -> impl Iterator<Item = &'static CardDef> {
 }
 
 pub fn get(id: &str) -> Option<&'static CardDef> {
+    if (USE_REFERENCE_RULES.load(Ordering::Relaxed) || *ENV_REFERENCE_RULES)
+        && let Some(entry) = reference_rules::CARDS.iter().find(|entry| entry.id == id)
+    {
+        return Some(entry);
+    }
     registry().find(|entry| entry.id == id)
 }

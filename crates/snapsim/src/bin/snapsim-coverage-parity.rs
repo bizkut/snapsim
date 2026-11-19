@@ -9,6 +9,7 @@ use std::io::{self, BufRead};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     snapsim::cards::use_reference_pool();
+    snapsim::cards::use_reference_rules();
     let options = AdviseOptions {
         rollouts: 1,
         seed: 0,
@@ -17,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         approximate: false,
         playout: "spread".into(),
         workers: 1,
+        plays_only: true,
     };
     for (index, line) in io::stdin().lock().lines().enumerate() {
         let line = line?;

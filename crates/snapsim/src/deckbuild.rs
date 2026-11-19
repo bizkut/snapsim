@@ -177,6 +177,7 @@ struct Search<'a> {
     workers: usize,
     pool: rayon::ThreadPool,
     seed: i128,
+    plays_only: bool,
     games: usize,
     progress: &'a mut dyn FnMut(Value),
     cancel: &'a dyn Fn() -> bool,
@@ -218,7 +219,7 @@ impl Search<'_> {
             }
             let results = self.pool.install(|| {
                 chunk.par_iter().map(|deck| {
-                    let opts = json!({"decks":[deck,Value::Null],"mode":"recruit","deck_prior":"weighted","a":side,"b":side,"time_limit":null});
+                    let opts = json!({"decks":[deck,Value::Null],"mode":"recruit","deck_prior":"weighted","a":side,"b":side,"time_limit":null,"plays_only":self.plays_only});
                     compare::compare_pair(deal,&opts).map(|pair| pair.iter().map(|c| match c {'W'=>1.,'D'=>0.5,_=>0.}).sum::<f64>()/2.)
                 }).collect::<Result<Vec<_>, _>>()
             })?;
@@ -326,6 +327,7 @@ pub fn deckbuild(
             .build()
             .map_err(|e| e.to_string())?,
         seed,
+        plays_only: args["plays_only"].as_bool().unwrap_or(false),
         games: 0,
         progress,
         cancel,

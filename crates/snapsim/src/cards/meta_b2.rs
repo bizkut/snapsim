@@ -125,23 +125,24 @@ fn adamantium_infusion(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    // ResurrectCard 0x7cffaac searches the entire graveyard, not just this lane.
-    let max = game.players[owner]
+    // ResurrectCard 0x7cffaac snapshots and sorts the graveyard before banishing
+    // the source, but reads the first candidate's power after the banish.
+    let mut targets: Vec<_> = game.players[owner]
         .graveyard
         .iter()
-        .filter(|&&(id, _)| game.is_character(id))
-        .map(|&(id, _)| game.cards[id].power())
-        .max();
-    let Some(max) = max else { return };
-    game.banish_card(card);
-    let targets: Vec<_> = game.players[owner]
-        .graveyard
-        .iter()
-        .filter_map(|&(id, _)| {
-            (game.is_character(id) && game.cards[id].power() == max).then_some(id)
-        })
+        .filter_map(|&(id, _)| game.is_character(id).then_some(id))
         .collect();
-    let target = targets[game.rng.borrow_mut().randbelow(targets.len())];
+    if targets.is_empty() {
+        return;
+    }
+    targets.sort_by_key(|&id| std::cmp::Reverse(game.cards[id].power()));
+    game.banish_card(card);
+    let power = game.cards[targets[0]].power();
+    let count = targets
+        .iter()
+        .take_while(|&&id| game.cards[id].power() == power)
+        .count();
+    let target = targets[game.rng.borrow_mut().randbelow(count)];
     game.revive_card(target, lane, 2, owner);
 }
 
@@ -380,6 +381,42 @@ mod tests {
                 .iter()
                 .any(|&(id, _)| id == hawkeye)
         );
+    }
+
+    #[test]
+    fn copied_infusion_banishes_character_and_uses_post_banish_power() {
+        let p = position(
+            json!([{"id":"IronLad"},{"id":"Hulk"},{"id":"Hawkeye"}]),
+            json!([]),
+        );
+        let mut rng = PythonRandom::seed(11);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let lad = game.lanes[0].cards[0];
+        let hulk = game.lanes[0].cards[1];
+        let hawkeye = game.lanes[0].cards[2];
+        assert!(game.destroy_card(hulk));
+        assert!(game.destroy_card(hawkeye));
+        let infusion = game.create_card("AdamantiumInfusion", 0);
+        assert!(game.copy_text(lad, infusion, false));
+        // Banish recomputes ongoing power even on graveyard cards.
+        game.cards[hulk].ongoing = 5;
+        adamantium_infusion(&mut game, lad);
+        assert!(game.players[0].banished.contains(&lad));
+        assert_eq!(game.cards[hulk].lane, Some(0));
+        assert_eq!(game.cards[hulk].power(), 28);
+    }
+
+    #[test]
+    fn copied_infusion_with_no_destroyed_card_does_not_banish_source() {
+        let p = position(json!([{"id":"IronLad"}]), json!([]));
+        let mut rng = PythonRandom::seed(12);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let lad = game.lanes[0].cards[0];
+        let infusion = game.create_card("AdamantiumInfusion", 0);
+        assert!(game.copy_text(lad, infusion, false));
+        adamantium_infusion(&mut game, lad);
+        assert_eq!(game.cards[lad].lane, Some(0));
+        assert!(!game.players[0].banished.contains(&lad));
     }
 
     #[test]

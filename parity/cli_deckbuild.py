@@ -29,6 +29,8 @@ def run(command):
     for event in events:
         event.pop('elapsed', None)
         event.pop('elapsed_seconds', None)
+        if isinstance(event.get('config'), dict):
+            event['config'].pop('engine', None)
     return events
 
 
@@ -37,8 +39,8 @@ def main():
         collection = Path(directory) / 'collection.json'
         collection.write_text(json.dumps({'cards': CARDS}))
         args = ['--collection', str(collection), '--workers', '1', '--seed', '0', '--confirm-rollouts', '1', '--progress']
-        expected = run([sys.executable, str(REFERENCE), *args, '--engine', 'rust'])
-        actual = run([str(BINARY), 'deckbuild', *args])
+        expected = run([sys.executable, str(REFERENCE), *args, '--engine', 'python'])
+        actual = run([str(BINARY), 'deckbuild', *args, '--plays-only'])
         assert expected == actual, (expected, actual)
         print('CLI deckbuild: 1 interrupt/progress case passed')
 

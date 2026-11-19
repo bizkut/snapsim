@@ -197,7 +197,11 @@ pub const MULTIPLE_MAN: CardDef = CardDef {
     on_move: Some(multiple_man),
     ..CardDef::vanilla("MultipleMan")
 };
-pub const NIGHTCRAWLER: CardDef = CardDef::vanilla("Nightcrawler");
+// Client Nightcrawler's MovableOngoingAbilityDef has one stack.
+pub const NIGHTCRAWLER: CardDef = CardDef {
+    move_limit: 1,
+    ..CardDef::vanilla("Nightcrawler")
+};
 pub const ODIN: CardDef = CardDef {
     reveal: Some(odin),
     ..CardDef::vanilla("Odin")

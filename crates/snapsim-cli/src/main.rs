@@ -58,6 +58,8 @@ struct Deckbuild {
     output: Option<String>,
     #[arg(long)]
     progress: bool,
+    #[arg(long)]
+    plays_only: bool,
 }
 #[derive(Args)]
 struct Position {
@@ -81,6 +83,8 @@ struct Position {
     max_plans: usize,
     #[arg(long)]
     approximate: bool,
+    #[arg(long)]
+    plays_only: bool,
 }
 #[derive(Args)]
 struct Compare {
@@ -114,6 +118,8 @@ struct Compare {
     b_playout: String,
     #[arg(long, default_value = "default")]
     b_prior: String,
+    #[arg(long)]
+    plays_only: bool,
 }
 #[derive(Args)]
 struct Benchmark {
@@ -129,6 +135,8 @@ struct Benchmark {
     rollouts: usize,
     #[arg(long, default_value = "heuristic")]
     opponent: String,
+    #[arg(long)]
+    plays_only: bool,
 }
 fn read(path: &str) -> Result<Value, String> {
     let s = if path == "-" {
@@ -174,7 +182,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 Some(s) => read(&s)?,
                 None => Value::Null,
             };
-            let args = json!({"owned":read(&a.collection)?,"saved":match a.decks {Some(s)=>read(&s)?,None=>Value::Null},"baseline":match a.selected {Some(s)=>read(&s)?,None=>Value::Null},"base":base,"cards":a.try_cards,"count":a.count,"time_budget":a.time_budget,"workers":a.workers.unwrap_or_else(cli_workers),"seed":a.seed,"confirm_rollouts":a.confirm_rollouts});
+            let args = json!({"owned":read(&a.collection)?,"saved":match a.decks {Some(s)=>read(&s)?,None=>Value::Null},"baseline":match a.selected {Some(s)=>read(&s)?,None=>Value::Null},"base":base,"cards":a.try_cards,"count":a.count,"time_budget":a.time_budget,"workers":a.workers.unwrap_or_else(cli_workers),"seed":a.seed,"confirm_rollouts":a.confirm_rollouts,"plays_only":a.plays_only});
             let mut progress = |v: Value| {
                 if a.progress {
                     println!("{v}");
@@ -211,9 +219,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 } else {
                     Value::Null
                 };
-                data =
-                    snapsim::snap::position_from_snap(&data, &json!({"deck":deck,"mode":a.mode}))
-                        .map_err(|e| format!("{e:?}"))?;
+                data = snapsim::snap::position_from_snap(
+                    &data,
+                    &json!({"deck":deck,"mode":a.mode,"plays_only":a.plays_only}),
+                )
+                .map_err(|e| format!("{e:?}"))?;
             } else if let Some(mode) = a.mode {
                 data["mode"] = json!(mode);
             }
@@ -226,14 +236,15 @@ fn run(cli: Cli) -> Result<(), String> {
                 approximate: a.approximate,
                 playout: "spread".into(),
                 workers: 1,
+                plays_only: a.plays_only,
             };
             snapsim::advise::advise(&p, &options, &|| false)?
         }
         Command::Compare(a) => snapsim::compare::compare(
-            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior}),
+            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"plays_only":a.plays_only}),
         )?,
         Command::Benchmark(a) => snapsim::compare::benchmark(
-            &json!({"deck_file":a.deck_file,"mode":a.mode,"games":a.games,"seed":a.seed,"rollouts":a.rollouts,"opponent":a.opponent}),
+            &json!({"deck_file":a.deck_file,"mode":a.mode,"games":a.games,"seed":a.seed,"rollouts":a.rollouts,"opponent":a.opponent,"plays_only":a.plays_only}),
         )?,
     };
     println!("{result}");

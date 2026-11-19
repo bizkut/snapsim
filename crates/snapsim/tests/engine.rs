@@ -296,3 +296,101 @@ fn fork_clones_dynamic_state_and_independent_rng() {
     let original_roll = game.rng.borrow_mut().randbelow(1000);
     assert_eq!(branch_roll, original_roll);
 }
+
+#[test]
+fn staged_activation_precedes_play_and_is_once_per_game() {
+    use snapsim::{cards::CardDef, game::Action};
+    fn activate(game: &mut Game<'_>, card: usize) {
+        let seat = game.cards[card].owner;
+        game.players[seat].next_play_power += 2;
+    }
+    static ACTIVATOR: CardDef = CardDef {
+        on_activate: Some(activate),
+        activate_cost: 1,
+        ..CardDef::vanilla("MistyKnight")
+    };
+    let mut rng = PythonRandom::seed(14);
+    let mut game = game(&mut rng);
+    let actor = play(&mut game, "MistyKnight", 0, 0);
+    game.cards[actor].def = &ACTIVATOR;
+    let next = game.create_card("Wasp", 0);
+    assert!(game.add_hand(0, next, false));
+    game.players[0].energy = 2;
+    game.stage_action(0, Action::Activate { card: actor })
+        .unwrap();
+    assert!(!game.can_activate(actor, 0));
+    game.stage_action(
+        0,
+        Action::Play {
+            card: next,
+            lane: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(game.cards[next].permanent, 1);
+    game.resolve_staged_actions(0);
+    assert_eq!(game.cards[next].permanent, 3);
+    assert!(game.cards[actor].activated);
+    assert!(!game.can_activate(actor, 0));
+}
+
+#[test]
+fn staged_move_updates_slots_but_fires_hooks_only_on_resolution() {
+    use snapsim::game::Action;
+    let mut rng = PythonRandom::seed(15);
+    let mut game = game(&mut rng);
+    let kraven = play(&mut game, "Kraven", 0, 1);
+    let crawler = play(&mut game, "Nightcrawler", 0, 0);
+    assert!(game.can_player_move(crawler, 1, 0));
+    game.stage_action(
+        0,
+        Action::Move {
+            card: crawler,
+            lane: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(game.cards[crawler].lane, Some(1));
+    assert_eq!(game.cards[kraven].permanent, 3);
+    assert!(!game.can_player_move(crawler, 2, 0));
+    game.resolve_staged_actions(0);
+    assert_eq!(game.cards[kraven].permanent, 5);
+    assert!(!game.can_player_move(crawler, 2, 0));
+}
+
+#[test]
+fn lane_move_grant_is_turn_scoped_and_shared() {
+    use snapsim::game::{Action, MoveGrant};
+    fn buff(game: &mut Game<'_>, source: usize, moved: usize) {
+        game.add_power(moved, 1, game.cards[source].owner);
+    }
+    let mut rng = PythonRandom::seed(16);
+    let mut game = game(&mut rng);
+    let source = play(&mut game, "MistyKnight", 0, 0);
+    let ally = play(&mut game, "Wasp", 0, 0);
+    game.grant_move(MoveGrant {
+        seat: 0,
+        source,
+        card: None,
+        lane: Some(0),
+        start_turn: 2,
+        end_turn: 2,
+        remaining: 1,
+        on_move: Some(buff),
+    });
+    assert!(!game.can_player_move(ally, 1, 0));
+    game.turn = 2;
+    assert!(game.can_player_move(ally, 1, 0));
+    game.stage_action(
+        0,
+        Action::Move {
+            card: ally,
+            lane: 1,
+        },
+    )
+    .unwrap();
+    assert!(!game.can_player_move(source, 2, 0));
+    assert_eq!(game.cards[ally].permanent, 1);
+    game.resolve_staged_actions(0);
+    assert_eq!(game.cards[ally].permanent, 2);
+}

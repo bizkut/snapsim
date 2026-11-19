@@ -1,7 +1,7 @@
 //! Duplicate-seat match evaluation and SearchAI's public-information projection.
 use crate::{
     advise::{self, AdviseOptions},
-    game::Game,
+    game::{Action, Game},
     position::{self, CardRef, LocationRef, Opponent, Position},
     random::PythonRandom,
 };
@@ -105,6 +105,15 @@ fn card_ref(game: &Game<'_>, id: usize, board: bool) -> CardRef {
         power: Some(card.power()),
         revealed: card.revealed,
         played_turn: board.then_some(card.turn_played),
+        activated: (board && card.activated).then_some(true),
+        player_moves_used: (board && card.player_moves_used != 0).then_some(card.player_moves_used),
+        can_activate: board.then_some(card.observed_can_activate).flatten(),
+        move_targets: if board {
+            card.observed_move_targets
+                .map(|mask| (0..3).filter(|lane| mask & (1 << lane) != 0).collect())
+        } else {
+            None
+        },
     }
 }
 
@@ -206,7 +215,7 @@ pub fn search_plan(
     options: &Value,
     seed: i128,
     time_limit: Option<f64>,
-) -> Result<Vec<(usize, usize)>, String> {
+) -> Result<Vec<Action>, String> {
     let prior = options
         .get("prior")
         .and_then(Value::as_str)
@@ -227,6 +236,10 @@ pub fn search_plan(
             .unwrap_or("spread")
             .to_owned(),
         workers: 1,
+        plays_only: options
+            .get("plays_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     };
     let result = advise::advise(&position, &options, &|| false)?;
     let plan = result["plans"]
@@ -243,15 +256,40 @@ pub fn search_plan(
         .ok_or("invalid advisor plan")?
         .iter()
         .map(|play| {
-            let hand = play["hand_index"]
-                .as_u64()
-                .ok_or("invalid advisor hand index")? as usize;
             let lane = play["location"].as_u64().ok_or("invalid advisor lane")? as usize;
-            let card = *game.players[seat]
-                .hand
-                .get(hand)
-                .ok_or("advisor hand index out of range")?;
-            Ok((card, lane))
+            match play["kind"].as_str().unwrap_or("play") {
+                "play" => {
+                    let hand = play["hand_index"]
+                        .as_u64()
+                        .ok_or("invalid advisor hand index")?
+                        as usize;
+                    let card = *game.players[seat]
+                        .hand
+                        .get(hand)
+                        .ok_or("advisor hand index out of range")?;
+                    Ok(Action::Play { card, lane })
+                }
+                kind @ ("move" | "activate") => {
+                    let from = play["from"].as_u64().ok_or("invalid board lane")? as usize;
+                    let slot = play["board_index"].as_u64().ok_or("invalid board index")? as usize;
+                    let card = game
+                        .lanes
+                        .get(from)
+                        .ok_or("board lane out of range")?
+                        .cards
+                        .iter()
+                        .copied()
+                        .filter(|&id| game.cards[id].owner == seat)
+                        .nth(slot)
+                        .ok_or("board index out of range")?;
+                    if kind == "move" {
+                        Ok(Action::Move { card, lane })
+                    } else {
+                        Ok(Action::Activate { card })
+                    }
+                }
+                _ => Err("invalid advisor action kind".into()),
+            }
         })
         .collect()
 }
@@ -367,36 +405,59 @@ fn run_game(
     controllers: [&Value; 2],
     mode: Option<&str>,
     time_limit: Option<f64>,
+    plays_only: bool,
 ) -> Result<char, String> {
     let locations = position::all_locations(mode == Some("recruit"));
     let mut rng = PythonRandom::seed(seed);
     let mut game = Game::new([&decks[0], &decks[1]], &locations, &mut rng)?;
     while game.turn <= game.total_turns {
-        game.play_turn_with(|game, player, priority| {
-            let side = if player == seat { 0 } else { 1 };
-            let controller = controllers[side];
-            match controller.get("controller").and_then(Value::as_str) {
-                Some("heuristic") => Ok(crate::policy::Policy::Heuristic.plan(
-                    game,
-                    player,
-                    &mut **game.rng.borrow_mut(),
-                )),
-                Some("spread") => Ok(crate::policy::Policy::Spread.plan(
-                    game,
-                    player,
-                    &mut **game.rng.borrow_mut(),
-                )),
-                _ => search_plan(
-                    game,
-                    player,
-                    Some(priority),
-                    mode,
-                    controller,
-                    seed,
-                    time_limit,
-                ),
-            }
-        })?;
+        let mut planner =
+            |game: &Game<'_>, player: usize, priority: usize| -> Result<Vec<Action>, String> {
+                let side = if player == seat { 0 } else { 1 };
+                let controller = controllers[side];
+                let policy = match controller.get("controller").and_then(Value::as_str) {
+                    Some("heuristic") => Some(crate::policy::Policy::Heuristic),
+                    Some("spread") => Some(crate::policy::Policy::Spread),
+                    _ => None,
+                };
+                if let Some(policy) = policy {
+                    let mut rng = game.rng.borrow_mut();
+                    if plays_only {
+                        Ok(policy
+                            .plan(game, player, &mut **rng)
+                            .into_iter()
+                            .map(|(card, lane)| Action::Play { card, lane })
+                            .collect())
+                    } else {
+                        Ok(policy.plan_actions(game, player, &mut **rng))
+                    }
+                } else {
+                    let mut options = controller.clone();
+                    options["plays_only"] = Value::Bool(plays_only);
+                    search_plan(
+                        game,
+                        player,
+                        Some(priority),
+                        mode,
+                        &options,
+                        seed,
+                        time_limit,
+                    )
+                }
+            };
+        if plays_only {
+            game.play_turn_with(|game, player, priority| {
+                planner(game, player, priority)?
+                    .into_iter()
+                    .map(|action| match action {
+                        Action::Play { card, lane } => Ok((card, lane)),
+                        _ => Err("non-play action in plays-only plan".into()),
+                    })
+                    .collect()
+            })?;
+        } else {
+            game.play_turn_with_actions(&mut planner)?;
+        }
     }
     let winner = game.winner();
     Ok(if winner == 2 {
@@ -433,7 +494,11 @@ pub fn compare_pair(seed: i128, options: &Value) -> Result<[char; 2], String> {
         options.get("b").unwrap_or(&default),
     ];
     let time_limit = options.get("time_limit").and_then(Value::as_f64);
-    let first = run_game(&decks, seed, 0, controllers, mode, time_limit)?;
+    let plays_only = options
+        .get("plays_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let first = run_game(&decks, seed, 0, controllers, mode, time_limit, plays_only)?;
     let second = if hero {
         run_game(
             &[decks[1].clone(), decks[0].clone()],
@@ -442,9 +507,10 @@ pub fn compare_pair(seed: i128, options: &Value) -> Result<[char; 2], String> {
             controllers,
             mode,
             time_limit,
+            plays_only,
         )?
     } else {
-        run_game(&decks, seed, 1, controllers, mode, time_limit)?
+        run_game(&decks, seed, 1, controllers, mode, time_limit, plays_only)?
     };
     Ok([first, second])
 }
@@ -517,7 +583,7 @@ pub fn compare(args: &Value) -> Result<Value, String> {
             .unwrap_or("uniform")
     });
     let time_limit = args.get("time_limit").and_then(Value::as_f64);
-    let options = json!({"decks": decks, "mode": mode, "deck_prior": prior, "a": a, "b": b, "time_limit": time_limit});
+    let options = json!({"decks": decks, "mode": mode, "deck_prior": prior, "a": a, "b": b, "time_limit": time_limit, "plays_only": args.get("plays_only").and_then(Value::as_bool).unwrap_or(false)});
     let started = std::time::Instant::now();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(workers)
@@ -605,6 +671,9 @@ pub fn benchmark(args: &Value) -> Result<Value, String> {
                     [controller, &opponent],
                     mode,
                     None,
+                    args.get("plays_only")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 )?);
             }
         }

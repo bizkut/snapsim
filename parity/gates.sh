@@ -10,7 +10,7 @@ PY=${SNAPSIM_PYTHON:-$SNAPSIM_PYTHON}
 RUNS=${SNAPSIM_RUNS:-$SNAPSIM_RUNS}
 SNAPS=${SNAPSIM_SNAPSHOTS:-$SNAPSIM_SNAPSHOTS}
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target-gates}
-export SNAPSIM_REFERENCE_POOL=1
+export SNAPSIM_REFERENCE_POOL=1 SNAPSIM_REFERENCE_RULES=1
 T=$CARGO_TARGET_DIR/release
 cd "$ROOT"
 cargo build --release --quiet --bins
@@ -46,5 +46,7 @@ for f in $files; do
 done
 echo "replay: $(echo $compared | wc -w | tr -d ' ') recordings compared; new content in:$new_content"
 gate replay $PY $ROOT/parity/replay_compare.py --python $PY --reference $REF --rust $T/snapsim-replaycheck $compared
-gate replay-new-content $T/snapsim-replaycheck $new_content
+# The client rules themselves, deliberate changes included, against every real recording:
+# no reference pin, no reference rules, and no inconsistent turn allowed.
+gate replay-client env -u SNAPSIM_REFERENCE_POOL -u SNAPSIM_REFERENCE_RULES $T/snapsim-replaycheck $files
 echo "ALL GATES PASSED"

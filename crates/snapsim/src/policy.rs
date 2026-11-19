@@ -1,5 +1,8 @@
 //! Reference heuristic and advisor playout policies.
-use crate::{game::Game, random::GameRng};
+use crate::{
+    game::{Action, Game},
+    random::GameRng,
+};
 
 fn shuffle_lanes<R: GameRng + ?Sized>(rng: &mut R, lanes: &mut [usize; 3]) {
     for i in (1..lanes.len()).rev() {
@@ -124,5 +127,44 @@ impl Policy {
             }
         }
         plays
+    }
+
+    /// Plan player actions on an isolated staging state, then choose normal plays.
+    pub fn plan_actions<R: GameRng + ?Sized>(
+        self,
+        game: &Game<'_>,
+        seat: usize,
+        rng: &mut R,
+    ) -> Vec<Action> {
+        let mut fork_rng = rng.clone_rng();
+        let mut staging = game.fork(fork_rng.as_mut());
+        let mut actions = Vec::new();
+        let board: Vec<_> = staging
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .filter(|&id| staging.cards[id].owner == seat)
+            .collect();
+        for &card in &board {
+            if let Some(lane) = (0..3).find(|&lane| staging.can_player_move(card, lane, seat)) {
+                let action = Action::Move { card, lane };
+                if staging.stage_action(seat, action).is_ok() {
+                    actions.push(action);
+                }
+            }
+        }
+        for &card in &board {
+            let action = Action::Activate { card };
+            if staging.can_activate(card, seat) && staging.stage_action(seat, action).is_ok() {
+                actions.push(action);
+            }
+        }
+        for (card, lane) in self.plan(&staging, seat, rng) {
+            let action = Action::Play { card, lane };
+            if staging.stage_action(seat, action).is_ok() {
+                actions.push(action);
+            }
+        }
+        actions
     }
 }

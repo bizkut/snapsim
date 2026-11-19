@@ -35,7 +35,7 @@ def main():
         for choice in (['--snap-deck', str(deck_path)], ['--deck-code', encode_deck(deck)]):
             args = ['position', '--snap', '--file', str(path), '--rollouts', '2', '--seed', '31', *choice]
             expected = json.loads(subprocess.check_output([sys.executable, str(REFERENCE / 'advise.py'), *args], text=True))
-            actual = json.loads(subprocess.check_output([str(BINARY), *args], text=True))
+            actual = json.loads(subprocess.check_output([str(BINARY), *args, '--plays-only'], text=True))
             assert expected == actual, (args, expected, actual)
     print('CLI SNAP: 2 selected-deck cases passed')
 

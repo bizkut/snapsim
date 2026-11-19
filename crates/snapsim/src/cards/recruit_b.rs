@@ -170,12 +170,12 @@ fn collector(g: &mut Game, id: usize, seat: usize) {
 }
 fn wolfsbane(g: &mut Game, id: usize) {
     let card = &g.cards[id];
+    // WolfsbaneBehavior::GetTargets (0x7cf4768) counts Location::GetAllCards(owner) (0x7ddc2a4),
+    // every card in the owner's slots here, face-down ones included, except itself (0x7cf4c68).
     let count = g.lanes[card.lane.unwrap()]
         .cards
         .iter()
-        .filter(|&&other| {
-            other != id && g.cards[other].revealed && g.cards[other].owner == card.owner
-        })
+        .filter(|&&other| other != id && g.cards[other].owner == card.owner)
         .count();
     g.add_power(id, 2 * count as i32, g.cards[id].owner);
 }

@@ -28,7 +28,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let observation = &case["observation"];
         let turns = location_watch.update(observation);
         let added = deck_watch.update(observation, case["deck"].as_array().map(Vec::as_slice));
-        let options = json!({"deck":case["deck"], "deck_added":added, "revealed_turns":turns});
+        let options = json!({"deck":case["deck"], "deck_added":added, "revealed_turns":turns, "plays_only":true});
         let actual = match position_from_snap(observation, &options) {
             Ok(value) => {
                 planning += 1;
@@ -59,6 +59,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 fn main() -> ExitCode {
     snapsim::cards::use_reference_pool();
+    snapsim::cards::use_reference_rules();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

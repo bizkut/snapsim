@@ -350,7 +350,7 @@ fn apply_spell(game: &mut Game<'_>, effect: &mut PendingEffect, target: Option<u
 }
 
 fn zombie_state() -> Box<dyn crate::game::CardState> {
-    Box::new(Vec::<usize>::new())
+    Box::new(None::<(usize, Vec<usize>)>)
 }
 
 fn zombie_event(game: &mut Game<'_>, card: usize, event: Event) {
@@ -373,17 +373,24 @@ fn zombie_event(game: &mut Game<'_>, card: usize, event: Event) {
         let index = game.rng.borrow_mut().randbelow(candidates.len());
         selected.push(candidates.remove(index));
     }
-    game.cards[card].state = Some(Box::new(selected));
+    game.cards[card].state = Some(Box::new(Some((card, selected))));
 }
 
 fn zombie_reveal(game: &mut Game<'_>, card: usize) {
-    let chosen = game.cards[card]
+    let Some((chooser, chosen)) = game.cards[card]
         .state
         .as_ref()
-        .and_then(|s| s.as_any().downcast_ref::<Vec<usize>>())
-        .cloned()
-        .unwrap_or_default();
-    // SetChosenCardPower (0x7cfb7f8) morphs the stored entities wherever they are.
+        .and_then(|s| s.as_any().downcast_ref::<Option<(usize, Vec<usize>)>>())
+        .and_then(Option::as_ref)
+    else {
+        return;
+    };
+    // SetChosenCardPower (0x7cfb7f8) requires GalactiCardKey to identify
+    // the revealing entity; morphed copies retain the original chooser.
+    if *chooser != card {
+        return;
+    }
+    let chosen = chosen.clone();
     for target in chosen {
         game.transform_into_copy(target, card);
     }
@@ -606,8 +613,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .as_any()
-            .downcast_ref::<Vec<usize>>()
+            .downcast_ref::<Option<(usize, Vec<usize>)>>()
             .unwrap()
+            .as_ref()
+            .unwrap()
+            .1
             .clone();
         assert_eq!(chosen.len(), 2);
         zombie_reveal(&mut game, zombie);
@@ -615,6 +625,30 @@ mod tests {
             chosen
                 .iter()
                 .all(|&id| game.cards[id].def.id == "ZombieGalacti")
+        );
+    }
+
+    #[test]
+    fn zombie_copies_on_board_do_not_repeat_original_choice() {
+        let p = position(
+            json!([
+                {"id":"ZombieGalacti"},
+                {"id":"Hulk"},
+                {"id":"AntMan"},
+                {"id":"IronMan"}
+            ]),
+            json!([]),
+        );
+        let mut rng = PythonRandom::seed(42);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let zombie = game.lanes[0].cards[0];
+        let chosen = game.lanes[0].cards[1..].to_vec();
+        game.cards[zombie].state = Some(Box::new(Some((zombie, chosen.clone()))));
+        zombie_reveal(&mut game, zombie);
+        assert!(
+            chosen
+                .iter()
+                .all(|&id| { game.cards[id].revealed && game.cards[id].def.id == "ZombieGalacti" })
         );
     }
 

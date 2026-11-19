@@ -322,7 +322,27 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         board_cards.sort_by_key(|card| card["zone_position"].as_i64().unwrap_or(i64::MAX));
         for card in board_cards {
             if card["owner_entity_id"] == local["entity_id"] {
-                mine.push(card_ref(card, true));
+                let mut reference = card_ref(card, true);
+                if options["plays_only"] != true
+                    && let Some(legal) = array(&game["legal_actions"])
+                        .iter()
+                        .find(|entry| entry["entity_id"] == card["entity_id"])
+                {
+                    if let Some(activate) = legal["can_activate"].as_bool() {
+                        reference["can_activate"] = json!(activate);
+                    }
+                    if let Some(targets) = legal["target_entity_ids"].as_array() {
+                        let lanes: Vec<_> = array(&game["locations"])
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, loc)| {
+                                targets.contains(&loc["entity_id"]).then_some(index)
+                            })
+                            .collect();
+                        reference["move_targets"] = json!(lanes);
+                    }
+                }
+                mine.push(reference);
                 visible.push(card);
             } else if card["owner_entity_id"] == opponent["entity_id"] {
                 if card["card_id"].as_str().is_some_and(|s| !s.is_empty())

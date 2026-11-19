@@ -42,6 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 fn main() -> ExitCode {
     snapsim::cards::use_reference_pool();
+    snapsim::cards::use_reference_rules();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

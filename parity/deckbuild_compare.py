@@ -39,7 +39,7 @@ def main():
                 result_py = deckbuild.try_cards(opts.pop('base'), opts.pop('cards'), **opts, progress=py_events.append, cancel=lambda: len(py_events) >= cutoff)
             else:
                 result_py = deckbuild.build_decks(**opts, progress=py_events.append, cancel=lambda: len(py_events) >= cutoff)
-            result_rs = json.loads(rust.deckbuild(json.dumps(args), rs_events.append, lambda: len(rs_events) >= cutoff))
+            result_rs = json.loads(rust.deckbuild(json.dumps(dict(args, plays_only=True)), rs_events.append, lambda: len(rs_events) >= cutoff))
             for result in (result_py, result_rs):
                 result.pop('elapsed_seconds', None)
                 result['config'].pop('engine', None)
@@ -51,7 +51,7 @@ def main():
     if os.environ.get('SNAPSIM_COMPLETE') or os.environ.get('SNAPSIM_COMPLETE_ONLY'):
         opts = {'owned': base, 'seed': 42, 'workers': 1, 'confirm_rollouts': 1}
         expected = deckbuild.build_decks(**opts)
-        actual = json.loads(rust.deckbuild(json.dumps(opts)))
+        actual = json.loads(rust.deckbuild(json.dumps(dict(opts, plays_only=True))))
         for result in (expected, actual):
             result.pop('elapsed_seconds', None)
             result['config'].pop('engine', None)
@@ -60,7 +60,7 @@ def main():
     if os.environ.get('SNAPSIM_TRY_COMPLETE_ONLY'):
         opts = {'owned': owned, 'seed': 42, 'workers': 1, 'confirm_rollouts': 1}
         expected = deckbuild.try_cards(base, [owned[12]], **opts)
-        actual = json.loads(rust.deckbuild(json.dumps(dict(opts, base=base, cards=[owned[12]]))))
+        actual = json.loads(rust.deckbuild(json.dumps(dict(opts, base=base, cards=[owned[12]], plays_only=True))))
         for result in (expected, actual):
             result.pop('elapsed_seconds', None)
             result['config'].pop('engine', None)
@@ -71,7 +71,7 @@ def main():
         for workers in (1, 2):
             events = []
             opts = {'owned': owned, 'seed': 42, 'workers': workers, 'confirm_rollouts': 1}
-            result = json.loads(rust.deckbuild(json.dumps(opts), events.append, lambda: len(events) >= 4))
+            result = json.loads(rust.deckbuild(json.dumps(dict(opts, plays_only=True)), events.append, lambda: len(events) >= 4))
             result.pop('elapsed_seconds', None)
             result['config'].pop('workers', None)
             for event in events:

@@ -18,18 +18,20 @@ struct Record {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     snapsim::cards::use_reference_pool();
+    snapsim::cards::use_reference_rules();
     let path = env::args().nth(1).ok_or("expected corpus path")?;
     let mut count = 0;
     let mut mismatches = 0;
     let mut new_content = 0;
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
-        let record: Record = serde_json::from_str(&line)?;
+        let mut record: Record = serde_json::from_str(&line)?;
         count += 1;
         if snapsim::trace::mentions_beyond_reference(&record.position) {
             new_content += 1;
             continue;
         }
+        record.options["plays_only"] = Value::Bool(true);
         let actual =
             snapsim::advise::advise_json(&record.position.to_string(), &record.options.to_string());
         match actual {
