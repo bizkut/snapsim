@@ -23,7 +23,7 @@ The engine exposes location replacement, delayed reveal scheduling, location cos
 
 ## Adding content
 
-1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and list it in that module's descriptor slice (cards; add a new module's slice to `cards::GROUPS`) or in `locations::REGISTRY`. Tokens also go in `cards::NON_OWNABLE`. Use the catalog's current printed stats; do not invent stand-in rules.
+1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and list it in that module's descriptor slice (cards; add a new module's `CARDS` and `TOKENS` slices to `cards::GROUPS` and `cards::TOKEN_GROUPS`) or in `locations::REGISTRY`. Tokens, which decks may not contain, go in the module's `TOKENS`. Use the catalog's current printed stats; do not invent stand-in rules.
 2. Add focused boundary tests. For a random effect, test seeds and the order of random calls. New rules have no Python counterpart: check them against real matches that contain the card or location with `snapsim-replaycheck`.
 3. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and the Python parity gates below. Gates for unchanged content must still pass. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
 

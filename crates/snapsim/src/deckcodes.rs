@@ -275,7 +275,7 @@ pub fn encode_deck<S: AsRef<str>>(ids: &[S]) -> Result<String, String> {
 pub fn resolve_deck(ids: &[String]) -> Result<(), String> {
     let mut unsupported = Vec::new();
     for id in ids {
-        if (crate::cards::get(id).is_none() || crate::cards::NON_OWNABLE.contains(&id.as_str()))
+        if (crate::cards::get(id).is_none() || crate::cards::is_token(id))
             && !unsupported.contains(&id.as_str())
         {
             unsupported.push(id.as_str());

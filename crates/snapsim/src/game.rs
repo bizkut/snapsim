@@ -230,7 +230,7 @@ impl<'a> Game<'a> {
                 if decks[seat].iter().filter(|other| *other == id).count() != 1 {
                     return Err(format!("duplicate card {id}"));
                 }
-                if cards::NON_OWNABLE.contains(&id.as_str()) {
+                if cards::is_token(id) {
                     return Err(format!("non-ownable card {id}"));
                 }
                 let def = cards::get(id).ok_or_else(|| format!("unsupported card {id}"))?;
@@ -704,13 +704,10 @@ impl<'a> Game<'a> {
         cards::angel_replace(self, self.cards[card].owner, lane);
         true
     }
-    pub fn draw(&mut self, seat: usize) {
-        if self.players[seat].hand.len() >= 7 {
-            return;
-        }
+    /// The deck slot `draw` takes next: a card due this turn, else the first eligible one.
+    fn next_draw_slot(&self, seat: usize) -> Option<usize> {
         let deck = &self.players[seat].deck;
-        let chosen = deck
-            .iter()
+        deck.iter()
             .position(|&id| self.cards[id].def.draw_turn == Some(self.turn))
             .or_else(|| {
                 deck.iter().position(|&id| {
@@ -719,8 +716,18 @@ impl<'a> Game<'a> {
                         .draw_turn
                         .is_none_or(|turn| turn <= self.turn)
                 })
-            });
-        if let Some(slot) = chosen {
+            })
+    }
+    /// The top card of a deck: the card `draw` would take next.
+    pub fn top_card(&self, seat: usize) -> Option<usize> {
+        self.next_draw_slot(seat)
+            .map(|slot| self.players[seat].deck[slot])
+    }
+    pub fn draw(&mut self, seat: usize) {
+        if self.players[seat].hand.len() >= 7 {
+            return;
+        }
+        if let Some(slot) = self.next_draw_slot(seat) {
             let card = self.players[seat].deck.remove(slot);
             self.add_hand(seat, card, true);
         }

@@ -4,6 +4,8 @@ use crate::game::Game;
 
 mod agent13;
 mod core_rules;
+mod meta_a1;
+mod meta_a2;
 mod recruit_a;
 mod recruit_b;
 mod representative;
@@ -11,7 +13,7 @@ mod sword_master;
 pub(crate) use recruit_a::angel_replace;
 
 /// Tokens a deck may not contain: the reference's `ownable = False` cards.
-pub const NON_OWNABLE: [&str; 10] = [
+const BASE_TOKENS: &[&str] = &[
     "TigerSpirit",
     "Rock",
     "Squirrel",
@@ -24,11 +26,19 @@ pub const NON_OWNABLE: [&str; 10] = [
     "ZombieHorde",
 ];
 
+/// Token IDs, one slice per card-group module.
+static TOKEN_GROUPS: &[&[&str]] = &[BASE_TOKENS, meta_a1::TOKENS, meta_a2::TOKENS];
+
+/// Whether a card is a token, which decks may not contain.
+pub fn is_token(id: &str) -> bool {
+    TOKEN_GROUPS.iter().any(|group| group.contains(&id))
+}
+
 /// Registered deck cards in the reference's `deck_eligible_ids()` order: sorted IDs.
 static DECK_ELIGIBLE_IDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
     let mut ids: Vec<_> = registry()
         .map(|def| def.id)
-        .filter(|id| !NON_OWNABLE.contains(id))
+        .filter(|id| !is_token(id))
         .collect();
     ids.sort_unstable();
     ids
@@ -195,7 +205,7 @@ static BASE: &[CardDef] = &[
 ];
 
 /// Rule descriptors, one slice per card-group module.
-static GROUPS: &[&[CardDef]] = &[BASE];
+static GROUPS: &[&[CardDef]] = &[BASE, meta_a1::CARDS, meta_a2::CARDS];
 
 /// Every registered card rule.
 pub fn registry() -> impl Iterator<Item = &'static CardDef> {
