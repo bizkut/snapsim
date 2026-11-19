@@ -1,5 +1,30 @@
 # Benchmarks
 
+## Deck builder and compare CLI
+
+Single back-to-back runs on the shared Apple M4 Pro using CPython 3.12 and a Rust release build, one worker, seed 42. `parity/deckbuild_bench.py` sends SIGINT after the second progress event in a 13-card screen (32 rollouts per decision); each process reported 26 completed games. Wall times include process startup and interrupt handling. Load averages are 1/5/15 minutes immediately before each run.
+
+| Workload | Seconds | Load averages |
+|---|---:|---|
+| Python deck builder, Python engine | 4.924 | 9.51 / 9.07 / 7.75 |
+| Python deck builder, Rust engine | 0.632 | 8.99 / 8.97 / 7.72 |
+| Rust deck builder CLI | 0.458 | 8.99 / 8.97 / 7.72 |
+| Python compare, 3 pairs, 4 rollouts | 0.180 | 8.99 / 8.97 / 7.72 |
+| Rust compare, 3 pairs, 4 rollouts | 0.019 | 8.99 / 8.97 / 7.72 |
+
+These short, shared-machine measurements are not statistically controlled; the screen stops cooperatively on SIGINT and includes work completed before the interrupt is observed.
+
+Reproduce from a temporary directory after building the CLI and Python extension into an isolated target directory:
+
+```sh
+ROOT="$PWD"
+export PYTHONPATH=$SNAPSIM_REFERENCE
+export SNAPSIM_BIN="$ROOT/target-RustDeckbuild/release/snapsim"
+export SNAPSIM_PY_PATH=/tmp/snapsim-py-RustDeckbuild/snapsim_py.so
+cd /tmp
+$SNAPSIM_PYTHON "$ROOT/parity/deckbuild_bench.py"
+```
+
 ## Advisor rollout comparison
 
 Single back-to-back run on the same shared Apple M4 Pro machine, CPython 3.12 and Rust release build. Each search used `parity/turn3.json`, spread playout, seed 42, a warmup, and a fixed 2,000-rollout budget. The timed searches used a 10,000,000-rollout cap and a one-second limit. Results include position setup and Python binding overhead. The 1-second searches may screen a different number of plans from the fixed-budget searches.

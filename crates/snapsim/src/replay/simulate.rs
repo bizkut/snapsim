@@ -1,0 +1,734 @@
+use super::{Difference, Frame, History, Staging, entity, label};
+use crate::{
+    game::{Game, Lane, Player},
+    locations, position,
+    random::PythonRandom,
+};
+use serde_json::Value;
+use std::{cell::RefCell, collections::BTreeSet};
+
+fn sample(pool: &[String], count: usize, rng: &mut PythonRandom) -> Vec<String> {
+    if count <= pool.len() {
+        rng.sample_indices(pool.len(), count)
+            .into_iter()
+            .map(|i| pool[i].clone())
+            .collect()
+    } else {
+        (0..count)
+            .map(|_| pool[(rng.random() * pool.len() as f64) as usize].clone())
+            .collect()
+    }
+}
+fn number(value: &Value) -> Option<i32> {
+    value.as_i64().and_then(|n| i32::try_from(n).ok())
+}
+fn make(id: &str, owner: usize, cost: &Value, power: &Value) -> Result<crate::game::Card, String> {
+    if crate::cards::get(id).is_none() {
+        return Err(format!("no card rules for {id}"));
+    }
+    let mut card = position::make_card(id, owner).map_err(|_| format!("no card rules for {id}"))?;
+    if let Some(cost) = number(cost) {
+        card.cost = cost;
+    }
+    if let Some(power) = number(power) {
+        card.permanent = power;
+    }
+    Ok(card)
+}
+fn push(
+    game: &mut Game<'_>,
+    id: &str,
+    owner: usize,
+    cost: &Value,
+    power: &Value,
+) -> Result<usize, String> {
+    let index = game.cards.len();
+    game.cards.push(make(id, owner, cost, power)?);
+    Ok(index)
+}
+fn diff(item: String, cards: Vec<String>, lanes: Vec<usize>) -> Difference {
+    Difference { item, cards, lanes }
+}
+
+pub(super) fn simulate(
+    start: &Frame,
+    target: &Frame,
+    staged: &Staging<'_>,
+    frames: &[Frame],
+    history: &History,
+    local_deck: &[String],
+    seed: usize,
+) -> Result<Vec<Difference>, String> {
+    let mut hidden_rng = PythonRandom::seed(seed as i128);
+    let mut game_rng = PythonRandom::seed(seed as i128);
+    let mut known = history.seen.clone();
+    for card in &start.board {
+        if card.revealed
+            && let Some(id) = card.id.as_str()
+            && !known[card.owner].iter().any(|s| s == id)
+        {
+            known[card.owner].push(id.to_owned());
+        }
+    }
+    for play in &staged.plays {
+        if let Some(id) = play.id.as_str()
+            && !known[play.card.owner].iter().any(|s| s == id)
+        {
+            known[play.card.owner].push(id.to_owned());
+        }
+    }
+    let pool = if start.recruit && !position::outside(known[1].iter()) {
+        position::recruit_cards()
+    } else {
+        position::all_cards()
+    };
+    let mut others: Vec<_> = pool
+        .iter()
+        .filter(|id| !known[1].contains(id))
+        .cloned()
+        .collect();
+    if others.is_empty() {
+        others = pool.clone();
+    }
+    let remaining: Vec<_> = local_deck
+        .iter()
+        .filter(|id| !known[0].contains(id) && !start.hand.iter().any(|c| c["card_id"] == **id))
+        .cloned()
+        .collect();
+    let my_count = start.deck_counts[0].as_u64().unwrap_or(0) as usize;
+    let my_deck = sample(
+        if remaining.len() == my_count {
+            &remaining
+        } else {
+            &pool
+        },
+        my_count,
+        &mut hidden_rng,
+    );
+    let opp_hand = start.hand_counts[1].as_u64().unwrap_or(0) as usize;
+    let hidden = sample(
+        &others,
+        opp_hand + start.deck_counts[1].as_u64().unwrap_or(0) as usize,
+        &mut hidden_rng,
+    );
+    let lanes: [Lane; 3] = std::array::from_fn(|i| {
+        let id = start.locations[i].as_str();
+        let def = id
+            .and_then(locations::get)
+            .unwrap_or(&position::UNKNOWN_LOCATION);
+        let revealed_turn = start.location_turns[i].as_u64().map(|v| v as u8);
+        let state = if id == Some("OttosLab") {
+            Some(Box::new(std::array::from_fn::<_, 2, _>(|seat| {
+                history
+                    .lab_spent
+                    .contains(&(i, start.location_turns[i].clone(), seat))
+            })) as Box<dyn std::any::Any>)
+        } else {
+            def.initial_state.map(|init| init())
+        };
+        Lane {
+            def,
+            observed_id: None,
+            revealed: id.is_some(),
+            revealed_turn,
+            cards: Vec::new(),
+            bonus: [0; 2],
+            multiplier: [1; 2],
+            state,
+        }
+    });
+    for i in 0..3 {
+        if let Some(id) = start.locations[i].as_str() {
+            if start.location_turns[i].is_null() && matches!(id, "Lemuria" | "Sakaar") {
+                return Err(format!("reveal turn of {id} is unknown"));
+            }
+            if id == "OttosLab"
+                && (start.location_turns[i].is_null()
+                    || history
+                        .lab_unknown
+                        .contains(&(i, start.location_turns[i].clone())))
+            {
+                return Err("Otto's Lab spent state is unknown".into());
+            }
+        }
+    }
+    let mut order: Vec<_> = (0..3).filter(|&i| lanes[i].revealed).collect();
+    let current_location = order.len();
+    order.extend((0..3).filter(|&i| !lanes[i].revealed));
+    let mut game = Game {
+        cards: Vec::new(),
+        players: [Player::default(), Player::default()],
+        lanes,
+        location_pool: position::all_locations(start.recruit)
+            .iter()
+            .filter_map(|id| locations::get(id))
+            .collect(),
+        turn: start.turn as u8,
+        total_turns: start.total_turns.as_u64().unwrap_or(6) as u8,
+        reveal_priority: None,
+        played: Default::default(),
+        pending_plays: Default::default(),
+        played_on_reveal: [false; 2],
+        delays_reveals: start
+            .locations
+            .iter()
+            .zip(&start.location_turns)
+            .any(|(id, turn)| id == "Lemuria" && turn.as_i64() == Some(start.turn)),
+        delayed_reveals: Default::default(),
+        current_location,
+        location_reveal_order: [order[0], order[1], order[2]],
+        destroyed: Some(Vec::new()),
+        rng: RefCell::new(&mut game_rng),
+    };
+    for card in &start.hand {
+        let id = card["card_id"].as_str().ok_or("missing card_id")?;
+        let index = push(&mut game, id, 0, &card["cost"], &card["power"])?;
+        game.players[0].hand.push(index);
+    }
+    for id in &my_deck {
+        let index = push(&mut game, id, 0, &Value::Null, &Value::Null)?;
+        game.players[0].deck.push(index);
+    }
+    for (i, id) in hidden.iter().enumerate() {
+        let index = push(&mut game, id, 1, &Value::Null, &Value::Null)?;
+        if i < opp_hand {
+            game.players[1].hand.push(index);
+        } else {
+            game.players[1].deck.push(index);
+        }
+    }
+    let mut cards: Vec<(Value, usize)> = Vec::new();
+    let mut board: Vec<_> = start.board.iter().filter(|c| c.revealed).collect();
+    board.sort_by_key(|c| (c.lane, c.owner, c.slot.as_i64().unwrap_or(0)));
+    for card in board {
+        let id = card.id.as_str().ok_or("missing card_id")?;
+        let index = push(&mut game, id, card.owner, &card.cost, &Value::Null)?;
+        let first = frames
+            .iter()
+            .find_map(|frame| {
+                entity(frame, &card.entity)
+                    .filter(|c| c.revealed && c.id.as_str().is_some())
+                    .map(|c| (frame, c))
+            })
+            .ok_or("missing reveal")?;
+        let flipped = card
+            .flipped
+            .as_i64()
+            .filter(|n| *n != 0)
+            .or_else(|| first.0.ended.then_some(first.0.turn));
+        if matches!(id, "Hawkeye" | "JessicaJones") && flipped.is_none() {
+            return Err(format!(
+                "reveal turn of {id} [{}] is unknown",
+                label(&card.entity)
+            ));
+        }
+        if matches!(id, "Hawkeye" | "JessicaJones")
+            && flipped == Some(start.turn - 1)
+            && first.1.lane != card.lane
+        {
+            return Err(format!(
+                "original reveal lane of {id} [{}] is uncertain",
+                label(&card.entity)
+            ));
+        }
+        game.cards[index].lane = Some(card.lane);
+        game.cards[index].revealed = true;
+        game.cards[index].turn_played = flipped.unwrap_or(0) as u8;
+        game.lanes[card.lane].cards.push(index);
+        cards.push((card.entity.clone(), index));
+    }
+    for &(_, index) in &cards {
+        if matches!(game.cards[index].def.id, "Hawkeye" | "JessicaJones")
+            && game.cards[index].turn_played as i64 == start.turn - 1
+        {
+            let lane = game.cards[index].lane.unwrap();
+            let before = game.cards[index].turn_played;
+            let sources: Vec<_> = game.lanes[lane]
+                .cards
+                .iter()
+                .copied()
+                .filter(|&s| {
+                    game.cards[s].revealed
+                        && game.cards[s].has_ongoing()
+                        && game.cards[s].turn_played < before
+                })
+                .collect();
+            if !sources.iter().any(|&s| game.cards[s].def.blocks_reveal) {
+                let active = game.lanes[lane].revealed
+                    && game.lanes[lane].revealed_turn.unwrap_or(0) <= before;
+                let base = if active {
+                    game.lanes[lane].def.ongoing_repeats as usize
+                } else {
+                    1
+                };
+                let mut runs = if active {
+                    game.lanes[lane].def.reveal_repeats as usize
+                } else {
+                    1
+                };
+                for &source in &sources {
+                    if let Some(repetitions) = game.cards[source].def.reveal_repetitions {
+                        let extra: usize = sources
+                            .iter()
+                            .filter(|&&other| {
+                                other != source
+                                    && game.cards[other].owner == game.cards[source].owner
+                            })
+                            .map(|&other| game.cards[other].def.extra_ongoing_runs as usize)
+                            .sum();
+                        runs += repetitions(&game, source, index) as usize * base * (1 + extra);
+                    }
+                }
+                game.cards[index].watches = vec![(start.turn as u8, lane); runs];
+            }
+        }
+    }
+    game.ongoing();
+    for (entity_id, index) in &cards {
+        let refcard = entity(start, entity_id).unwrap();
+        let power = number(&refcard.power).ok_or_else(|| {
+            format!(
+                "no public power for {} [{}]",
+                game.cards[*index].def.id,
+                label(entity_id)
+            )
+        })?;
+        game.cards[*index].permanent =
+            power - game.cards[*index].ongoing - game.cards[*index].location_power;
+    }
+    let locally_played: Vec<_> = staged
+        .plays
+        .iter()
+        .filter(|p| p.card.owner == 0 && p.turn == start.turn)
+        .map(|p| &p.card.entity)
+        .collect();
+    if start.hand.len() as i64 != start.hand_counts[0].as_i64().unwrap_or(-1)
+        || staged.before.hand.len() as i64 != staged.before.hand_counts[0].as_i64().unwrap_or(-1)
+        || start
+            .hand
+            .iter()
+            .filter(|c| {
+                !staged
+                    .before
+                    .hand
+                    .iter()
+                    .any(|b| b["entity_id"] == c["entity_id"])
+            })
+            .any(|c| !locally_played.contains(&&c["entity_id"]))
+        || locally_played.iter().any(|id| {
+            !start.hand.iter().any(|c| c["entity_id"] == **id)
+                || staged.before.hand.iter().any(|c| c["entity_id"] == **id)
+        })
+        || staged
+            .before
+            .hand
+            .iter()
+            .any(|c| !start.hand.iter().any(|s| s["entity_id"] == c["entity_id"]))
+    {
+        return Err("local hand/staging transition is incomplete".into());
+    }
+    let original = game.players[0].hand.clone();
+    game.players[0].hand = staged
+        .before
+        .hand
+        .iter()
+        .map(|card| {
+            original[start
+                .hand
+                .iter()
+                .position(|held| held["entity_id"] == card["entity_id"])
+                .unwrap()]
+        })
+        .collect();
+    for (card, &index) in staged.before.hand.iter().zip(&game.players[0].hand) {
+        if let Some(power) = number(&card["power"]) {
+            game.cards[index].permanent =
+                power - game.cards[index].ongoing - game.cards[index].location_power;
+        }
+    }
+    game.ongoing();
+    for (card, &index) in staged.before.hand.iter().zip(&game.players[0].hand) {
+        if let Some(observed) = number(&card["cost"]) {
+            let printed = position::make_card(game.cards[index].def.id, 0)?.cost;
+            let mut costs: Vec<_> = (0..observed + 3).collect();
+            costs.sort_by_key(|&cost| (cost != printed, (cost - observed).abs()));
+            let mut found = false;
+            for cost in costs {
+                game.cards[index].cost = cost;
+                if game.card_cost(index) == observed {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                game.cards[index].cost = observed;
+            }
+        }
+    }
+    game.players[1]
+        .hand
+        .truncate(staged.opponent_count.max(0) as usize);
+    for (entity_id, lane) in &staged.moves {
+        let index = cards.iter().find(|(id, _)| id == entity_id).unwrap().1;
+        if !game.move_card(index, *lane) {
+            return Err(format!(
+                "observed pre-reveal move of {} [{}] cannot be staged",
+                game.cards[index].def.id,
+                label(entity_id)
+            ));
+        }
+        game.ongoing();
+    }
+    let mut order: Vec<_> = staged.plays.iter().collect();
+    order.sort_by_key(|p| (p.card.lane, p.card.slot.as_i64().unwrap_or(0)));
+    for play in order {
+        let id = play.id.as_str().ok_or("missing card_id")?;
+        let index = push(&mut game, id, play.card.owner, &play.cost, &play.power)?;
+        if play.card.owner == 1 {
+            game.cards[index].permanent +=
+                2 * hidden_rng.randint(0, history.embassy_reveals as i64) as i32;
+            if history.chavez_reveals > 0
+                && hidden_rng.randrange(0, start.hand_counts[1].as_i64().unwrap_or(0).max(1), 1)
+                    == 0
+            {
+                game.cards[index].permanent += 3;
+            }
+        }
+        game.cards[index].lane = Some(play.card.lane);
+        game.cards[index].turn_played = play.turn as u8;
+        game.lanes[play.card.lane].cards.push(index);
+        cards.push((play.card.entity.clone(), index));
+        if play.turn == start.turn {
+            game.played[play.card.owner].push((index, play.card.lane));
+        } else {
+            game.pending_plays[play.card.owner].push((index, play.card.lane));
+        }
+    }
+    game.ongoing();
+    for play in &staged.plays {
+        let index = cards
+            .iter()
+            .find(|(id, _)| *id == play.card.entity)
+            .unwrap()
+            .1;
+        game.reveal(index);
+    }
+    game.end_turn_effects();
+    if target.terminal {
+        if game.total_turns as i64 != start.turn {
+            return Ok(vec![diff(
+                format!(
+                    "game length: simulator {}, observed final turn {}",
+                    game.total_turns, start.turn
+                ),
+                vec![],
+                vec![],
+            )]);
+        }
+        game.finish_reveals();
+    } else {
+        if (game.total_turns as i64) < target.turn {
+            return Ok(vec![diff(
+                format!(
+                    "game length: simulator ended on turn {}, observed turn {}",
+                    game.total_turns, target.turn
+                ),
+                vec![],
+                vec![],
+            )]);
+        }
+        if target.turn != start.turn && target.turn <= 3 {
+            let lane = (target.turn - 1) as usize;
+            if start.locations[lane].is_null() && target.locations[lane].is_null() {
+                return Err("next scheduled location was not observed revealed".into());
+            }
+            if start.locations[lane].is_null()
+                && target.location_turns[lane].as_i64() == Some(target.turn)
+                && !game.lanes[lane].revealed
+            {
+                let id = target.locations[lane].as_str().unwrap();
+                game.lanes[lane].def = locations::get(id).unwrap();
+                game.lanes[lane].state = game.lanes[lane].def.initial_state.map(|init| init());
+                game.location_reveal_order[game.current_location] = lane;
+            }
+        }
+        game.turn = target.turn as u8;
+        game.played = Default::default();
+        game.start_turn();
+    }
+    Ok(compare(&game, target, &cards))
+}
+
+fn compare(game: &Game<'_>, target: &Frame, cards: &[(Value, usize)]) -> Vec<Difference> {
+    let mut out = Vec::new();
+    let seats = ["local", "opponent"];
+    for (entity_id, index) in cards {
+        let card = &game.cards[*index];
+        let actual = entity(target, entity_id);
+        let predicted = card.lane;
+        let name = card.def.id.to_owned();
+        let label = format!("{} [{}]", name, label(entity_id));
+        let destroyed = game.destroyed.as_ref().and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|(card, _)| card == index)
+                .map(|(_, lane)| *lane)
+        });
+        if actual.is_none() {
+            let zone = if target.hand.iter().any(|c| c["entity_id"] == *entity_id) {
+                Some("hand")
+            } else {
+                target
+                    .out_of_play
+                    .iter()
+                    .find(|(id, _)| id == entity_id)
+                    .map(|(_, zone)| *zone)
+            };
+            if let Some(lane) = predicted {
+                out.push(diff(
+                    format!(
+                        "{label}: simulator kept it at lane {}; observed {}",
+                        lane + 1,
+                        zone.unwrap_or("off board")
+                    ),
+                    vec![name],
+                    vec![lane],
+                ));
+            } else if zone == Some("graveyard") && destroyed.is_none() {
+                out.push(diff(
+                    format!("{label}: observed destroyed, simulator did not destroy it"),
+                    vec![name],
+                    vec![],
+                ));
+            } else if matches!(zone, Some("hand" | "banished"))
+                && let Some(lane) = destroyed
+            {
+                out.push(diff(
+                    format!(
+                        "{label}: simulator destroyed it; observed in {}",
+                        zone.unwrap()
+                    ),
+                    vec![name],
+                    vec![lane],
+                ));
+            }
+            continue;
+        }
+        let actual = actual.unwrap();
+        let Some(lane) = predicted else {
+            out.push(diff(
+                format!(
+                    "{label}: simulator {} it; observed at lane {}",
+                    if destroyed.is_some() {
+                        "destroyed"
+                    } else {
+                        "removed"
+                    },
+                    actual.lane + 1
+                ),
+                vec![name],
+                vec![actual.lane],
+            ));
+            continue;
+        };
+        if lane != actual.lane {
+            out.push(diff(
+                format!(
+                    "{label} location: simulator lane {}, observed lane {}",
+                    lane + 1,
+                    actual.lane + 1
+                ),
+                vec![name.clone()],
+                vec![lane, actual.lane],
+            ));
+        }
+        if card.owner != actual.owner {
+            out.push(diff(
+                format!(
+                    "{label} owner: simulator {}, observed {}",
+                    seats[card.owner], seats[actual.owner]
+                ),
+                vec![name.clone()],
+                vec![actual.lane],
+            ));
+        }
+        if card.revealed != actual.revealed {
+            out.push(diff(
+                format!(
+                    "{label} reveal: simulator {}, observed {}",
+                    if card.revealed { "True" } else { "False" },
+                    if actual.revealed { "True" } else { "False" }
+                ),
+                vec![name.clone()],
+                vec![actual.lane],
+            ));
+        } else if actual.revealed {
+            if actual.id != name {
+                out.push(diff(
+                    format!("{label} identity: observed {}", label_value(&actual.id)),
+                    vec![name.clone(), label_value(&actual.id)],
+                    vec![actual.lane],
+                ));
+            }
+            if number(&actual.power) != Some(card.power()) {
+                out.push(diff(
+                    format!(
+                        "{label} power: simulator {}, observed {}",
+                        card.power(),
+                        label_value(&actual.power)
+                    ),
+                    vec![name.clone()],
+                    vec![actual.lane],
+                ));
+            }
+        }
+    }
+    type Addition = (usize, usize, Option<String>, Option<i32>);
+    fn increment(counts: &mut Vec<(Addition, usize)>, key: Addition) {
+        if let Some((_, count)) = counts.iter_mut().find(|(existing, _)| *existing == key) {
+            *count += 1;
+        } else {
+            counts.push((key, 1));
+        }
+    }
+    let mut predicted = Vec::new();
+    let mut observed = Vec::new();
+    for (lane, board) in game.lanes.iter().enumerate() {
+        for &index in &board.cards {
+            if cards.iter().any(|(_, id)| *id == index) {
+                continue;
+            }
+            let c = &game.cards[index];
+            increment(
+                &mut predicted,
+                (
+                    lane,
+                    c.owner,
+                    c.revealed.then(|| c.def.id.to_owned()),
+                    c.revealed.then(|| c.power()),
+                ),
+            );
+        }
+    }
+    for card in &target.board {
+        if cards.iter().any(|(id, _)| *id == card.entity) {
+            continue;
+        }
+        increment(
+            &mut observed,
+            (
+                card.lane,
+                card.owner,
+                card.id.as_str().map(str::to_owned),
+                if card.revealed {
+                    number(&card.power)
+                } else {
+                    None
+                },
+            ),
+        );
+    }
+    for (excess, other, origin) in [
+        (&observed, &predicted, "observed"),
+        (&predicted, &observed, "simulator"),
+    ] {
+        for ((lane, seat, id, power), count) in excess {
+            let count = count.saturating_sub(
+                other
+                    .iter()
+                    .find(|((l, s, name, p), _)| l == lane && s == seat && name == id && p == power)
+                    .map_or(0, |(_, count)| *count),
+            );
+            if count > 0 {
+                out.push(diff(
+                    format!(
+                        "lane {} {}: {origin}-only addition {count} × {} (power {})",
+                        lane + 1,
+                        seats[*seat],
+                        id.as_deref().unwrap_or("face-down"),
+                        power.map_or("None".to_owned(), |p| p.to_string())
+                    ),
+                    id.iter().cloned().collect(),
+                    vec![*lane],
+                ));
+            }
+        }
+    }
+    for (lane, board) in game.lanes.iter().enumerate() {
+        let id = (board.revealed && !board.def.id.is_empty()).then_some(board.def.id);
+        let actual = target.locations[lane].as_str();
+        if id != actual {
+            out.push(diff(
+                format!(
+                    "lane {} location: simulator {}, observed {}",
+                    lane + 1,
+                    id.unwrap_or("face-down"),
+                    actual.unwrap_or("face-down")
+                ),
+                vec![],
+                vec![lane],
+            ));
+        } else if let (Some(id), Some(observed), Some(predicted)) = (
+            actual,
+            target.location_turns[lane].as_u64(),
+            board.revealed_turn,
+        ) && observed != predicted as u64
+        {
+            out.push(diff(
+                format!(
+                    "lane {} {id} reveal turn: simulator {predicted}, observed {observed}",
+                    lane + 1
+                ),
+                vec![],
+                vec![lane],
+            ));
+        }
+        for (seat, name) in seats.iter().enumerate() {
+            let total = number(&target.totals[lane][name]);
+            let expected = total.unwrap_or_else(|| {
+                target
+                    .board
+                    .iter()
+                    .filter(|c| c.lane == lane && c.owner == seat && c.revealed)
+                    .map(|c| number(&c.power).unwrap_or(0))
+                    .sum()
+            });
+            let score = if total.is_some() {
+                game.powers()[lane][seat]
+            } else {
+                board
+                    .cards
+                    .iter()
+                    .filter(|&&id| game.cards[id].revealed && game.cards[id].owner == seat)
+                    .map(|&id| game.cards[id].power())
+                    .sum()
+            };
+            if score != expected {
+                let involved: BTreeSet<_> = board
+                    .cards
+                    .iter()
+                    .filter(|&&id| game.cards[id].revealed && game.cards[id].owner == seat)
+                    .map(|&id| game.cards[id].def.id.to_owned())
+                    .collect();
+                out.push(diff(
+                    format!(
+                        "lane {} {name} {}: simulator {score}, observed {expected}",
+                        lane + 1,
+                        if total.is_some() {
+                            "total"
+                        } else {
+                            "visible total"
+                        }
+                    ),
+                    involved.into_iter().collect(),
+                    vec![lane],
+                ));
+            }
+        }
+    }
+    out
+}
+fn label_value(value: &Value) -> String {
+    label(value)
+}

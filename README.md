@@ -1,6 +1,17 @@
 # snapsim
 
-Rust port of the Python reference simulator. Every card (84 deck cards and 10 tokens) and every location (84) the reference implements is registered. The full-content parity gate below matches the reference game for game.
+The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (84 deck cards and 10 tokens) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`); every part was proven identical to it before Python was retired. See "Python reference (frozen)" below.
+
+## Command line
+
+Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim --help` or add `--help` to any subcommand for the complete argument list.
+
+* `deckbuild --collection FILE` searches owned cards. Optional inputs are `--decks FILE`, `--selected FILE`, or `--base-deck FILE_OR_IDS --try-cards IDS`. Search controls are `--count`, `--time-budget`, `--workers`, `--seed`, and `--confirm-rollouts`. `--progress` emits JSON progress and result lines, `--output FILE` saves the result, and Ctrl-C returns the best available result with status `cancelled`.
+* `position [--file FILE]` reads a position (stdin by default). `--snap` accepts a SNAP observation; supply its starting deck with `--snap-deck FILE` or `--deck-code CODE`. Search controls are `--mode recruit`, `--rollouts`, `--seed`, `--time-limit`, `--max-plans`, and `--approximate`.
+* `coverage` prints supported card and location IDs.
+* `compare --mode recruit` or `compare --deck-file FILE` compares advisors in paired seats. Options include `--hero-deck`, `--deck-prior`, `--games`, `--seed`, `--workers`, `--rollouts`, `--time-limit`, and the per-side `--a-rollouts`, `--a-playout`, `--a-prior` and corresponding `--b-*` flags.
+* `benchmark --mode recruit` or `benchmark --deck-file FILE` compares controllers. It accepts `--games`, `--seed`, `--rollouts`, and `--opponent`.
+* The game-log replay checker is the separate binary `snapsim-replaycheck FILE...` (`cargo build --release -p snapsim --bin snapsim-replaycheck`). It replays recorded turns and reports each as consistent, inconsistent or not checkable; use it to validate rule changes against real matches.
 
 ## Architecture
 
@@ -12,22 +23,22 @@ The engine exposes location replacement, delayed reveal scheduling, location cos
 
 ## Adding content
 
-1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the Python card/location ID and the necessary hooks, and register it in the corresponding `REGISTRY`. Use the catalog's current printed stats; do not invent stand-in rules.
-2. Add focused boundary tests and a differential Python parity case for the rule. For a random effect, test seeds and the order of random calls. Add the card or location to `parity/corpus-full-{spread,margin}.json`.
-3. Run the full parity gate below for both policies, `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
+1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and register it in the corresponding `REGISTRY`. Tokens also go in `cards::NON_OWNABLE`. Use the catalog's current printed stats; do not invent stand-in rules.
+2. Add focused boundary tests. For a random effect, test seeds and the order of random calls. New rules have no Python counterpart: check them against real matches that contain the card or location with `snapsim-replaycheck`.
+3. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and the Python parity gates below. Gates for unchanged content must still pass. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
 
 ## Advisor and Python binding
 
-`snapsim::advise::advise_json(position_json, options_json)` accepts the JSON from Python `Position.to_dict()`. Options contain `rollouts`, `seed`, `max_plans`, `time_limit` (seconds or null), `playout` (`spread`, `heuristic`, or `margin`), and `workers`. The Python position layer must also supply `unsupported`, `priors`, and `status`: it remains the single source of truth for coverage and prior descriptions. Missing fields are errors. The Python layer blocks strict unsupported positions before calling Rust; approximate searches pass through. Results retain `"engine": "simulator-rollout"`.
+`snapsim::advise::advise_json(position_json, options_json)` takes a position in the `Position` JSON shape (validated by `Position::from_json`). Options are `rollouts`, `seed`, `max_plans`, `time_limit` (seconds or null), `approximate`, `playout` (`spread`, `heuristic` or `margin`) and `workers`. It computes coverage, sampling priors and status itself; strict searches return unsupported positions without running rollouts. Results keep `"engine": "simulator-rollout"`.
 
-Build the optional Python extension without installing into any virtual environment:
+The `snapsim_py` module exposes `advise(position_json, options_json, cancel=None)`, `position_from_snap(observation_json, options_json)` (raising `snapsim_py.NotPlanningError` for frames that are not a planning point), `coverage`, `supported`, `deck_eligible_ids`, `recruit_card_pool`, `recruit_card_weights` and `deckbuild(args_json, progress=None, cancel=None)`. Values are JSON strings. It is built for the stable Python ABI (abi3, Python 3.9 or newer), so one build loads in any of those interpreters. Build it without installing into any virtual environment:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
 crates/snapsim-py/build-module.sh
 ```
 
-It writes `target/release/snapsim_py.so`; the advice worktree loads that path by default, or the file or directory specified by `SNAPSIM_PY_PATH`. Generate and compare advisor cases from real recordings and SearchAI games with:
+It writes `snapsim_py.so` next to the release build (`target/release/`, or `$CARGO_TARGET_DIR/release/`). Snapper-Assist loads `target/release/snapsim_py.so` from this repository by default, or the file or directory named by `SNAPSIM_PY_PATH`. Generate and compare advisor cases from real recordings and SearchAI games with:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
@@ -48,7 +59,7 @@ The generator includes approximate positions, preserves watcher state across rec
 restores visible state and pending reveals, and leaves the RNG at the playout
 state. `state_json` provides a canonical dump for differential testing. Known
 catalog cards without rules and unknown locations use inert approximate
-stand-ins; coverage decisions remain the Python position layer's responsibility.
+stand-ins; the Rust coverage layer reports unsupported content and state.
 
 Generate positions from both seats of seeded SearchAI games, hand-made edge
 cases, and recorded SNAP observations (using `LocationWatch` and `DeckWatch`):
@@ -69,6 +80,25 @@ the comparison reports the first differing state field. The recording corpus is
 local and may vary between runs.
 
 ## Parity and checks
+
+`Position::from_json` validates the Python position format, with one deliberate
+difference: integers must also fit the destination Rust field (`u8` turns,
+`i32` power and energy, and `usize` counts). Python integers are unbounded.
+The validation parity gate compares in-range cases to Python and requires
+out-of-range cases to be rejected separately. Generate the two JSONL inputs
+using the position and advisor recipes above, then run from a temporary cwd:
+
+```sh
+ROOT="$PWD"
+cd "$(mktemp -d)"
+PYTHONPATH=$SNAPSIM_REFERENCE \
+  $SNAPSIM_PYTHON \
+  "$ROOT/parity/validation_record.py" /tmp/snapsim-validation.jsonl \
+  --corpus /tmp/snapsim-position-cases.jsonl --corpus /tmp/snapsim-advisor.jsonl \
+  --runs $SNAPSIM_RUNS
+cargo run --manifest-path "$ROOT/Cargo.toml" --bin snapsim-validation-parity -- \
+  /tmp/snapsim-validation.jsonl
+```
 
 The gate matches 1,000 seeded full games each for spread and margin on `parity/corpus-full-*.json`: all 84 deck cards and all 84 locations, with decks drawn uniformly. It compares initial decks and locations, every turn's plans, reveal priority and lane powers, and the final winner. Merging the earlier per-group corpora exposed one cross-group bug: location cost modifiers were applied to board cards (Elektra at Elysium). `tests/costs.rs` covers it. `parity/corpus-{spread,margin}.json` is the original 25-card representative corpus that the first benchmark used.
 
@@ -92,6 +122,26 @@ done
 ```
 
 `snapsim-parity` independently samples decks from each recorded seed, replays the game and reports the first differing JSON field. Measured full-content and advisor-rollout throughput are in `BENCHMARKS.md`.
+
+## Python reference (frozen)
+
+The Python simulator (`Marvel-snap-simulator`, branch `stronger-advice` in the `Marvel-snap-simulator-advice` worktree) is retired and receives no rule changes. It remains the oracle for the gates below. They prove that unchanged content still behaves exactly as it did there, and are expected to differ only where a rule is deliberately changed or added here. The scripts need that checkout on `PYTHONPATH` and a Python with `loguru` (Snapper-Assist's `.venv`). Run them from a temporary directory.
+
+| Gate | Command (oracle → Rust check) | Result on the integrated build |
+|---|---|---|
+| Full games | `parity/record.py` → `snapsim-parity`, per policy | 1,000 spread and 1,000 margin games identical |
+| Position building | `parity/position_record.py` → `snapsim-position-parity` | 2,400 position–seed pairs |
+| Advisor | `parity/record_advisor.py` → `snapsim-advisor-parity` | 898 records (449 per playout), 0 mismatches |
+| Coverage, priors, strict advice | `parity/coverage_parity.py snapsim-coverage-parity POSITIONS ADVISOR` | 3,307 positions, plus 9 approximate edge positions |
+| Position validation | `parity/validation_record.py` → `snapsim-validation-parity` | 4,118 accepted and 2,932 rejected alike; 337 out-of-range rejected (see above) |
+| SNAP adapter and watches | `parity/snap_record.py RECORDINGS` → `snapsim-snap-parity`; `parity/snap_binding.py MODULE ORACLE` | 1,047 recorded frames (190 positions, 857 errors), core and Python module |
+| Deck codes and deck files | `parity/compare_deckcodes.py snapsim-deckcodes-parity` | 40/40 cases |
+| Compare and benchmark harness | `parity/compare_harness.py snapsim-compare-parity` | 100 Recruit deal pairs, 9 harness configurations |
+| Deck builder | `SNAPSIM_PY_PATH=MODULE parity/deckbuild_compare.py`; again with `SNAPSIM_COMPLETE_ONLY=1` | 12 cancellation cut-offs and 1 complete run identical |
+| Command line | `SNAPSIM_BIN=snapsim parity/cli_compare.py`, `cli_deckbuild.py`, `cli_snap.py` | 7 + 1 + 2 cases |
+| Replay checker | `parity/replay_compare.py --python PY --reference REF --rust snapsim-replaycheck RECORDINGS` | 12 recordings byte-identical, one at a time and together; the six Recruit matches give 26 consistent, 0 inconsistent, 5 not checkable |
+
+The Python suite of the frozen checkout (360 tests) also passes against this module.
 
 Refresh data and regenerate RNG fixtures:
 

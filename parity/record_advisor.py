@@ -11,7 +11,7 @@ from pathlib import Path
 import advisor
 from factories import resolve_deck
 from game import Game
-from position import Position, coverage, quiet, recruit_card_pool, recruit_location_pool, sampling_priors
+from position import Position, quiet, recruit_card_pool, recruit_location_pool
 from snap_adapter import DeckWatch, LocationWatch, NotPlanningError, position_from_snap
 
 
@@ -75,16 +75,13 @@ def main():
         with args.output.open('w') as output:
             for index, (position, source) in enumerate(positions):
                 counts[source] = counts.get(source, 0) + 1
-                unsupported = coverage(position)
                 for name in ('spread', 'margin'):
                     kwargs = dict(rollouts=args.rollouts, seed=args.seed + index, max_plans=5,
                                   time_limit=None, approximate=True, workers=1,
                                   playout=advisor.playout_policy(name))
                     expected = advisor.advise(position, **kwargs)
                     options = dict(rollouts=kwargs['rollouts'], seed=kwargs['seed'], max_plans=5,
-                                   time_limit=None, workers=1, playout=name,
-                                   unsupported=unsupported, priors=sampling_priors(position),
-                                   status=expected['status'])
+                                   time_limit=None, approximate=True, workers=1, playout=name)
                     print(json.dumps(dict(source=source, position=position.to_dict(), options=options,
                                           expected=expected), separators=(',', ':')), file=output)
         print(json.dumps({'positions': len(positions), 'sources': counts}))

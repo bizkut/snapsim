@@ -112,8 +112,8 @@ static LOCATION_FALLBACKS: LazyLock<HashMap<&'static str, LocationDef>> = LazyLo
         })
         .collect()
 });
-static UNKNOWN_LOCATION: LocationDef = locations::location("", 0, 0, 1, false);
-fn location_def(id: &str) -> Option<&'static LocationDef> {
+pub(crate) static UNKNOWN_LOCATION: LocationDef = locations::location("", 0, 0, 1, false);
+pub(crate) fn location_def(id: &str) -> Option<&'static LocationDef> {
     locations::get(id).or_else(|| LOCATION_FALLBACKS.get(id))
 }
 pub(crate) fn card_def(id: &str) -> Result<&'static CardDef, String> {
@@ -121,20 +121,20 @@ pub(crate) fn card_def(id: &str) -> Result<&'static CardDef, String> {
         .or_else(|| CARD_FALLBACKS.get(id))
         .ok_or_else(|| format!("unknown card ID {id:?}"))
 }
-fn recruit_source(s: &str) -> bool {
+pub(crate) fn recruit_source(s: &str) -> bool {
     matches!(
         s,
         "Starter Card" | "Recruit Season" | "Collection Level 1-14" | "Series 1"
     )
 }
-fn outside<'a>(ids: impl IntoIterator<Item = &'a String>) -> bool {
+pub(crate) fn outside<'a>(ids: impl IntoIterator<Item = &'a String>) -> bool {
     ids.into_iter().any(|id| {
         CARD_DATA
             .get(id)
             .is_some_and(|d| d.status == "released" && !recruit_source(&d.source))
     })
 }
-fn recruit_cards() -> Vec<String> {
+pub fn recruit_cards() -> Vec<String> {
     cards::deck_eligible_ids()
         .iter()
         .filter(|id| {
@@ -145,13 +145,13 @@ fn recruit_cards() -> Vec<String> {
         .map(|id| (*id).to_owned())
         .collect()
 }
-fn all_cards() -> Vec<String> {
+pub(crate) fn all_cards() -> Vec<String> {
     cards::deck_eligible_ids()
         .iter()
         .map(|s| (*s).to_owned())
         .collect()
 }
-fn all_locations(recruit: bool) -> Vec<String> {
+pub(crate) fn all_locations(recruit: bool) -> Vec<String> {
     let mut ids: Vec<_> = locations::REGISTRY
         .iter()
         .filter(|d| {
@@ -179,7 +179,7 @@ fn sample<T: Clone>(rng: &mut PythonRandom, pool: &[T], count: usize) -> Result<
         .map(|i| pool[i].clone())
         .collect())
 }
-fn make_card(id: &str, owner: usize) -> Result<Card, String> {
+pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
     let def = card_def(id)?;
     let row = CARD_DATA
         .get(id)
@@ -201,7 +201,7 @@ fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         state: def.initial_state.map(|init| init()),
     })
 }
-fn recruit_weights() -> HashMap<String, f64> {
+pub fn recruit_weights() -> HashMap<String, f64> {
     let pool = recruit_cards();
     let mut sizes: HashMap<&str, usize> = HashMap::new();
     for id in &pool {
@@ -381,8 +381,17 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         played_on_reveal: [false; 2],
         delays_reveals: false,
         delayed_reveals: Default::default(),
+        current_location: 0,
+        location_reveal_order: [0, 1, 2],
+        destroyed: None,
         rng: RefCell::new(rng),
     };
+    // Python's Game._from_position: revealed lanes count as already scheduled, and the
+    // remaining reveals follow the hidden lanes in lane order.
+    let mut order: Vec<usize> = (0..3).filter(|&lane| game.lanes[lane].revealed).collect();
+    game.current_location = order.len();
+    order.extend((0..3).filter(|&lane| !game.lanes[lane].revealed));
+    game.location_reveal_order = [order[0], order[1], order[2]];
     game.delays_reveals = game
         .lanes
         .iter()

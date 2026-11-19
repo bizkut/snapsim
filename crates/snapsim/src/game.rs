@@ -132,6 +132,13 @@ pub struct Game<'a> {
     pub played_on_reveal: [bool; 2],
     pub delays_reveals: bool,
     pub delayed_reveals: [Vec<usize>; 2],
+    /// Python's `current_location`: scheduled reveals consumed so far. A lane that a
+    /// card already revealed (Scarlet Witch, Magik) still uses up its scheduled turn.
+    pub current_location: usize,
+    /// Python's `_location_reveal_order`: lanes in the order the schedule reveals them.
+    pub location_reveal_order: [usize; 3],
+    /// Optional replay observer, populated only for explicitly observed games.
+    pub destroyed: Option<Vec<(usize, usize)>>,
     pub rng: RefCell<&'a mut dyn GameRng>,
 }
 
@@ -294,6 +301,9 @@ impl<'a> Game<'a> {
             played_on_reveal: [false; 2],
             delays_reveals: false,
             delayed_reveals: Default::default(),
+            current_location: 0,
+            location_reveal_order: [0, 1, 2],
+            destroyed: None,
             rng: RefCell::new(rng),
         })
     }
@@ -681,6 +691,9 @@ impl<'a> Game<'a> {
             return false;
         }
         self.lanes[lane].cards.retain(|&id| id != card);
+        if let Some(destroyed) = &mut self.destroyed {
+            destroyed.push((card, lane));
+        }
         self.cards[card].lane = None;
         if self.cards[card].revealed
             && let Some(hook) = self.cards[card].def.on_destroy
@@ -719,21 +732,23 @@ impl<'a> Game<'a> {
             self.set_energy(seat, i32::from(self.turn));
             self.draw(seat);
         }
-        let revealed = self.lanes.iter().filter(|lane| lane.revealed).count();
-        if revealed < usize::from(self.turn).min(self.lanes.len())
-            && let Some(lane) = self.lanes.iter().position(|lane| !lane.revealed)
-        {
-            self.lanes[lane].revealed = true;
-            self.lanes[lane].revealed_turn = Some(self.turn);
-            self.delays_reveals |= self.lanes[lane].def.delays_reveals;
-            self.emit(Event::LocationRevealed { lane });
-            if let Some(hook) = self.lanes[lane].def.on_reveal {
-                hook(self, lane);
-            }
-            self.set_total_turns(self.total_turns.max(self.lanes[lane].def.minimum_turns));
-            for seat in 0..2 {
-                let energy = self.players[seat].energy + self.lanes[lane].def.reveal_energy;
-                self.set_energy(seat, energy);
+        // Python: reveal the next scheduled lane unless it was already revealed.
+        if self.current_location < usize::from(self.turn).min(self.lanes.len()) {
+            let lane = self.location_reveal_order[self.current_location];
+            self.current_location += 1;
+            if !self.lanes[lane].revealed {
+                self.lanes[lane].revealed = true;
+                self.lanes[lane].revealed_turn = Some(self.turn);
+                self.delays_reveals |= self.lanes[lane].def.delays_reveals;
+                self.emit(Event::LocationRevealed { lane });
+                if let Some(hook) = self.lanes[lane].def.on_reveal {
+                    hook(self, lane);
+                }
+                self.set_total_turns(self.total_turns.max(self.lanes[lane].def.minimum_turns));
+                for seat in 0..2 {
+                    let energy = self.players[seat].energy + self.lanes[lane].def.reveal_energy;
+                    self.set_energy(seat, energy);
+                }
             }
         }
         self.ongoing();
@@ -982,7 +997,8 @@ impl<'a> Game<'a> {
             }
         }
     }
-    pub fn play_turn(&mut self, policy: crate::policy::Policy) -> TurnTrace {
+    /// Start the next turn: clear last turn's plays and draw, reveal and refresh.
+    fn begin_turn(&mut self) {
         self.played = Default::default();
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
@@ -991,7 +1007,31 @@ impl<'a> Game<'a> {
                 .collect()
         });
         self.start_turn();
-        self.resolve_started_turn(None, policy, None)
+    }
+
+    pub fn play_turn(&mut self, policy: crate::policy::Policy) -> TurnTrace {
+        self.begin_turn();
+        self.resolve_started_turn(None, |game, _| {
+            let mut rng = game.rng.borrow_mut();
+            Ok([
+                policy.plan(game, 0, &mut **rng),
+                policy.plan(game, 1, &mut **rng),
+            ])
+        })
+        .expect("built-in policies always plan")
+    }
+
+    /// Play a turn whose plans come from `planner(game, seat, priority)`, called for seat
+    /// 0 and then seat 1 after the turn has started and reveal priority was chosen (the
+    /// same RNG order as Python's turn loop). Plans hold arena card indices and lanes.
+    pub fn play_turn_with<F>(&mut self, mut planner: F) -> Result<TurnTrace, String>
+    where
+        F: FnMut(&Game<'a>, usize, usize) -> Result<Vec<(usize, usize)>, String>,
+    {
+        self.begin_turn();
+        self.resolve_started_turn(None, |game, priority| {
+            Ok([planner(game, 0, priority)?, planner(game, 1, priority)?])
+        })
     }
 
     /// Resolve a materialized planning state without drawing or starting the turn again.
@@ -1008,15 +1048,66 @@ impl<'a> Game<'a> {
                 .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
                 .collect()
         });
-        self.resolve_started_turn(Some(my_plan), policy, priority)
+        self.resolve_started_turn(priority, |game, _| {
+            let mut rng = game.rng.borrow_mut();
+            Ok([my_plan.to_vec(), policy.plan(game, 1, &mut **rng)])
+        })
+        .expect("built-in policies always plan")
     }
 
-    fn resolve_started_turn(
+    /// Resolve all remaining face-down cards at the completed game boundary.
+    pub fn finish_reveals(&mut self) {
+        self.delays_reveals = false;
+        let pending = std::mem::take(&mut self.delayed_reveals);
+        for seat in pending {
+            for id in seat {
+                self.reveal(id);
+            }
+        }
+        let unresolved: Vec<_> = self
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .filter(|&id| !self.cards[id].revealed)
+            .collect();
+        for id in unresolved {
+            self.reveal(id);
+        }
+    }
+
+    /// Apply the effects at the end of an already-revealed turn.
+    pub fn end_turn_effects(&mut self) {
+        let observers: Vec<_> = self
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .filter(|&id| self.cards[id].revealed)
+            .collect();
+        for id in observers {
+            if let Some(hook) = self.cards[id].def.end_turn {
+                hook(self, id);
+            }
+        }
+        self.ongoing();
+        for lane in 0..3 {
+            if self.lanes[lane].revealed
+                && let Some(hook) = self.lanes[lane].def.on_turn_end
+            {
+                hook(self, lane);
+                self.ongoing();
+            }
+        }
+        self.emit(Event::TurnEnd);
+    }
+
+    fn resolve_started_turn<P>(
         &mut self,
-        my_plan: Option<&[(usize, usize)]>,
-        policy: crate::policy::Policy,
         priority: Option<usize>,
-    ) -> TurnTrace {
+        plan: P,
+    ) -> Result<TurnTrace, String>
+    where
+        P: FnOnce(&Self, usize) -> Result<[Vec<(usize, usize)>; 2], String>,
+    {
         let pending = std::mem::take(&mut self.delayed_reveals);
         let winner = self.winner();
         let priority = priority.unwrap_or_else(|| {
@@ -1026,13 +1117,7 @@ impl<'a> Game<'a> {
                 winner as usize
             }
         });
-        let plans = {
-            let mut rng = self.rng.borrow_mut();
-            [
-                my_plan.map_or_else(|| policy.plan(self, 0, &mut **rng), |plan| plan.to_vec()),
-                policy.plan(self, 1, &mut **rng),
-            ]
-        };
+        let plans = plan(self, priority)?;
         let plays = std::array::from_fn(|seat| {
             plans[seat]
                 .iter()
@@ -1077,27 +1162,7 @@ impl<'a> Game<'a> {
                 self.reveal(id);
             }
         }
-        let observers: Vec<_> = self
-            .lanes
-            .iter()
-            .flat_map(|lane| lane.cards.iter().copied())
-            .filter(|&id| self.cards[id].revealed)
-            .collect();
-        for id in observers {
-            if let Some(hook) = self.cards[id].def.end_turn {
-                hook(self, id);
-            }
-        }
-        self.ongoing();
-        for lane in 0..3 {
-            if self.lanes[lane].revealed
-                && let Some(hook) = self.lanes[lane].def.on_turn_end
-            {
-                hook(self, lane);
-                self.ongoing();
-            }
-        }
-        self.emit(Event::TurnEnd);
+        self.end_turn_effects();
         let result = TurnTrace {
             turn: self.turn,
             priority,
@@ -1105,26 +1170,9 @@ impl<'a> Game<'a> {
             powers: self.powers(),
         };
         if self.turn >= self.total_turns {
-            self.delays_reveals = false;
-            let pending = std::mem::take(&mut self.delayed_reveals);
-            for seat in pending {
-                for id in seat {
-                    self.reveal(id);
-                }
-            }
-            // Approximate snapshots can contain face-down cards of unknown timing.
-            // Python's finish_reveals flips these in lane/slot order before scoring.
-            let unresolved: Vec<_> = self
-                .lanes
-                .iter()
-                .flat_map(|lane| lane.cards.iter().copied())
-                .filter(|&id| !self.cards[id].revealed)
-                .collect();
-            for id in unresolved {
-                self.reveal(id);
-            }
+            self.finish_reveals();
         }
         self.turn += 1;
-        result
+        Ok(result)
     }
 }

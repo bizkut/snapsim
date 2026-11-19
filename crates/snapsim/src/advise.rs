@@ -1,5 +1,6 @@
 //! Successive-halving search over sampled hidden-information games.
 use crate::{
+    coverage::{coverage, sampling_priors},
     game::Game,
     policy::Policy,
     position::{Position, build_game},
@@ -15,18 +16,16 @@ use std::{
 
 type Play = (usize, usize);
 
-#[derive(Deserialize)]
-struct Options {
-    rollouts: usize,
-    seed: i128,
-    max_plans: usize,
-    time_limit: Option<f64>,
-    playout: String,
-    workers: usize,
-    // Coverage and prior descriptions are calculated by Python's position module.
-    unsupported: Value,
-    priors: Value,
-    status: String,
+#[derive(Clone, Debug, Deserialize)]
+pub struct AdviseOptions {
+    pub rollouts: usize,
+    pub seed: i128,
+    pub max_plans: usize,
+    pub time_limit: Option<f64>,
+    #[serde(default)]
+    pub approximate: bool,
+    pub playout: String,
+    pub workers: usize,
 }
 
 #[derive(Clone)]
@@ -145,8 +144,7 @@ fn play_out(game: &mut Game<'_>, position: &Position, plays: &[Play], policy: Po
     game.winner()
 }
 
-/// JSON interface. Coverage, prior metadata and status are supplied by the Python
-/// position layer as additional options, preserving a single source of truth.
+/// JSON interface for the self-contained advisor.
 pub fn advise_json(position_json: &str, options_json: &str) -> Result<String, String> {
     advise_json_with_cancel(position_json, options_json, &|| false)
 }
@@ -157,8 +155,17 @@ pub fn advise_json_with_cancel(
     options_json: &str,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<String, String> {
-    let position: Position = serde_json::from_str(position_json).map_err(|e| e.to_string())?;
-    let options: Options = serde_json::from_str(options_json).map_err(|e| e.to_string())?;
+    let position = Position::from_json(position_json)?;
+    let options: AdviseOptions = serde_json::from_str(options_json).map_err(|e| e.to_string())?;
+    serde_json::to_string(&advise(&position, &options, cancel)?).map_err(|e| e.to_string())
+}
+
+/// Search a position, reporting unsupported state without requiring a rollout.
+pub fn advise(
+    position: &Position,
+    options: &AdviseOptions,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Value, String> {
     if options.rollouts == 0 || options.max_plans == 0 || options.workers == 0 {
         return Err("rollouts, max_plans and workers must be positive".into());
     }
@@ -174,6 +181,32 @@ pub fn advise_json_with_cancel(
         "margin" => Policy::Margin,
         _ => return Err("unknown playout policy".into()),
     };
+    let unsupported = coverage(position);
+    let priors = sampling_priors(position);
+    let incomplete = unsupported
+        .as_object()
+        .expect("coverage is an object")
+        .values()
+        .any(|value| match value {
+            Value::Null => false,
+            Value::Array(values) => !values.is_empty(),
+            Value::Bool(value) => *value,
+            _ => true,
+        });
+    let status = if incomplete {
+        if options.approximate {
+            "approximate"
+        } else {
+            "unsupported"
+        }
+    } else {
+        "ok"
+    };
+    if incomplete && !options.approximate {
+        return Ok(
+            json!({"engine":"simulator-rollout", "status":status, "rollouts":0, "plans":[], "unsupported":unsupported, "priors":priors}),
+        );
+    }
     let deadline = options
         .time_limit
         .and_then(|v| Instant::now().checked_add(Duration::from_secs_f64(v)));
@@ -181,7 +214,7 @@ pub fn advise_json_with_cancel(
     let mut rng = PythonRandom::seed(options.seed);
     let mut sample_seed = rng.getrandbits(64) as u64;
     let mut first_rng = PythonRandom::seed(sample_seed as i128);
-    let mut first_game = build_game(&position, &mut first_rng)?;
+    let mut first_game = build_game(position, &mut first_rng)?;
     let mut legal = legal_plans(&first_game, &stopped);
     let limit = options
         .rollouts
@@ -235,7 +268,7 @@ pub fn advise_json_with_cancel(
             }
             cursor += batch_size;
             if first {
-                let winner = play_out(&mut first_game, &position, &active[0].plays, policy);
+                let winner = play_out(&mut first_game, position, &active[0].plays, policy);
                 active[0].record(winner);
                 remaining -= 1;
                 continue;
@@ -245,10 +278,10 @@ pub fn advise_json_with_cancel(
                     return Ok(None);
                 }
                 let mut rng = PythonRandom::seed(seed as i128);
-                let mut game = build_game(&position, &mut rng)?;
+                let mut game = build_game(position, &mut rng)?;
                 Ok(Some((
                     index,
-                    play_out(&mut game, &position, &active[index].plays, policy),
+                    play_out(&mut game, position, &active[index].plays, policy),
                 )))
             };
             let completed: Vec<_> = if let Some(pool) = &pool {
@@ -281,12 +314,9 @@ pub fn advise_json_with_cancel(
     let plans: Vec<_> = active
         .iter()
         .take(options.max_plans)
-        .map(|c| c.result(&position))
+        .map(|c| c.result(position))
         .collect();
-    serde_json::to_string(
-        &json!({"engine": "simulator-rollout", "status": options.status,
+    Ok(json!({"engine": "simulator-rollout", "status": status,
         "rollouts": options.rollouts - remaining, "plans": plans,
-        "unsupported": options.unsupported, "priors": options.priors}),
-    )
-    .map_err(|e| e.to_string())
+        "unsupported": unsupported, "priors": priors}))
 }
