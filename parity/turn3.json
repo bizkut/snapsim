@@ -1,0 +1,13 @@
+{
+  "turn": 3,
+  "energy": 3,
+  "mode": "recruit",
+  "hand": [{"id": "Hulk"}, {"id": "Sentinel"}, {"id": "MistyKnight"}, {"id": "Shocker"}],
+  "deck": ["TheThing", "Cyclops", "Abomination", "IronMan", "Medusa", "Hawkeye"],
+  "locations": [
+    {"id": "Xandar", "mine": [{"id": "Quicksilver"}], "theirs": [{"id": "MistyKnight"}]},
+    {"id": "Wakanda", "mine": [], "theirs": [{"id": "Shocker"}]},
+    {"id": "KamarTaj", "mine": [], "theirs": []}
+  ],
+  "opponent": {"hand": 4, "deck": 5}
+}
