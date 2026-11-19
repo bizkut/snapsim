@@ -114,6 +114,7 @@ fn card_ref(game: &Game<'_>, id: usize, board: bool) -> CardRef {
         } else {
             None
         },
+        ..Default::default()
     }
 }
 
@@ -192,6 +193,7 @@ pub fn search_position(
             pool: None,
             pending_power: other.next_play_power,
             prior: prior.map(str::to_owned),
+            ..Default::default()
         },
         priority: priority.map(|p| if p == seat { "me" } else { "opponent" }.to_owned()),
         mode: mode.map(str::to_owned),
@@ -203,6 +205,7 @@ pub fn search_position(
             player.snapped_turns.contains(&game.turn),
             other.snapped_turns.contains(&game.turn),
         ]),
+        ..Default::default()
     }
 }
 
@@ -241,7 +244,7 @@ pub fn search_plan(
             .and_then(Value::as_bool)
             .unwrap_or(false),
     };
-    let result = advise::advise(&position, &options, &|| false)?;
+    let result = advise::advise_with_game(&position, &options, &|| false, Some((game, seat)))?;
     let plan = result["plans"]
         .as_array()
         .and_then(|p| p.first())
@@ -689,7 +692,7 @@ pub fn benchmark(args: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{episode_seed, paired_95, wilson_95};
+    use super::{compare_pair, episode_seed, paired_95, wilson_95};
     use serde_json::json;
 
     #[test]
@@ -725,5 +728,23 @@ mod tests {
             json!({"score": 0.5875,
             "ci95": [0.42353691404462696, 0.751463085955373], "pairs": 20})
         );
+    }
+
+    #[test]
+    fn search_stages_fuzz_pair_actions_legally() {
+        let options = json!({
+            "decks": [
+                ["ArthurPendragon", "NicholasScratch", "MajesticWingbeat", "CaptainMarvel",
+                 "ZombieGalacti", "WebSling", "Bishop", "Korg", "WerewolfByNight",
+                 "Nightcrawler", "Magik", "ZombieScarletWitch"],
+                ["WebSling", "DeafeningChord", "Zabu", "Surge", "Kluh", "TheHunger",
+                 "Punisher", "JeffTheBabyDolphin", "KarimaShapandar", "TechnoOrganicVirus",
+                 "Echo", "Medusa"]
+            ],
+            "a": {"rollouts": 4}, "b": {"rollouts": 4}
+        });
+        for seed in 0..3 {
+            compare_pair(seed, &options).unwrap();
+        }
     }
 }

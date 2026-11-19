@@ -112,3 +112,161 @@ fn next_reveal_uses_first_hidden_lane() {
     assert!(game.lanes[0].revealed);
     assert_eq!(game.lanes[0].revealed_turn, Some(4));
 }
+
+#[test]
+fn observed_quickdraw_uses_last_matching_entry() {
+    let p: Position = serde_json::from_value(json!({
+        "turn":4,"energy":4,"deck":[],
+        "hand":[
+            {"id":"Hulk","turns_drawn":[[1,false],[4,false]]},
+            {"id":"IronMan","turns_drawn":[[3,true]]},
+            {"id":"Medusa","turns_drawn":[[3,false]]},
+            {"id":"Cyclops","turns_drawn":[[4,true],[3,false]]}
+        ],
+        "locations":[{"id":"Xandar","mine":[],"theirs":[]},{"id":"OttosLab","mine":[],"theirs":[]},{"id":"KamarTaj","mine":[],"theirs":[]}],
+        "opponent":{"hand":0,"deck":0}
+    })).unwrap();
+    let mut rng = PythonRandom::seed(7);
+    let game = build_game(&p, &mut rng).unwrap();
+    let hand = &game.players[0].hand;
+    assert!(game.is_quickdraw_active(hand[0]));
+    assert!(game.is_quickdraw_active(hand[1]));
+    assert!(!game.is_quickdraw_active(hand[2]));
+    assert!(game.is_quickdraw_active(hand[3]));
+    assert_eq!(game.players[0].draws.len(), 6);
+}
+
+#[test]
+fn snap_observed_ledger_and_resolution_are_hydrated() {
+    let card = |id: &str, entity: i32, power: i32, order: u32| {
+        json!({
+            "card_id":id,"entity_id":entity,"owner_entity_id":10,"cost":2,"power":power,
+            "revealed":true,"zone_position":entity,"turn_revealed":2,"latest_resolution_order":order,
+            "turns_drawn":[[1,false],[3,true]],"activated":true,"moves_per_turn":{"2":1,"3":2},
+            "created":true,"created_by_card_id":"Agent13","created_by_player_entity_id":20,
+            "stat_updates":[{"stat":"Power","update":"Add","value":1,"player_source_entity_id":10,
+                "updater_card_id":"BlueMarvel","updater_location_id":null},
+                {"stat":"Power","update":"Add","value":-2,"player_source_entity_id":20,
+                "updater_card_id":"Scorpion","updater_location_id":null}]
+        })
+    };
+    let mut hulk = card("Hulk", 11, 13, 8);
+    hulk["merged_to_entity_id"] = json!(12);
+    hulk["stat_updates"].as_array_mut().unwrap().splice(0..0, [
+        json!({"stat":"Power","update":"Add","value":1,"player_source_entity_id":10,"updater_card_id":"BlueMarvel","updater_faction_id":"Avengers"}),
+        json!({"stat":"Power","update":"Add","value":1,"player_source_entity_id":10,"updater_card_id":"BlueMarvel","updater_augment_id":"AugmentA"}),
+        json!({"stat":"Power","update":"Add","value":1,"player_source_entity_id":10,"updater_card_id":"BlueMarvel","updater_league_id":"Ranked"}),
+    ]);
+    hulk["stat_updates"].as_array_mut().unwrap().extend([
+        json!({"stat":"Cost","update":"Set","value":2,"player_source_entity_id":null}),
+        json!({"stat":"Power","update":"Multiply","value":2,"player_source_entity_id":10}),
+        json!({"stat":"CanBeDestroyed","update":"Set","value":0,"player_source_entity_id":10}),
+    ]);
+    let mut blue = card("BlueMarvel", 12, 3, 2);
+    blue["stat_updates"] = json!([]);
+    let mine_grave = card("Wolverine", 13, 4, 1);
+    let mine_banished = card("Medusa", 14, 3, 0);
+    let mut their_grave = card("IronMan", 21, 0, 3);
+    their_grave["owner_entity_id"] = json!(20);
+    let mut their_banished = card("Cyclops", 22, 4, 0);
+    their_banished["owner_entity_id"] = json!(20);
+    let observation = json!({"schema_version":1,"source":{},"game":{"turn":3,"total_turns":6,
+        "players":[{"slot":"local","entity_id":10,"energy":3,"ended_turn":2,"zones":{"hand":{"count":0,"cards":[]},"deck":{"count":0},"graveyard":{"cards":[mine_grave]},"banished":{"cards":[mine_banished]}}},
+                   {"slot":"opponent","entity_id":20,"zones":{"hand":{"count":0},"deck":{"count":0},"graveyard":{"cards":[their_grave]},"banished":{"cards":[their_banished]}}}],
+        "locations":[{"location_id":"Ruins","cards":[hulk,blue]},{"location_id":"Ruins","cards":[]},{"location_id":"Ruins","cards":[]}]}});
+    let value = snapsim::snap::position_from_snap(&observation, &json!({})).unwrap();
+    assert_eq!(value["locations"][0]["mine"][0]["created_by_player"], 1);
+    assert_eq!(
+        value["locations"][0]["mine"][0]["stat_updates"][4]["source"],
+        1
+    );
+    assert_eq!(
+        value["locations"][0]["mine"][0]["stat_updates"][0]["updater_faction_id"],
+        "Avengers"
+    );
+    assert_eq!(
+        value["locations"][0]["mine"][0]["stat_updates"][1]["updater_augment_id"],
+        "AugmentA"
+    );
+    assert_eq!(
+        value["locations"][0]["mine"][0]["stat_updates"][2]["updater_league_id"],
+        "Ranked"
+    );
+    assert_eq!(value["graveyard"][0]["id"], "Wolverine");
+    assert_eq!(value["opponent"]["graveyard"][0]["id"], "IronMan");
+    assert_eq!(value["opponent"]["banished"][0]["id"], "Cyclops");
+    let p = Position::from_json(&value.to_string()).unwrap();
+    let mut rng = PythonRandom::seed(8);
+    let game = build_game(&p, &mut rng).unwrap();
+    let id = game.lanes[0].cards[0];
+    let target = &game.cards[id];
+    assert!(target.created && target.activated);
+    assert_eq!(target.created_by_card_id.as_deref(), Some("Agent13"));
+    assert_eq!(target.created_by_player, Some(1));
+    assert_eq!(target.observed_entity_id, Some(11));
+    assert_eq!(target.merged_to_entity_id, Some(12));
+    assert_eq!(target.merged_to, Some(game.lanes[0].cards[1]));
+    assert_eq!(game.players[0].graveyard[0].1, None);
+    assert_eq!(
+        game.cards[game.players[0].graveyard[0].0].def.id,
+        "Wolverine"
+    );
+    assert_eq!(game.cards[game.players[1].graveyard[0].0].def.id, "IronMan");
+    assert_eq!(game.players[1].graveyard[0].1, None);
+    assert_eq!(game.cards[game.players[0].banished[0]].def.id, "Medusa");
+    assert_eq!(game.cards[game.players[1].banished[0]].def.id, "Cyclops");
+    assert_eq!(target.latest_resolution_order, 8);
+    assert_eq!(game.next_resolution_order, 9);
+    assert_eq!(target.player_moves_used, 3);
+    assert_eq!(target.move_turns, [2, 3, 3]);
+    assert!(game.is_quickdraw_active(id));
+    assert_eq!(target.power(), 13);
+    assert_eq!(target.stat_updates.len(), 7);
+    assert_eq!(target.stat_updates.iter().filter(|u| u.ongoing).count(), 1);
+    assert_eq!(
+        target
+            .stat_updates
+            .iter()
+            .filter(|u| !u.ongoing && u.value == 1 && u.stat == snapsim::game::Stat::Power)
+            .count(),
+        3
+    );
+    assert!(
+        target
+            .stat_updates
+            .iter()
+            .any(|u| u.stat == snapsim::game::Stat::Cost
+                && u.operation == snapsim::game::StatOperation::Set
+                && u.source == usize::MAX)
+    );
+    assert!(
+        target
+            .stat_updates
+            .iter()
+            .any(|u| u.operation == snapsim::game::StatOperation::Multiply && u.source == 0)
+    );
+    assert!(
+        target
+            .stat_updates
+            .iter()
+            .any(|u| u.source == 1 && u.value == -2)
+    );
+}
+
+#[test]
+fn known_out_of_play_cards_are_not_sampled_into_the_local_deck() {
+    let p: Position = serde_json::from_value(json!({
+        "turn":3,"energy":3,"hand":[],"deck":[],"deck_count":30,
+        "graveyard":[{"id":"Hulk"}],"banished":[{"id":"Medusa"}],
+        "locations":[{"id":"Ruins","mine":[],"theirs":[]},{"id":"Ruins","mine":[],"theirs":[]},{"id":"Ruins","mine":[],"theirs":[]}],
+        "opponent":{"hand":0,"deck":0}
+    })).unwrap();
+    let mut rng = PythonRandom::seed(9);
+    let game = build_game(&p, &mut rng).unwrap();
+    assert!(
+        game.players[0]
+            .deck
+            .iter()
+            .all(|&id| !matches!(game.cards[id].def.id, "Hulk" | "Medusa"))
+    );
+}

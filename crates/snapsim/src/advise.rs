@@ -171,8 +171,23 @@ fn legal_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<
 
 /// Enumerate ordered plans on independent staging states so moves free slots and
 /// activations consume energy before subsequent actions are considered.
-fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<PlanStep>> {
-    let hand = game.players[0].hand.clone();
+fn legal_action_plans(
+    game: &Game<'_>,
+    authority: Option<(&Game<'_>, usize)>,
+    stopped: &(dyn Fn() -> bool + Sync),
+) -> Vec<Vec<PlanStep>> {
+    let hand: Vec<_> = game.players[0]
+        .hand
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, card)| {
+            (
+                card,
+                authority.map_or(card, |(actual, seat)| actual.players[seat].hand[index]),
+            )
+        })
+        .collect();
     let mut board = Vec::new();
     for lane in 0..3 {
         for (slot, card) in game.lanes[lane]
@@ -182,13 +197,23 @@ fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> V
             .filter(|&card| game.cards[card].owner == 0)
             .enumerate()
         {
-            board.push((card, lane, slot));
+            let actual_card = authority.map_or(card, |(actual, seat)| {
+                actual.lanes[lane]
+                    .cards
+                    .iter()
+                    .copied()
+                    .filter(|&id| actual.cards[id].owner == seat)
+                    .nth(slot)
+                    .unwrap()
+            });
+            board.push((card, actual_card, lane, slot));
         }
     }
     fn extend(
         game: &Game<'_>,
-        hand: &[usize],
-        board: &[(usize, usize, usize)],
+        hand: &[(usize, usize)],
+        board: &[(usize, usize, usize, usize)],
+        authority: Option<(&Game<'_>, usize)>,
         stopped: &(dyn Fn() -> bool + Sync),
         plan: &mut Vec<PlanStep>,
         output: &mut Vec<Vec<PlanStep>>,
@@ -197,16 +222,23 @@ fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> V
             return;
         }
         let mut options = Vec::new();
-        for (index, &card) in hand.iter().enumerate() {
+        for (index, &(card, actual_card)) in hand.iter().enumerate() {
             if game.players[0].hand.contains(&card) {
                 for lane in 0..3 {
                     if game.can_play(card, lane, 0, game.players[0].energy, 0) {
-                        options.push((PlanStep::Play { index, lane }, Action::Play { card, lane }));
+                        options.push((
+                            PlanStep::Play { index, lane },
+                            Action::Play { card, lane },
+                            Action::Play {
+                                card: actual_card,
+                                lane,
+                            },
+                        ));
                     }
                 }
             }
         }
-        for &(card, from, slot) in board {
+        for &(card, actual_card, from, slot) in board {
             for lane in 0..3 {
                 if game.can_player_move(card, lane, 0) {
                     options.push((
@@ -217,6 +249,10 @@ fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> V
                             lane,
                         },
                         Action::Move { card, lane },
+                        Action::Move {
+                            card: actual_card,
+                            lane,
+                        },
                     ));
                 }
             }
@@ -224,10 +260,11 @@ fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> V
                 options.push((
                     PlanStep::Activate { card, from, slot },
                     Action::Activate { card },
+                    Action::Activate { card: actual_card },
                 ));
             }
         }
-        for (step, action) in options {
+        for (step, action, actual_action) in options {
             if stopped() {
                 return;
             }
@@ -236,14 +273,41 @@ fn legal_action_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> V
             if next.stage_action(0, action).is_err() {
                 continue;
             }
-            plan.push(step);
-            output.push(plan.clone());
-            extend(&next, hand, board, stopped, plan, output);
+            if let Some((actual, seat)) = authority {
+                let mut actual_rng = actual.fork_rng();
+                let mut actual_next = actual.fork(actual_rng.as_mut());
+                if actual_next.stage_action(seat, actual_action).is_err() {
+                    continue;
+                }
+                plan.push(step);
+                output.push(plan.clone());
+                extend(
+                    &next,
+                    hand,
+                    board,
+                    Some((&actual_next, seat)),
+                    stopped,
+                    plan,
+                    output,
+                );
+            } else {
+                plan.push(step);
+                output.push(plan.clone());
+                extend(&next, hand, board, None, stopped, plan, output);
+            }
             plan.pop();
         }
     }
     let mut output = vec![Vec::new()];
-    extend(game, &hand, &board, stopped, &mut Vec::new(), &mut output);
+    extend(
+        game,
+        &hand,
+        &board,
+        authority,
+        stopped,
+        &mut Vec::new(),
+        &mut output,
+    );
     output
 }
 
@@ -302,6 +366,15 @@ pub fn advise(
     position: &Position,
     options: &AdviseOptions,
     cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Value, String> {
+    advise_with_game(position, options, cancel, None)
+}
+
+pub(crate) fn advise_with_game(
+    position: &Position,
+    options: &AdviseOptions,
+    cancel: &(dyn Fn() -> bool + Sync),
+    authority: Option<(&Game<'_>, usize)>,
 ) -> Result<Value, String> {
     if options.rollouts == 0 || options.max_plans == 0 || options.workers == 0 {
         return Err("rollouts, max_plans and workers must be positive".into());
@@ -362,7 +435,7 @@ pub fn advise(
             })
             .collect()
     } else {
-        legal_action_plans(&first_game, &stopped)
+        legal_action_plans(&first_game, authority, &stopped)
     };
     let limit = options
         .rollouts
@@ -479,4 +552,52 @@ pub fn advise(
     Ok(json!({"engine": "simulator-rollout", "status": status,
         "rollouts": options.rollouts - remaining, "plans": plans,
         "unsupported": unsupported, "priors": priors}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plans_use_actual_staged_state_not_only_a_reconstructed_position() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 3, "energy": 3,
+            "hand": [{"id":"Wasp"}, {"id":"Medusa"}], "deck": [],
+            "locations": [
+                {"id":"Ruins", "mine":[{"id":"Nightcrawler"}], "theirs":[]},
+                {"id":"Ruins", "mine":[], "theirs":[]},
+                {"id":"Ruins", "mine":[], "theirs":[]}
+            ],
+            "opponent": {"hand":0, "deck":0}
+        }))
+        .unwrap();
+        let mut actual_rng = PythonRandom::seed(1);
+        let mut actual = build_game(&position, &mut actual_rng).unwrap();
+        let crawler = actual.lanes[0].cards[0];
+        actual.cards[crawler].abilities_removed = true;
+        let mut sample_rng = PythonRandom::seed(1);
+        let sample = build_game(&position, &mut sample_rng).unwrap();
+        let unrestricted = legal_action_plans(&sample, None, &|| false);
+        assert!(
+            unrestricted
+                .iter()
+                .flatten()
+                .any(|step| matches!(step, PlanStep::Move { .. }))
+        );
+        let plans = legal_action_plans(&sample, Some((&actual, 0)), &|| false);
+        assert!(
+            !plans
+                .iter()
+                .flatten()
+                .any(|step| matches!(step, PlanStep::Move { .. }))
+        );
+        for plan in plans {
+            let actions: Vec<_> = plan.iter().map(|step| step.action(&actual)).collect();
+            let mut rng = actual.fork_rng();
+            let mut staged = actual.fork(rng.as_mut());
+            for action in actions {
+                staged.stage_action(0, action).unwrap();
+            }
+        }
+    }
 }

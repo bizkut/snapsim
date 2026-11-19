@@ -65,6 +65,12 @@ pub struct Card {
     pub temporary_hand_cost: Option<(u8, i32)>,
     /// Lasting cost before location modifiers.
     pub created: bool,
+    /// Visible client provenance; absent when not reported.
+    pub created_by_card_id: Option<String>,
+    pub created_by_location_id: Option<String>,
+    pub created_by_player: Option<usize>,
+    pub observed_entity_id: Option<i64>,
+    pub merged_to_entity_id: Option<i64>,
     pub permanent: i32,
     pub stat_updates: Vec<CardStatUpdate>,
     pub ongoing: i32,
@@ -190,7 +196,6 @@ pub enum Action {
 #[derive(Clone)]
 struct StagedAction {
     action: Action,
-    from: Option<usize>,
     grant: Option<MoveGrant>,
 }
 
@@ -201,8 +206,8 @@ pub struct Player {
     pub discard: Vec<usize>,
     pub banished: Vec<usize>,
     pub set_aside: Vec<usize>,
-    /// Cards currently in the graveyard, in destruction order, with their death location.
-    pub graveyard: Vec<(usize, usize)>,
+    /// Cards in destruction order and their death lane, if it was observed.
+    pub graveyard: Vec<(usize, Option<usize>)>,
     pub pending_effects: Vec<PendingEffect>,
     pub move_grants: Vec<MoveGrant>,
     staged_actions: Vec<StagedAction>,
@@ -876,6 +881,11 @@ impl<'a> Game<'a> {
                     ongoing_cost: 0,
                     temporary_hand_cost: None,
                     created: false,
+                    created_by_card_id: None,
+                    created_by_location_id: None,
+                    created_by_player: None,
+                    observed_entity_id: None,
+                    merged_to_entity_id: None,
                     permanent: data.power,
                     stat_updates: Vec::new(),
                     ongoing: 0,
@@ -992,6 +1002,11 @@ impl<'a> Game<'a> {
             permanent: row.power,
             stat_updates: Vec::new(),
             created: true,
+            created_by_card_id: None,
+            created_by_location_id: None,
+            created_by_player: None,
+            observed_entity_id: None,
+            merged_to_entity_id: None,
             ongoing: 0,
             location_power: 0,
             lane: None,
@@ -1413,14 +1428,35 @@ impl<'a> Game<'a> {
     }
     /// Stage a play, move or activation, preserving the player's action order.
     pub fn stage_action(&mut self, seat: usize, action: Action) -> Result<(), String> {
-        match action {
+        let cost = match action {
             Action::Play { card, lane } => {
                 if !self.players[seat].hand.contains(&card)
                     || !self.can_play(card, lane, seat, self.players[seat].energy, 0)
                 {
                     return Err("illegal staged play".into());
                 }
-                let cost = self.card_cost(card);
+                self.card_cost(card)
+            }
+            Action::Move { card, lane } => {
+                if !self.can_player_move(card, lane, seat) {
+                    return Err("illegal staged move".into());
+                }
+                0
+            }
+            Action::Activate { card } => {
+                if !self.can_activate(card, seat) {
+                    return Err("illegal staged activation".into());
+                }
+                self.cards[card].ability_def().activate_cost
+            }
+        };
+        self.apply_staged_action(seat, action, cost);
+        Ok(())
+    }
+
+    fn apply_staged_action(&mut self, seat: usize, action: Action, cost: i32) {
+        match action {
+            Action::Play { card, lane } => {
                 let slot = self.players[seat]
                     .hand
                     .iter()
@@ -1445,14 +1481,10 @@ impl<'a> Game<'a> {
                 self.notify_added(card, lane);
                 self.players[seat].staged_actions.push(StagedAction {
                     action,
-                    from: None,
                     grant: None,
                 });
             }
             Action::Move { card, lane } => {
-                if !self.can_player_move(card, lane, seat) {
-                    return Err("illegal staged move".into());
-                }
                 let from = self.cards[card].lane.unwrap();
                 let grant = self.matching_move_grant(card, seat).map(|index| {
                     let grant = &mut self.players[seat].move_grants[index];
@@ -1468,30 +1500,22 @@ impl<'a> Game<'a> {
                 self.lanes[from].cards.retain(|&id| id != card);
                 self.lanes[lane].cards.push(card);
                 self.cards[card].lane = Some(lane);
-                self.players[seat].staged_actions.push(StagedAction {
-                    action,
-                    from: Some(from),
-                    grant,
-                });
+                self.players[seat]
+                    .staged_actions
+                    .push(StagedAction { action, grant });
                 self.ongoing();
             }
             Action::Activate { card } => {
-                if !self.can_activate(card, seat) {
-                    return Err("illegal staged activation".into());
-                }
-                let cost = self.cards[card].ability_def().activate_cost;
                 self.set_energy(seat, self.players[seat].energy - cost);
                 self.players[seat].energy_spent_this_turn += cost;
                 self.cards[card].activate_staged = true;
                 self.players[seat].staged_actions.push(StagedAction {
                     action,
-                    from: None,
                     grant: None,
                 });
                 self.ongoing();
             }
         }
-        Ok(())
     }
 
     /// Resolve each player's staged actions in priority order and original stage order.
@@ -1506,10 +1530,14 @@ impl<'a> Game<'a> {
             for staged in actions {
                 match staged.action {
                     Action::Play { card, .. } => self.reveal(card),
-                    Action::Move { card, lane } => {
+                    Action::Move { card, .. } => {
                         self.cards[card].move_staged = false;
-                        if self.cards[card].lane == Some(lane) && self.cards[card].revealed {
-                            self.finish_move(card, staged.from.unwrap(), lane);
+                        // Card::CanResolveForMove (0x7cb9cbc) checks that both
+                        // previous and current zones are locations.
+                        if let (Some(from), Some(lane)) =
+                            (self.cards[card].last_lane, self.cards[card].lane)
+                        {
+                            self.finish_move(card, from, lane);
                             if let Some(grant) = staged.grant
                                 && let Some(hook) = grant.on_move
                             {
@@ -1519,15 +1547,19 @@ impl<'a> Game<'a> {
                     }
                     Action::Activate { card } => {
                         self.cards[card].activate_staged = false;
+                        // Card::CanResolveForActivate (0x7cb9d4c) does not
+                        // re-check energy or the original ability restrictions.
                         if self.cards[card].lane.is_some()
                             && self.cards[card].revealed
                             && !self.cards[card].activated
-                            && !self.cards[card].abilities_removed
-                            && let Some(hook) = self.cards[card].ability_def().on_activate
                         {
                             self.cards[card].activated = true;
                             self.ongoing();
-                            hook(self, card);
+                            if !self.cards[card].abilities_removed
+                                && let Some(hook) = self.cards[card].ability_def().on_activate
+                            {
+                                hook(self, card);
+                            }
                             self.emit(Event::CardActivated { card });
                         }
                     }
@@ -1903,7 +1935,7 @@ impl<'a> Game<'a> {
         self.cards[card].last_lane = Some(lane);
         self.players[self.cards[card].owner]
             .graveyard
-            .push((card, lane));
+            .push((card, Some(lane)));
         if let Some(destroyed) = &mut self.destroyed {
             destroyed.push((card, lane));
         }
@@ -2380,9 +2412,27 @@ impl<'a> Game<'a> {
                 })
                 .collect()
         });
+        // Card::IsMovableByPlayer (0x7cb0cac) and Card::CanActivate
+        // (0x7cb9a24) evaluate a player's own staging state. Validate each
+        // plan on a separate copy, before the opponent's hidden staging can
+        // move ongoing effects or otherwise change those checks.
+        let mut costs: [Vec<i32>; 2] = std::array::from_fn(|_| Vec::new());
+        for seat in 0..2 {
+            let mut rng = self.fork_rng();
+            let mut view = self.fork(rng.as_mut());
+            for &action in &plans[seat] {
+                let cost = match action {
+                    Action::Play { card, .. } => view.card_cost(card),
+                    Action::Activate { card } => view.cards[card].ability_def().activate_cost,
+                    Action::Move { .. } => 0,
+                };
+                view.stage_action(seat, action)?;
+                costs[seat].push(cost);
+            }
+        }
         for (seat, plan) in plans.into_iter().enumerate() {
-            for action in plan {
-                self.stage_action(seat, action)?;
+            for (action, cost) in plan.into_iter().zip(costs[seat].iter().copied()) {
+                self.apply_staged_action(seat, action, cost);
             }
         }
         self.ongoing();
@@ -2665,5 +2715,114 @@ impl<'a> Game<'a> {
         }
         self.turn += 1;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    use crate::random::PythonRandom;
+
+    fn game(rng: &mut PythonRandom) -> Game<'_> {
+        let deck = [
+            "Abomination",
+            "Cyclops",
+            "Hulk",
+            "MistyKnight",
+            "Shocker",
+            "TheThing",
+            "Wasp",
+            "Quicksilver",
+            "Medusa",
+            "Sentinel",
+            "IronMan",
+            "Hawkeye",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let locations = ["Ruins", "Xandar", "KamarTaj"].map(str::to_owned).to_vec();
+        let mut game = Game::new([&deck, &deck], &locations, rng).unwrap();
+        for lane in &mut game.lanes {
+            lane.def = crate::locations::get("Ruins").unwrap();
+            lane.revealed = true;
+        }
+        game.players[0].energy = 6;
+        game.players[1].energy = 6;
+        game
+    }
+
+    fn place(game: &mut Game<'_>, name: &str, seat: usize, lane: usize) -> usize {
+        let card = game.create_card(name, seat);
+        game.cards[card].lane = Some(lane);
+        game.cards[card].revealed = true;
+        game.lanes[lane].cards.push(card);
+        card
+    }
+
+    #[test]
+    fn opponent_staged_move_does_not_change_own_staging_legality() {
+        let mut rng = PythonRandom::seed(1);
+        let mut game = game(&mut rng);
+        let professor = place(&mut game, "ProfessorX", 0, 0);
+        game.grant_move(MoveGrant {
+            seat: 0,
+            source: professor,
+            card: Some(professor),
+            lane: None,
+            start_turn: game.turn,
+            end_turn: game.turn,
+            remaining: 1,
+            on_move: None,
+        });
+        let card = game.create_card("Wasp", 1);
+        game.players[1].hand.push(card);
+        let movement = Action::Move {
+            card: professor,
+            lane: 1,
+        };
+        let play = Action::Play { card, lane: 1 };
+        let mut fork_rng = game.fork_rng();
+        let mut combined = game.fork(fork_rng.as_mut());
+        combined.stage_action(0, movement).unwrap();
+        assert!(combined.stage_action(1, play).is_err());
+        assert!(
+            game.resolve_action_plans([vec![movement], vec![play]], 0)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn removed_cards_fizzle_staged_play_move_and_activation() {
+        let mut rng = PythonRandom::seed(2);
+        let mut game = game(&mut rng);
+        let mover = place(&mut game, "Nightcrawler", 0, 0);
+        let activator = place(&mut game, "KidOmega", 0, 0);
+        let played = game.create_card("Wasp", 0);
+        game.players[0].hand.push(played);
+        game.stage_action(
+            0,
+            Action::Move {
+                card: mover,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        game.stage_action(0, Action::Activate { card: activator })
+            .unwrap();
+        game.stage_action(
+            0,
+            Action::Play {
+                card: played,
+                lane: 2,
+            },
+        )
+        .unwrap();
+        for card in [mover, activator, played] {
+            assert!(game.take_from_board(card));
+        }
+        game.resolve_staged_actions(0);
+        assert!(!game.cards[activator].activated);
+        assert!(!game.cards[played].revealed);
+        assert!(!game.cards[mover].move_staged);
     }
 }

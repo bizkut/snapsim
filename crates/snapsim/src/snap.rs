@@ -72,7 +72,24 @@ pub(crate) fn revealed_id(location: &Value) -> Value {
         id.clone()
     }
 }
-fn card_ref(card: &Value, board: bool) -> Value {
+fn has_extended_card_fields(card: &Value) -> bool {
+    [
+        "latest_resolution_order",
+        "turns_drawn",
+        "activated",
+        "moves_per_turn",
+        "created",
+        "created_by_card_id",
+        "created_by_location_id",
+        "created_by_player_entity_id",
+        "merged_to_entity_id",
+        "stat_updates",
+    ]
+    .iter()
+    .any(|name| card.get(*name).is_some())
+}
+
+fn card_ref(card: &Value, board: bool, seats: [&Value; 2]) -> Value {
     let mut result = json!({"id":card["card_id"], "cost":card["cost"], "power":card["power"], "revealed":card["revealed"]});
     if board {
         let turn = if card["revealed"] == true {
@@ -82,6 +99,43 @@ fn card_ref(card: &Value, board: bool) -> Value {
         };
         if !turn.is_null() {
             result["played_turn"] = turn.clone();
+        }
+    }
+    if has_extended_card_fields(card) {
+        for name in [
+            "entity_id",
+            "latest_resolution_order",
+            "turns_drawn",
+            "activated",
+            "moves_per_turn",
+            "created",
+            "created_by_card_id",
+            "created_by_location_id",
+            "merged_to_entity_id",
+        ] {
+            if !card[name].is_null() {
+                result[name] = card[name].clone();
+            }
+        }
+        let seat = |entity: &Value| {
+            (!entity.is_null())
+                .then(|| seats.iter().position(|id| *id == entity))
+                .flatten()
+        };
+        if let Some(owner) = seat(&card["created_by_player_entity_id"]) {
+            result["created_by_player"] = json!(owner);
+        }
+        if let Some(updates) = card["stat_updates"].as_array() {
+            result["stat_updates"] = Value::Array(updates.iter().map(|update| {
+                let mut entry = json!({"stat":update["stat"],"update":update["update"],"value":update["value"]});
+                if let Some(source) = seat(&update["player_source_entity_id"]) {
+                    entry["source"] = json!(source);
+                }
+                for name in ["updater_card_id", "updater_location_id", "updater_faction_id", "updater_augment_id", "updater_league_id"] {
+                    if !update[name].is_null() { entry[name] = update[name].clone(); }
+                }
+                entry
+            }).collect());
         }
     }
     result
@@ -301,7 +355,11 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     let hand_cards = array(&zones["hand"]["cards"]);
     let mut hand = hand_cards.iter().collect::<Vec<_>>();
     hand.sort_by_key(|card| card["zone_position"].as_i64().unwrap_or(0));
-    let hand: Vec<Value> = hand.into_iter().map(|c| card_ref(c, false)).collect();
+    let seats = [&local["entity_id"], &opponent["entity_id"]];
+    let hand: Vec<Value> = hand
+        .into_iter()
+        .map(|c| card_ref(c, false, seats))
+        .collect();
     let deck = options["deck"].as_array();
     let mut visible: Vec<&Value> = hand_cards.iter().collect();
     let mut seen = Vec::<Value>::new();
@@ -322,7 +380,7 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         board_cards.sort_by_key(|card| card["zone_position"].as_i64().unwrap_or(i64::MAX));
         for card in board_cards {
             if card["owner_entity_id"] == local["entity_id"] {
-                let mut reference = card_ref(card, true);
+                let mut reference = card_ref(card, true, seats);
                 if options["plays_only"] != true
                     && let Some(legal) = array(&game["legal_actions"])
                         .iter()
@@ -348,7 +406,7 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
                 if card["card_id"].as_str().is_some_and(|s| !s.is_empty())
                     && card["revealed"] == true
                 {
-                    theirs.push(card_ref(card, true));
+                    theirs.push(card_ref(card, true, seats));
                     seen.push(card["card_id"].clone());
                 } else {
                     face_down += 1;
@@ -397,6 +455,27 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         options["mode"].clone()
     };
     let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    for (owner, source) in [(0, zones), (1, opponent_zones)] {
+        for name in ["graveyard", "banished"] {
+            let public: Vec<_> = array(&source[name]["cards"])
+                .iter()
+                .filter(|card| card["card_id"].as_str().is_some_and(|id| !id.is_empty()))
+                .collect();
+            // Legacy recordings already carried local graveyard cards but lacked the
+            // extended reader schema; keep their position JSON unchanged.
+            if public.iter().any(|card| has_extended_card_fields(card)) {
+                let refs: Vec<_> = public
+                    .into_iter()
+                    .map(|card| card_ref(card, true, seats))
+                    .collect();
+                if owner == 0 {
+                    position[name] = json!(refs);
+                } else {
+                    position["opponent"][name] = json!(refs);
+                }
+            }
+        }
+    }
     if let (Some(mine), Some(theirs)) = (
         local["snapped_turns"].as_array(),
         opponent["snapped_turns"].as_array(),
@@ -485,5 +564,30 @@ mod tests {
             watch.update(&frame(0, 3, json!([])), None),
             Vec::<Value>::new()
         );
+    }
+
+    #[test]
+    fn extended_cards_preserve_nulls_as_absence_and_map_source_seats() {
+        let local = json!(10);
+        let opponent = json!(20);
+        let legacy = json!({"card_id":"Hulk","entity_id":42,"revealed":true});
+        assert_eq!(
+            card_ref(&legacy, false, [&local, &opponent]),
+            json!({"id":"Hulk","cost":null,"power":null,"revealed":true})
+        );
+        let card = json!({"card_id":"Hulk","entity_id":42,"revealed":true,
+        "latest_resolution_order":null,"created":false,
+        "created_by_player_entity_id":20,
+        "stat_updates":[
+            {"stat":"Power","update":"Multiply","value":-3,"player_source_entity_id":10,"updater_card_id":null,"updater_location_id":"Xandar"},
+            {"stat":"Cost","update":"Set","value":2,"player_source_entity_id":99}
+        ]});
+        let reference = card_ref(&card, false, [&local, &opponent]);
+        assert_eq!(reference["entity_id"], 42);
+        assert_eq!(reference["created"], false);
+        assert_eq!(reference["created_by_player"], 1);
+        assert!(reference.get("latest_resolution_order").is_none());
+        assert_eq!(reference["stat_updates"][0]["source"], 0);
+        assert!(reference["stat_updates"][1].get("source").is_none());
     }
 }

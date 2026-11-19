@@ -108,7 +108,7 @@ fn graveyard_tracks_last_location_and_resurrection() {
     assert_eq!(g.cards[id].last_lane, Some(0));
     assert!(g.destroy_card(id));
     assert_eq!(g.cards[id].last_lane, Some(2));
-    assert_eq!(g.players[0].graveyard, vec![(id, 2)]);
+    assert_eq!(g.players[0].graveyard, vec![(id, Some(2))]);
     assert!(g.add_card(id, 0, 0, false));
     assert!(g.players[0].graveyard.is_empty());
 }

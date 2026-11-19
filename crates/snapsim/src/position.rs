@@ -2,7 +2,7 @@
 use crate::{
     cards::{self, CardDef},
     data,
-    game::{Card, Game, Lane, Player},
+    game::{Card, CardStatUpdate, Game, Lane, Player, Stat, StatOperation},
     locations::{self, LocationDef},
     random::PythonRandom,
 };
@@ -20,7 +20,27 @@ fn yes() -> bool {
 fn six() -> u8 {
     6
 }
+/// An observed client ledger entry. Source is a seat, not an entity ID.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ObservedStatUpdate {
+    pub stat: String,
+    pub update: String,
+    pub value: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_card_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_location_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_faction_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_augment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_league_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CardRef {
     pub id: String,
     #[serde(default)]
@@ -39,8 +59,28 @@ pub struct CardRef {
     pub can_activate: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub move_targets: Option<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_resolution_order: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns_drawn: Option<Vec<(u8, bool)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moves_per_turn: Option<HashMap<String, u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_card_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_location_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_player: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_to_entity_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stat_updates: Option<Vec<ObservedStatUpdate>>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LocationRef {
     pub id: Option<String>,
     pub mine: Vec<CardRef>,
@@ -52,7 +92,7 @@ pub struct LocationRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ottos_lab_spent: Option<[bool; 2]>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Opponent {
     pub hand: usize,
     pub deck: usize,
@@ -68,8 +108,12 @@ pub struct Opponent {
     pub pending_power: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard: Option<Vec<CardRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banished: Option<Vec<CardRef>>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Position {
     pub turn: u8,
     #[serde(default = "six")]
@@ -90,6 +134,10 @@ pub struct Position {
     /// Per-seat snap state for the current turn, when observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapped_this_turn: Option<[bool; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard: Option<Vec<CardRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banished: Option<Vec<CardRef>>,
 }
 
 static CARD_DATA: LazyLock<HashMap<String, data::CardData>> = LazyLock::new(|| {
@@ -205,6 +253,11 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         ongoing_cost: 0,
         temporary_hand_cost: None,
         created: false,
+        created_by_card_id: None,
+        created_by_location_id: None,
+        created_by_player: None,
+        observed_entity_id: None,
+        merged_to_entity_id: None,
         permanent: row.power,
         stat_updates: Vec::new(),
         ongoing: 0,
@@ -228,6 +281,77 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         turn_played: 0,
         watches: Vec::new(),
         state: def.initial_state.map(|init| init()),
+    })
+}
+
+fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u8) {
+    card.activated = reference.activated.unwrap_or(false);
+    card.created = reference.created.unwrap_or(false);
+    card.latest_resolution_order = reference.latest_resolution_order.unwrap_or(0);
+    card.created_by_card_id
+        .clone_from(&reference.created_by_card_id);
+    card.created_by_location_id
+        .clone_from(&reference.created_by_location_id);
+    card.created_by_player = reference.created_by_player.filter(|&seat| seat < 2);
+    card.observed_entity_id = reference.entity_id;
+    card.merged_to_entity_id = reference.merged_to_entity_id;
+    if let Some(draws) = &reference.turns_drawn {
+        // Card.IsQuickdrawActive (0x7cb1b88), predicate 0x7cbe0d0.
+        if let Some(&(drawn, extended)) = draws
+            .iter()
+            .rev()
+            .find(|&&(drawn, extended)| {
+                drawn == turn || (extended && drawn.checked_add(1) == Some(turn))
+            })
+            .or_else(|| draws.last())
+        {
+            card.drawn_turn = Some(drawn);
+            card.draw_extends_quickdraw = extended;
+        }
+    }
+    if let Some(moves) = &reference.moves_per_turn {
+        let mut turns: Vec<_> = moves
+            .iter()
+            .filter_map(|(key, count)| key.parse::<u8>().ok().map(|turn| (turn, *count)))
+            .collect();
+        turns.sort_unstable_by_key(|&(turn, _)| turn);
+        for (turn, count) in turns {
+            card.move_turns
+                .extend(std::iter::repeat_n(turn, count as usize));
+            card.player_moves_used = card.player_moves_used.saturating_add(count);
+        }
+    } else {
+        card.player_moves_used = reference.player_moves_used.unwrap_or(0);
+    }
+}
+
+fn needs_observed_reference(reference: &CardRef) -> bool {
+    reference.entity_id.is_some()
+        || reference.merged_to_entity_id.is_some()
+        || reference.latest_resolution_order.is_some()
+        || reference.turns_drawn.is_some()
+        || reference.stat_updates.is_some()
+}
+
+fn observed_update(update: &ObservedStatUpdate) -> Option<CardStatUpdate> {
+    let stat = match update.stat.as_str() {
+        "Power" => Stat::Power,
+        "Cost" => Stat::Cost,
+        _ => return None,
+    };
+    let operation = match update.update.as_str() {
+        "Add" => StatOperation::Add,
+        "Multiply" => StatOperation::Multiply,
+        "Set" => StatOperation::Set,
+        _ => return None,
+    };
+    Some(CardStatUpdate {
+        stat,
+        operation,
+        value: update.value,
+        // Unknown sources must not be mistaken for either player's effects.
+        source: update.source.filter(|&seat| seat < 2).unwrap_or(usize::MAX),
+        ongoing: false,
     })
 }
 pub fn recruit_weights() -> HashMap<String, f64> {
@@ -277,6 +401,8 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                     .iter()
                     .flat_map(|l| l.mine.iter().map(|c| &c.id)),
             )
+            .chain(position.graveyard.iter().flatten().map(|c| &c.id))
+            .chain(position.banished.iter().flatten().map(|c| &c.id))
             .collect();
         let pool = if position.mode.as_deref() == Some("recruit") && !outside(known.iter().copied())
         {
@@ -438,13 +564,22 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     game.players[0].energy = position.energy;
     game.players[0].next_play_power = position.pending_power;
     game.players[1].next_play_power = opp.pending_power;
+    let mut observed_refs: Vec<(usize, &CardRef)> = Vec::new();
+    let mut powers = Vec::new();
     for r in &position.hand {
         let mut c = make_card(&r.id, 0)?;
+        apply_card_reference(&mut c, r, position.turn);
         if let Some(cost) = r.cost {
             c.cost = cost;
         }
         if let Some(power) = r.power {
             c.permanent = power;
+            if r.entity_id.is_some() {
+                powers.push((game.cards.len(), power));
+            }
+        }
+        if needs_observed_reference(r) {
+            observed_refs.push((game.cards.len(), r));
         }
         game.players[0].hand.push(game.cards.len());
         game.cards.push(c);
@@ -470,7 +605,6 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 .any(|l| l.id.as_deref() == Some("Lemuria") && l.revealed_turn == Some(t))
     });
     let mut hidden_board = hidden.iter().skip(opp.hand + opp.deck);
-    let mut powers = Vec::new();
     let mut revealed = Vec::new();
     for (lane, src) in position.locations.iter().enumerate() {
         for (owner, refs) in [&src.mine, &src.theirs].into_iter().enumerate() {
@@ -480,8 +614,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 c.lane = Some(lane);
                 c.turn_played = r.played_turn.unwrap_or(0);
                 c.revealed = r.revealed;
-                c.activated = r.activated.unwrap_or(false);
-                c.player_moves_used = r.player_moves_used.unwrap_or(0);
+                apply_card_reference(&mut c, r, position.turn);
                 c.observed_can_activate = r.can_activate;
                 c.observed_move_targets = r.move_targets.as_ref().map(|lanes| {
                     lanes
@@ -490,6 +623,9 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                         .fold(0u8, |mask, &lane| mask | (1 << lane))
                 });
                 let id = game.cards.len();
+                if needs_observed_reference(r) {
+                    observed_refs.push((id, r));
+                }
                 game.cards.push(c);
                 game.lanes[lane].cards.push(id);
                 if r.revealed {
@@ -516,8 +652,49 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             game.lanes[lane].cards.push(id);
         }
     }
-    // Historical resolution order is not exposed in the position format. Approximate
-    // it by played turn, current known priority (otherwise seat 0), then lane/slot.
+    // The reader exposes these public zones without the lane of destruction.
+    // Keep the lane unknown rather than manufacturing a location.
+    for (owner, graveyard, banished) in [
+        (
+            0,
+            position.graveyard.as_deref(),
+            position.banished.as_deref(),
+        ),
+        (1, opp.graveyard.as_deref(), opp.banished.as_deref()),
+    ] {
+        for (is_graveyard, refs) in [(true, graveyard), (false, banished)] {
+            for r in refs.unwrap_or_default() {
+                let mut card = make_card(&r.id, owner)?;
+                apply_card_reference(&mut card, r, position.turn);
+                card.cost = r.cost.unwrap_or(card.cost);
+                card.permanent = r.power.unwrap_or(card.permanent);
+                card.revealed = r.revealed;
+                card.turn_played = r.played_turn.unwrap_or(0);
+                let id = game.cards.len();
+                if needs_observed_reference(r) {
+                    observed_refs.push((id, r));
+                }
+                game.cards.push(card);
+                if is_graveyard {
+                    game.players[owner].graveyard.push((id, None));
+                } else {
+                    game.players[owner].banished.push(id);
+                }
+            }
+        }
+    }
+    let entities: HashMap<i64, usize> = observed_refs
+        .iter()
+        .filter_map(|&(id, r)| r.entity_id.map(|entity| (entity, id)))
+        .collect();
+    for &(id, r) in &observed_refs {
+        game.cards[id].merged_to = r
+            .merged_to_entity_id
+            .filter(|&entity| entity != 0)
+            .and_then(|entity| entities.get(&entity).copied());
+    }
+    // Use observed resolution order; use the historic deterministic approximation
+    // only for cards whose order is unavailable.
     let mut resolution_order = revealed.clone();
     let first = priority.unwrap_or(0);
     resolution_order.sort_by_key(|&id| {
@@ -529,9 +706,40 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             game.zone_position(id).unwrap_or(0),
         )
     });
-    for id in resolution_order {
-        game.cards[id].latest_resolution_order = game.next_resolution_order;
-        game.next_resolution_order += 1;
+    let explicit: HashMap<_, _> = observed_refs
+        .iter()
+        .filter_map(|(id, r)| r.latest_resolution_order.map(|order| (*id, order)))
+        .collect();
+    if explicit.is_empty() {
+        for id in resolution_order {
+            game.cards[id].latest_resolution_order = game.next_resolution_order;
+            game.next_resolution_order += 1;
+        }
+    } else {
+        let mut occupied: HashSet<u32> = explicit.values().copied().collect();
+        for id in resolution_order {
+            let order = if let Some(&order) = explicit.get(&id) {
+                order
+            } else {
+                while occupied.contains(&game.next_resolution_order) {
+                    game.next_resolution_order = game
+                        .next_resolution_order
+                        .checked_add(1)
+                        .ok_or("resolution order overflow")?;
+                }
+                let order = game.next_resolution_order;
+                occupied.insert(order);
+                game.next_resolution_order =
+                    order.checked_add(1).ok_or("resolution order overflow")?;
+                order
+            };
+            game.cards[id].latest_resolution_order = order;
+        }
+        if let Some(&maximum) = occupied.iter().max() {
+            game.next_resolution_order = game
+                .next_resolution_order
+                .max(maximum.checked_add(1).ok_or("resolution order overflow")?);
+        }
     }
     for id in revealed {
         if matches!(game.cards[id].def.id, "Hawkeye" | "JessicaJones")
@@ -583,7 +791,114 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             game.cards[id].watches = vec![(position.turn, lane); runs];
         }
     }
+    // The client CardStatUpdate exposes stat, operation, value, player and
+    // updater IDs, but no ongoing flag. get_Power/get_Cost already report
+    // totals: seed ledger rows as history, never reapply them as stat deltas.
+    for &(id, reference) in &observed_refs {
+        if let Some(draws) = &reference.turns_drawn {
+            let owner = game.cards[id].owner;
+            game.players[owner]
+                .draws
+                .extend(draws.iter().map(|&(turn, _)| (turn, id)));
+        }
+        if let Some(updates) = &reference.stat_updates {
+            game.cards[id]
+                .stat_updates
+                .extend(updates.iter().filter_map(observed_update));
+        }
+    }
+    for player in &mut game.players {
+        player.draws.sort_by_key(|&(turn, _)| turn);
+    }
     game.ongoing();
+    // The reader does not label ongoing rows. An observed row is removed only
+    // when its named active updater and an identical recomputed contribution
+    // match; a multiset match preserves repeated independent contributions.
+    // Faction, augment and league updaters are historical, never card/location ongoing.
+    if observed_refs.iter().any(|(_, r)| {
+        r.stat_updates
+            .as_ref()
+            .is_some_and(|updates| !updates.is_empty())
+    }) {
+        let mut active_cards: HashSet<_> = game
+            .lanes
+            .iter()
+            .flat_map(|lane| &lane.cards)
+            .filter_map(|&id| {
+                let card = &game.cards[id];
+                (card.revealed && card.has_ongoing()).then_some(card.def.id)
+            })
+            .collect();
+        active_cards.extend(
+            game.players
+                .iter()
+                .flat_map(|player| &player.hand)
+                .filter_map(|&id| {
+                    let card = &game.cards[id];
+                    (!card.abilities_removed && card.ability_def().in_hand_ongoing.is_some())
+                        .then_some(card.def.id)
+                }),
+        );
+        let active_locations: HashSet<_> = game
+            .lanes
+            .iter()
+            .filter(|lane| lane.revealed)
+            .map(|lane| lane.def.id)
+            .collect();
+        let mut removed = false;
+        for &(id, reference) in &observed_refs {
+            let Some(observed) = &reference.stat_updates else {
+                continue;
+            };
+            let mut used = HashSet::new();
+            let mut remove = Vec::new();
+            let mut historical = 0;
+            for entry in observed {
+                let Some(update) = observed_update(entry) else {
+                    continue;
+                };
+                let is_external = entry.updater_faction_id.is_some()
+                    || entry.updater_augment_id.is_some()
+                    || entry.updater_league_id.is_some();
+                let is_active_updater = !is_external
+                    && (entry
+                        .updater_card_id
+                        .as_deref()
+                        .is_some_and(|name| active_cards.contains(name))
+                        || entry
+                            .updater_location_id
+                            .as_deref()
+                            .is_some_and(|name| active_locations.contains(name)));
+                if is_active_updater
+                    && let Some((index, _)) =
+                        game.cards[id]
+                            .stat_updates
+                            .iter()
+                            .enumerate()
+                            .find(|(index, current)| {
+                                current.ongoing
+                                    && !used.contains(index)
+                                    && current.stat == update.stat
+                                    && current.operation == update.operation
+                                    && current.value == update.value
+                                    && (update.source == usize::MAX
+                                        || current.source == update.source)
+                            })
+                {
+                    used.insert(index);
+                    remove.push(historical);
+                }
+                historical += 1;
+            }
+            for index in remove.into_iter().rev() {
+                game.cards[id].stat_updates.remove(index);
+                removed = true;
+            }
+        }
+        if removed {
+            game.ongoing();
+        }
+    }
     for (id, power) in powers {
         game.cards[id].permanent = power - game.cards[id].ongoing - game.cards[id].location_power;
     }

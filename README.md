@@ -35,7 +35,7 @@ Known approximations of client rules:
 * Effects that create random cards or locations draw only from implemented ones; the client draws from its full pools. Scarlet Witch Queen of Chaos's own pool is complete (13 curated and 11 collectible skills), so she matches the client's skill choice.
 * Nico Minoru's location spell and Omniversal Presence pick locations uniformly, while the client weights the pick (`GetRandomLocationDefId`). Merging of power from the same source, the order of conditional Ongoing effects that depend on each other, and gaps left by cards that cannot shift are not modelled.
 * Symbiote Spider-Man stays unregistered: merging is modelled, but cloning the abilities other cards attached to the merged card (`CloneExternalAbilities`) covers only move grants.
-* Positions built from a live observation seed each card's resolution order from its played turn, priority and slot, not the client's `LatestResolutionOrder`.
+* Live positions use the client's `LatestResolutionOrder` when the reader supplies it, and otherwise derive the order from played turn, priority and slot (see "Live state from SNAP observations"). None of the newly exported live fields has been checked against a live match yet.
 
 ## Advisor and Python binding
 
@@ -61,6 +61,21 @@ cargo run --manifest-path "$ROOT/Cargo.toml" --release --bin snapsim-advisor-par
 ```
 
 The generator includes approximate positions, preserves watcher state across recording frames, and writes separate records for spread and margin. The gate matched 449 positions per policy (360 seeded SearchAI decisions and 89 real recorded positions), with 24 rollouts per position and one worker. The Python parity test also compares one and four workers.
+
+## Live state from SNAP observations
+
+`position_from_snap` maps the reader's per-card fields (Snapper-Assist `SNAP/README.md`) onto engine state:
+
+| Reader field | Engine state |
+|---|---|
+| `latest_resolution_order` | resolution order; when absent, a deterministic order from played turn, priority, lane and slot |
+| `turns_drawn` | `drawn_turn` and the Quickdraw extension flag: the last entry `Card.IsQuickdrawActive` accepts this turn, else the last entry; also the player's draw history |
+| `activated`, `moves_per_turn` | activation flag, move history and moves used |
+| `created`, `created_by_*`, `merged_to_entity_id` | card provenance; a merge target resolves to its card when it is visible |
+| `stat_updates` | the Power/Cost ledger, with the source player mapped to a seat |
+| graveyard and banished cards | both players' zones; a graveyard card's death lane stays unknown |
+
+Stat updates are history, not deltas: the client's power and cost getters already report totals, and the client does not label which rows come from Ongoing effects. A row is removed only when it matches a contribution the engine recomputes from the same named active card or revealed location (same stat, operation, value and source). Rows from faction, augment or league updaters, and rows whose provenance is missing or ambiguous, stay historical. The reader does not report the order of different cards drawn on the same turn or where a graveyard card died.
 
 ## Position materialization parity
 
@@ -158,7 +173,7 @@ Two kinds of record are reported rather than compared:
 | Full games | `parity/record.py` → `snapsim-parity`, per policy | 1,000 margin games identical; 999 spread games identical and 1 known divergence |
 | Position building | `parity/position_record.py` → `snapsim-position-parity` | 2,400 position–seed pairs |
 | Advisor | `parity/record_advisor.py` → `snapsim-advisor-parity` | 834 records, 0 mismatches; 64 new-content records |
-| Coverage, priors, strict advice | `parity/coverage_parity.py snapsim-coverage-parity POSITIONS ADVISOR` | 2,603 positions plus 9 approximate edge positions; 704 new-content positions |
+| Coverage, priors, strict advice | `parity/coverage_parity.py snapsim-coverage-parity POSITIONS ADVISOR` | 2,603 positions, whose 9 edge positions also match approximate advice; 704 new-content positions |
 | Position validation | `parity/validation_record.py` → `snapsim-validation-parity` | 4,118 accepted and 2,932 rejected alike; 337 out-of-range rejected (see above) |
 | SNAP adapter and watches | `parity/snap_record.py RECORDINGS` → `snapsim-snap-parity`; `parity/snap_binding.py MODULE ORACLE` | 1,047 recorded frames (190 positions, 857 errors), core and Python module |
 | Deck codes and deck files | `SNAPSIM_BIN=snapsim parity/compare_deckcodes.py snapsim-deckcodes-parity` | 31/31 cases; 9 new-content cases |

@@ -370,7 +370,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.0 == hulk)
             .unwrap()
-            .1 = 1;
+            .1 = Some(1);
         adamantium_infusion(&mut game, infusion);
         assert!(game.players[0].banished.contains(&infusion));
         assert_eq!(game.cards[hulk].lane, Some(0));
