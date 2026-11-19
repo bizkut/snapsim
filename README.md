@@ -1,6 +1,6 @@
 # snapsim
 
-Rust port of the Python reference simulator. Every card (84 deck cards and 10 tokens) and every location (84) the reference implements is registered. The full-content parity gate below matches the reference game for game. The rollout advisor (`advisor.py` search) and Python bindings are not yet ported. Unknown content is rejected rather than treated as a vanilla card or location.
+Rust port of the Python reference simulator. Every card (84 deck cards and 10 tokens) and every location (84) the reference implements is registered. The full-content parity gate below matches the reference game for game.
 
 ## Architecture
 
@@ -15,6 +15,58 @@ The engine exposes location replacement, delayed reveal scheduling, location cos
 1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the Python card/location ID and the necessary hooks, and register it in the corresponding `REGISTRY`. Use the catalog's current printed stats; do not invent stand-in rules.
 2. Add focused boundary tests and a differential Python parity case for the rule. For a random effect, test seeds and the order of random calls. Add the card or location to `parity/corpus-full-{spread,margin}.json`.
 3. Run the full parity gate below for both policies, `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
+
+## Advisor and Python binding
+
+`snapsim::advise::advise_json(position_json, options_json)` accepts the JSON from Python `Position.to_dict()`. Options contain `rollouts`, `seed`, `max_plans`, `time_limit` (seconds or null), `playout` (`spread`, `heuristic`, or `margin`), and `workers`. The Python position layer must also supply `unsupported`, `priors`, and `status`: it remains the single source of truth for coverage and prior descriptions. Missing fields are errors. The Python layer blocks strict unsupported positions before calling Rust; approximate searches pass through. Results retain `"engine": "simulator-rollout"`.
+
+Build the optional Python extension without installing into any virtual environment:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
+crates/snapsim-py/build-module.sh
+```
+
+It writes `target/release/snapsim_py.so`; the advice worktree loads that path by default, or the file or directory specified by `SNAPSIM_PY_PATH`. Generate and compare advisor cases from real recordings and SearchAI games with:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
+ROOT="$PWD"
+cd /tmp
+PYTHONPATH=$SNAPSIM_REFERENCE \
+  $SNAPSIM_PYTHON "$ROOT/parity/record_advisor.py" \
+  /tmp/snapsim-advisor.jsonl --runs $SNAPSIM_RUNS
+cargo run --manifest-path "$ROOT/Cargo.toml" --release --bin snapsim-advisor-parity -- /tmp/snapsim-advisor.jsonl
+```
+
+The generator includes approximate positions, preserves watcher state across recording frames, and writes separate records for spread and margin. The gate matched 449 positions per policy (360 seeded SearchAI decisions and 89 real recorded positions), with 24 rollouts per position and one worker. The Python parity test also compares one and four workers.
+
+## Position materialization parity
+
+`position::Position` deserializes Python's `Position.to_dict()` shape.
+`build_game` samples hidden cards and locations with the supplied `PythonRandom`,
+restores visible state and pending reveals, and leaves the RNG at the playout
+state. `state_json` provides a canonical dump for differential testing. Known
+catalog cards without rules and unknown locations use inert approximate
+stand-ins; coverage decisions remain the Python position layer's responsibility.
+
+Generate positions from both seats of seeded SearchAI games, hand-made edge
+cases, and recorded SNAP observations (using `LocationWatch` and `DeckWatch`):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+PYTHONPATH=$SNAPSIM_REFERENCE \
+  $SNAPSIM_PYTHON \
+  parity/position_record.py --games 1 --seeds 20 \
+  --recordings $SNAPSIM_RUNS \
+  > /tmp/snapsim-position-cases.jsonl
+cargo run --release -p snapsim --bin snapsim-position-parity -- \
+  /tmp/snapsim-position-cases.jsonl
+```
+
+The generator reports unique position counts and rejected positions on stderr;
+the comparison reports the first differing state field. The recording corpus is
+local and may vary between runs.
 
 ## Parity and checks
 
@@ -39,7 +91,7 @@ for policy in spread margin; do
 done
 ```
 
-`snapsim-parity` independently samples decks from each recorded seed, replays the game and reports the first differing JSON field. Measured full-content and representative-corpus speed ratios are in `BENCHMARKS.md`; advisor-rollout throughput is not measured.
+`snapsim-parity` independently samples decks from each recorded seed, replays the game and reports the first differing JSON field. Measured full-content and advisor-rollout throughput are in `BENCHMARKS.md`.
 
 Refresh data and regenerate RNG fixtures:
 

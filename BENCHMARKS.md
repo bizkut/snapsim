@@ -1,5 +1,28 @@
 # Benchmarks
 
+## Advisor rollout comparison
+
+Single back-to-back run on the same shared Apple M4 Pro machine, CPython 3.12 and Rust release build. Each search used `parity/turn3.json`, spread playout, seed 42, a warmup, and a fixed 2,000-rollout budget. The timed searches used a 10,000,000-rollout cap and a one-second limit. Results include position setup and Python binding overhead. The 1-second searches may screen a different number of plans from the fixed-budget searches.
+
+| Workers | Engine | Fixed seconds | Fixed rollouts/s | Rollouts in 1 second | Actual seconds |
+|---:|---|---:|---:|---:|---:|
+| 1 | Python | 0.6151 | 3,252 | 3,262 | 1.0003 |
+| 1 | Rust | 0.0745 | 26,837 | 27,979 | 1.0002 |
+| 4 | Python | 0.1833 | 10,914 | 11,383 | 1.0006 |
+| 4 | Rust | 0.0259 | 77,351 | 88,165 | 1.0002 |
+
+Fixed-budget throughput was 8.25× higher with one worker and 7.09× with four. Load averages (1/5/15 minutes) before Python 1, Rust 1, Python 4 and Rust 4 respectively were 5.35/5.21/5.76, 5.35/5.21/5.76, 5.16/5.17/5.75 and 5.16/5.17/5.75. After the last run they were 5.16/5.17/5.75. These are single-run measurements on a shared machine, not win-rate results.
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
+crates/snapsim-py/build-module.sh
+ROOT="$PWD"
+cd /tmp
+PYTHONPATH=$SNAPSIM_REFERENCE \
+  $SNAPSIM_PYTHON \
+  "$ROOT/parity/bench_advisor.py" --rollouts 2000
+```
+
 ## Full-content corpus comparison
 
 Single run, same machine and conditions as below (shared; another project's training process may have been using about five cores). The corpus `parity/corpus-full-{spread,margin}.json` holds every deck card (84) and every location (84) the Python reference implements. Decks are drawn uniformly from those cards, not with the weighted Recruit prior. The parity gate matched 1,000 seeded games per policy on this corpus before these runs. Python and Rust ran back to back, one process each.
@@ -9,7 +32,7 @@ Single run, same machine and conditions as below (shared; another project's trai
 | Spread | 5,000 | 4.549169 | 1,099.10 | 0.209396 | 23,878.25 | 21.73× |
 | Margin | 5,000 | 4.802480 | 1,041.13 | 0.176696 | 28,297.22 | 27.18× |
 
-Load averages (1, 5, 15 minutes), immediately before each measurement: Python spread 5.58/7.07/7.55; Rust spread 5.58/7.07/7.55; Python margin 5.77/7.08/7.55; Rust margin 5.87/7.08/7.55. The commands are the ones below with `corpus-full-$policy.json`. Advisor rollouts are still unmeasured in Rust: the rollout loop is not ported.
+Load averages (1, 5, 15 minutes), immediately before each measurement: Python spread 5.58/7.07/7.55; Rust spread 5.58/7.07/7.55; Python margin 5.77/7.08/7.55; Rust margin 5.87/7.08/7.55. The commands are the ones below with `corpus-full-$policy.json`.
 
 ## Representative-corpus comparison
 
@@ -39,7 +62,7 @@ for policy in spread margin; do
 done
 ```
 
-The full-Recruit and advisor-rollout **Rust** workloads remain unmeasured: their rules and rollout loop are not implemented. The Python-only numbers below are not comparable to the representative Rust workloads.
+The full-Recruit game workload remains unmeasured in Rust; the advisor comparison above is a separate workload. The Python-only numbers below are not comparable to the representative Rust full-game workloads.
 
 ## Provisional Python-only baseline
 
@@ -62,4 +85,4 @@ PYTHONPATH=$SNAPSIM_REFERENCE \
 | Margin full games | 500 | 0.446800 | 1119.07 |
 | Turn-3 advisor rollouts | 1000 | 0.312598 | 3199.00 |
 
-No Rust comparisons have been measured for these full-Recruit or advisor workloads.
+No Rust full-Recruit game comparison has been measured for these Python-only runs.

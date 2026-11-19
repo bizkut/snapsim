@@ -81,6 +81,8 @@ pub struct Player {
 }
 pub struct Lane {
     pub def: &'static LocationDef,
+    /// Original ID when an unsupported location is represented by an inert rule.
+    pub observed_id: Option<String>,
     pub revealed: bool,
     pub revealed_turn: Option<u8>,
     pub cards: Vec<usize>,
@@ -123,6 +125,7 @@ pub struct Game<'a> {
     pub lanes: [Lane; 3],
     pub location_pool: Vec<&'static LocationDef>,
     pub turn: u8,
+    pub reveal_priority: Option<usize>,
     pub total_turns: u8,
     pub played: [Vec<(usize, usize)>; 2],
     pub pending_plays: [Vec<(usize, usize)>; 2],
@@ -270,6 +273,7 @@ impl<'a> Game<'a> {
         let chosen = rng.sample_indices(available.len(), 3);
         let lanes = std::array::from_fn(|i| Lane {
             def: available[chosen[i]],
+            observed_id: None,
             revealed: false,
             revealed_turn: None,
             cards: Vec::new(),
@@ -284,6 +288,7 @@ impl<'a> Game<'a> {
             location_pool: available,
             turn: 1,
             total_turns: 6,
+            reveal_priority: None,
             played: Default::default(),
             pending_plays: Default::default(),
             played_on_reveal: [false; 2],
@@ -307,7 +312,7 @@ impl<'a> Game<'a> {
     }
 
     pub fn create_card(&mut self, id: &str, owner: usize) -> usize {
-        let def = cards::get(id).expect("unregistered created card");
+        let def = crate::position::card_def(id).expect("unregistered created card");
         let row = CATALOG.get(id).expect("missing created card data");
         let index = self.cards.len();
         self.cards.push(Card {
@@ -378,6 +383,7 @@ impl<'a> Game<'a> {
     pub fn replace_location(&mut self, lane: usize, id: &str) {
         let def = locations::get(id).expect("unregistered replacement location");
         self.lanes[lane].def = def;
+        self.lanes[lane].observed_id = None;
         self.lanes[lane].state = def.initial_state.map(|init| init());
         self.lanes[lane].revealed = true;
         self.lanes[lane].revealed_turn = Some(self.turn);
@@ -713,8 +719,10 @@ impl<'a> Game<'a> {
             self.set_energy(seat, i32::from(self.turn));
             self.draw(seat);
         }
-        if self.turn <= 3 && !self.lanes[usize::from(self.turn - 1)].revealed {
-            let lane = usize::from(self.turn - 1);
+        let revealed = self.lanes.iter().filter(|lane| lane.revealed).count();
+        if revealed < usize::from(self.turn).min(self.lanes.len())
+            && let Some(lane) = self.lanes.iter().position(|lane| !lane.revealed)
+        {
             self.lanes[lane].revealed = true;
             self.lanes[lane].revealed_turn = Some(self.turn);
             self.delays_reveals |= self.lanes[lane].def.delays_reveals;
@@ -975,24 +983,53 @@ impl<'a> Game<'a> {
         }
     }
     pub fn play_turn(&mut self, policy: crate::policy::Policy) -> TurnTrace {
-        let pending = std::mem::take(&mut self.delayed_reveals);
+        self.played = Default::default();
         self.pending_plays = std::array::from_fn(|seat| {
-            pending[seat]
+            self.delayed_reveals[seat]
                 .iter()
                 .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
                 .collect()
         });
         self.start_turn();
+        self.resolve_started_turn(None, policy, None)
+    }
+
+    /// Resolve a materialized planning state without drawing or starting the turn again.
+    /// `my_plan` contains arena card indices, not hand slots.
+    pub fn resolve_position_turn(
+        &mut self,
+        my_plan: &[(usize, usize)],
+        policy: crate::policy::Policy,
+        priority: Option<usize>,
+    ) -> TurnTrace {
+        self.pending_plays = std::array::from_fn(|seat| {
+            self.delayed_reveals[seat]
+                .iter()
+                .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
+                .collect()
+        });
+        self.resolve_started_turn(Some(my_plan), policy, priority)
+    }
+
+    fn resolve_started_turn(
+        &mut self,
+        my_plan: Option<&[(usize, usize)]>,
+        policy: crate::policy::Policy,
+        priority: Option<usize>,
+    ) -> TurnTrace {
+        let pending = std::mem::take(&mut self.delayed_reveals);
         let winner = self.winner();
-        let priority = if winner == 2 {
-            self.rng.borrow_mut().randbelow(2)
-        } else {
-            winner as usize
-        };
+        let priority = priority.unwrap_or_else(|| {
+            if winner == 2 {
+                self.rng.borrow_mut().randbelow(2)
+            } else {
+                winner as usize
+            }
+        });
         let plans = {
             let mut rng = self.rng.borrow_mut();
             [
-                policy.plan(self, 0, &mut **rng),
+                my_plan.map_or_else(|| policy.plan(self, 0, &mut **rng), |plan| plan.to_vec()),
                 policy.plan(self, 1, &mut **rng),
             ]
         };
@@ -1005,10 +1042,15 @@ impl<'a> Game<'a> {
                 })
                 .collect()
         });
-        self.played = plans;
+        for (seat, plan) in plans.into_iter().enumerate() {
+            self.played[seat].extend(plan);
+        }
         for seat in 0..2 {
             for index in 0..self.played[seat].len() {
                 let (id, lane) = self.played[seat][index];
+                if self.cards[id].lane.is_some() {
+                    continue;
+                }
                 let hand = &mut self.players[seat].hand;
                 let slot = hand
                     .iter()
@@ -1069,6 +1111,17 @@ impl<'a> Game<'a> {
                 for id in seat {
                     self.reveal(id);
                 }
+            }
+            // Approximate snapshots can contain face-down cards of unknown timing.
+            // Python's finish_reveals flips these in lane/slot order before scoring.
+            let unresolved: Vec<_> = self
+                .lanes
+                .iter()
+                .flat_map(|lane| lane.cards.iter().copied())
+                .filter(|&id| !self.cards[id].revealed)
+                .collect();
+            for id in unresolved {
+                self.reveal(id);
             }
         }
         self.turn += 1;

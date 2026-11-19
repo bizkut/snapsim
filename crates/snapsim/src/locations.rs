@@ -39,7 +39,7 @@ pub struct LocationDef {
     pub initial_state: Option<fn() -> Box<dyn std::any::Any>>,
 }
 
-const fn location(
+pub(crate) const fn location(
     id: &'static str,
     power: i32,
     reveal_energy: i32,

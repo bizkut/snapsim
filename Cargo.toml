@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/snapsim"]
+members = ["crates/snapsim", "crates/snapsim-py"]
 resolver = "2"

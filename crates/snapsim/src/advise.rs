@@ -1,0 +1,292 @@
+//! Successive-halving search over sampled hidden-information games.
+use crate::{
+    game::Game,
+    policy::Policy,
+    position::{Position, build_game},
+    random::PythonRandom,
+};
+use rayon::prelude::*;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{
+    cmp::Ordering,
+    time::{Duration, Instant},
+};
+
+type Play = (usize, usize);
+
+#[derive(Deserialize)]
+struct Options {
+    rollouts: usize,
+    seed: i128,
+    max_plans: usize,
+    time_limit: Option<f64>,
+    playout: String,
+    workers: usize,
+    // Coverage and prior descriptions are calculated by Python's position module.
+    unsupported: Value,
+    priors: Value,
+    status: String,
+}
+
+#[derive(Clone)]
+struct Candidate {
+    plays: Vec<Play>,
+    samples: usize,
+    wins: usize,
+    draws: usize,
+}
+impl Candidate {
+    fn new(plays: Vec<Play>) -> Self {
+        Self {
+            plays,
+            samples: 0,
+            wins: 0,
+            draws: 0,
+        }
+    }
+    fn record(&mut self, winner: i32) {
+        self.samples += 1;
+        self.wins += usize::from(winner == 0);
+        self.draws += usize::from(winner == 2);
+    }
+    fn cmp_rank(&self, other: &Self) -> Ordering {
+        let fraction = |n: usize, d: usize| n as f64 / d as f64;
+        fraction(other.wins, other.samples)
+            .total_cmp(&fraction(self.wins, self.samples))
+            .then_with(|| {
+                fraction(other.draws, other.samples).total_cmp(&fraction(self.draws, self.samples))
+            })
+            .then_with(|| other.samples.cmp(&self.samples))
+            .then_with(|| other.plays.len().cmp(&self.plays.len()))
+            .then_with(|| self.plays.cmp(&other.plays))
+    }
+    fn result(&self, position: &Position) -> Value {
+        let plays: Vec<_> = self
+            .plays
+            .iter()
+            .map(|&(index, lane)| {
+                json!({
+                    "hand_index": index, "card": position.hand[index].id, "location": lane,
+                })
+            })
+            .collect();
+        let samples = self.samples as f64;
+        json!({"plays": plays, "win": self.wins as f64 / samples,
+            "draw": self.draws as f64 / samples,
+            "loss": (self.samples - self.wins - self.draws) as f64 / samples,
+            "samples": self.samples})
+    }
+}
+
+fn legal_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<Play>> {
+    fn extend(
+        game: &Game<'_>,
+        stopped: &(dyn Fn() -> bool + Sync),
+        start: usize,
+        energy: i32,
+        queued: &mut [usize; 3],
+        plays: &mut Vec<Play>,
+        result: &mut Vec<Vec<Play>>,
+    ) {
+        for index in start..game.players[0].hand.len() {
+            if stopped() {
+                return;
+            }
+            let card = game.players[0].hand[index];
+            for lane in 0..3 {
+                if !game.can_play(card, lane, 0, energy, queued[lane]) {
+                    continue;
+                }
+                plays.push((index, lane));
+                result.push(plays.clone());
+                queued[lane] += 1;
+                extend(
+                    game,
+                    stopped,
+                    index + 1,
+                    energy - game.card_cost(card),
+                    queued,
+                    plays,
+                    result,
+                );
+                queued[lane] -= 1;
+                plays.pop();
+            }
+        }
+    }
+    let mut result = vec![vec![]];
+    extend(
+        game,
+        stopped,
+        0,
+        game.players[0].energy,
+        &mut [0; 3],
+        &mut vec![],
+        &mut result,
+    );
+    result
+}
+
+fn play_out(game: &mut Game<'_>, position: &Position, plays: &[Play], policy: Policy) -> i32 {
+    let plan: Vec<_> = plays
+        .iter()
+        .map(|&(index, lane)| (game.players[0].hand[index], lane))
+        .collect();
+    let priority = match position.priority.as_deref() {
+        Some("me") => Some(0),
+        Some("opponent") => Some(1),
+        _ => None,
+    };
+    game.resolve_position_turn(&plan, policy, priority);
+    while game.turn <= game.total_turns {
+        game.play_turn(policy);
+    }
+    game.winner()
+}
+
+/// JSON interface. Coverage, prior metadata and status are supplied by the Python
+/// position layer as additional options, preserving a single source of truth.
+pub fn advise_json(position_json: &str, options_json: &str) -> Result<String, String> {
+    advise_json_with_cancel(position_json, options_json, &|| false)
+}
+
+/// As `advise_json`, with cooperative cancellation between rollouts.
+pub fn advise_json_with_cancel(
+    position_json: &str,
+    options_json: &str,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<String, String> {
+    let position: Position = serde_json::from_str(position_json).map_err(|e| e.to_string())?;
+    let options: Options = serde_json::from_str(options_json).map_err(|e| e.to_string())?;
+    if options.rollouts == 0 || options.max_plans == 0 || options.workers == 0 {
+        return Err("rollouts, max_plans and workers must be positive".into());
+    }
+    if options
+        .time_limit
+        .is_some_and(|v| !v.is_finite() || v < 0.0)
+    {
+        return Err("time_limit must be a finite nonnegative number".into());
+    }
+    let policy = match options.playout.as_str() {
+        "spread" => Policy::Spread,
+        "heuristic" => Policy::Heuristic,
+        "margin" => Policy::Margin,
+        _ => return Err("unknown playout policy".into()),
+    };
+    let deadline = options
+        .time_limit
+        .and_then(|v| Instant::now().checked_add(Duration::from_secs_f64(v)));
+    let stopped = || cancel() || deadline.is_some_and(|end| Instant::now() >= end);
+    let mut rng = PythonRandom::seed(options.seed);
+    let mut sample_seed = rng.getrandbits(64) as u64;
+    let mut first_rng = PythonRandom::seed(sample_seed as i128);
+    let mut first_game = build_game(&position, &mut first_rng)?;
+    let mut legal = legal_plans(&first_game, &stopped);
+    let limit = options
+        .rollouts
+        .min(options.max_plans.max(2).max(options.rollouts / 2));
+    if legal.len() > limit {
+        let selected = rng.sample_indices(legal.len() - 1, limit - 1);
+        legal = std::iter::once(Vec::new())
+            .chain(selected.into_iter().map(|i| legal[i + 1].clone()))
+            .collect();
+    }
+    let mut active: Vec<_> = legal.into_iter().map(Candidate::new).collect();
+    let keep = options.max_plans.min(active.len());
+    let mut remaining = options.rollouts;
+    let pool = if options.workers > 1 {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(options.workers)
+                .build()
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    while remaining > 0 {
+        let count = active.len();
+        let quotient = (count - 1) / keep;
+        let stages = 1 + (usize::BITS - quotient.leading_zeros()) as usize;
+        let rounds = (remaining / (count * stages)).max(1);
+        let size = remaining.min(count * rounds);
+        let mut cursor = 0;
+        let mut round_seed = sample_seed;
+        let mut interrupted = false;
+        while cursor < size {
+            let first = remaining == options.rollouts;
+            if !first && stopped() {
+                interrupted = true;
+                break;
+            }
+            let batch_size = if first {
+                1
+            } else {
+                options.workers.saturating_mul(8).min(size - cursor)
+            };
+            let mut jobs = Vec::with_capacity(batch_size);
+            for index in cursor..cursor + batch_size {
+                if index % count == 0 {
+                    round_seed = sample_seed;
+                    sample_seed = rng.getrandbits(64) as u64;
+                }
+                jobs.push((index % count, round_seed));
+            }
+            cursor += batch_size;
+            if first {
+                let winner = play_out(&mut first_game, &position, &active[0].plays, policy);
+                active[0].record(winner);
+                remaining -= 1;
+                continue;
+            }
+            let run = |&(index, seed): &(usize, u64)| -> Result<Option<(usize, i32)>, String> {
+                if stopped() {
+                    return Ok(None);
+                }
+                let mut rng = PythonRandom::seed(seed as i128);
+                let mut game = build_game(&position, &mut rng)?;
+                Ok(Some((
+                    index,
+                    play_out(&mut game, &position, &active[index].plays, policy),
+                )))
+            };
+            let completed: Vec<_> = if let Some(pool) = &pool {
+                pool.install(|| jobs.par_iter().map(run).collect())
+            } else {
+                jobs.iter().map(run).collect()
+            };
+            for item in completed {
+                if let Some((index, winner)) = item? {
+                    active[index].record(winner);
+                    remaining -= 1;
+                } else {
+                    interrupted = true;
+                }
+            }
+            if interrupted {
+                break;
+            }
+        }
+        if interrupted {
+            break;
+        }
+        if count > keep {
+            active.sort_by(Candidate::cmp_rank);
+            active.truncate(keep.max(count.div_ceil(2)));
+        }
+    }
+    active.retain(|candidate| candidate.samples > 0);
+    active.sort_by(Candidate::cmp_rank);
+    let plans: Vec<_> = active
+        .iter()
+        .take(options.max_plans)
+        .map(|c| c.result(&position))
+        .collect();
+    serde_json::to_string(
+        &json!({"engine": "simulator-rollout", "status": options.status,
+        "rollouts": options.rollouts - remaining, "plans": plans,
+        "unsupported": options.unsupported, "priors": options.priors}),
+    )
+    .map_err(|e| e.to_string())
+}

@@ -1,0 +1,18 @@
+[package]
+name = "snapsim-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "snapsim_py"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+snapsim = { path = "../snapsim" }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+
+[build-dependencies]
+pyo3-build-config = "0.23"
