@@ -9,5 +9,7 @@ case "$(uname -s)" in
   Linux) library="$target/release/libsnapsim_py.so" ;;
   *) echo 'Unsupported platform' >&2; exit 1 ;;
 esac
-cp "$library" "$target/release/snapsim_py.so"
+# Rename instead of overwriting in place: a running server keeps its mapped copy.
+cp "$library" "$target/release/snapsim_py.so.tmp"
+mv -f "$target/release/snapsim_py.so.tmp" "$target/release/snapsim_py.so"
 printf '%s\n' "$(cd "$target/release" && pwd)/snapsim_py.so"
