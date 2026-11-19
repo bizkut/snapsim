@@ -23,8 +23,8 @@ impl Policy {
         let player = &game.players[seat];
         let mut hand = player.hand.clone();
         match self {
-            Self::Heuristic => hand.sort_by_key(|&id| game.cards[id].cost),
-            _ => hand.sort_by_key(|&id| std::cmp::Reverse(game.cards[id].cost)),
+            Self::Heuristic => hand.sort_by_key(|&id| game.card_cost(id)),
+            _ => hand.sort_by_key(|&id| std::cmp::Reverse(game.card_cost(id))),
         }
         let mut lanes = [0, 1, 2];
         if matches!(self, Self::Margin) {
@@ -75,7 +75,7 @@ impl Policy {
                 shuffle_lanes(rng, &mut lanes);
             }
             if matches!(self, Self::Margin) {
-                if card.cost > energy {
+                if game.card_cost(id) > energy {
                     continue;
                 }
                 let mut best = None;
@@ -104,7 +104,7 @@ impl Policy {
                 if let Some((lane, _, gain, score)) = best {
                     plays.push((id, lane));
                     queued[lane] += 1;
-                    energy -= card.cost;
+                    energy -= game.card_cost(id);
                     margins[lane] += gain;
                     own_power[lane] += gain;
                     scores[lane] = score;
@@ -117,7 +117,7 @@ impl Policy {
                     if game.can_play(id, lane, seat, energy, queued[lane]) {
                         plays.push((id, lane));
                         queued[lane] += 1;
-                        energy -= card.cost;
+                        energy -= game.card_cost(id);
                         break;
                     }
                 }

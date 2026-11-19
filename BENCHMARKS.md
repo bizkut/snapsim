@@ -1,5 +1,16 @@
 # Benchmarks
 
+## Full-content corpus comparison
+
+Single run, same machine and conditions as below (shared; another project's training process may have been using about five cores). The corpus `parity/corpus-full-{spread,margin}.json` holds every deck card (84) and every location (84) the Python reference implements. Decks are drawn uniformly from those cards, not with the weighted Recruit prior. The parity gate matched 1,000 seeded games per policy on this corpus before these runs. Python and Rust ran back to back, one process each.
+
+| Policy | Games | Python seconds | Python games/s | Rust seconds | Rust games/s | Measured Rust/Python |
+|---|---:|---:|---:|---:|---:|---:|
+| Spread | 5,000 | 4.549169 | 1,099.10 | 0.209396 | 23,878.25 | 21.73× |
+| Margin | 5,000 | 4.802480 | 1,041.13 | 0.176696 | 28,297.22 | 27.18× |
+
+Load averages (1, 5, 15 minutes), immediately before each measurement: Python spread 5.58/7.07/7.55; Rust spread 5.58/7.07/7.55; Python margin 5.77/7.08/7.55; Rust margin 5.87/7.08/7.55. The commands are the ones below with `corpus-full-$policy.json`. Advisor rollouts are still unmeasured in Rust: the rollout loop is not ported.
+
 ## Representative-corpus comparison
 
 Single run on Apple M4 Pro, 24 GiB RAM, macOS Darwin 27.2.0 arm64, CPython 3.12.16, Rust 1.98.1, release profile. The machine was shared; another project's training process may have been using about five cores. Each measurement used one process, with Python and Rust run back to back for each policy. The fixed corpus is in `parity/corpus-{spread,margin}.json`; it is **not** the full Recruit pool. For each seed, both implementations sample the same two decks, seed the game separately, sample the same location pool and run the named policy in both seats. Timings include sampling, setup and complete games. Rust also constructs turn traces while Python does not, so the measured Rust workload includes that extra work. No warmup or statistical isolation was applied.

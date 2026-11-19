@@ -77,7 +77,7 @@ fn resolve_watch(g: &mut Game, id: usize, expect: bool, power: i32) {
     let watches = std::mem::take(&mut g.cards[id].watches);
     for (turn, lane) in watches {
         if turn == g.turn {
-            let played = g.played[owner].iter().any(|&(_, loc)| loc == lane);
+            let played = g.played_at(owner, lane);
             if played == expect {
                 g.cards[id].permanent += power;
             }
@@ -156,7 +156,14 @@ fn blue_marvel(g: &mut Game, id: usize) {
     }
 }
 fn angela(g: &mut Game, id: usize, played: usize) {
-    if g.cards[id].owner == g.cards[played].owner && g.cards[id].lane == g.cards[played].lane {
+    // Python checks whether the revealed card is one of this turn's plays at Angela's
+    // lane, wherever that card is now (a Hulkbuster may have merged it off the board).
+    let Some(lane) = g.cards[id].lane else {
+        return;
+    };
+    if g.played_cards_at(g.cards[id].owner, lane)
+        .any(|card| card == played)
+    {
         g.cards[id].permanent += 1;
     }
 }

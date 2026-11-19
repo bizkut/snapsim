@@ -12,7 +12,7 @@ fn reveal(game: &mut Game<'_>, id: usize) {
         .hand
         .iter()
         .copied()
-        .filter(|&card| game.cards[card].cost % 2 != 0)
+        .filter(|&card| game.card_cost(card) % 2 != 0)
         .collect();
     if !eligible.is_empty() {
         let chosen = game.rng.borrow_mut().randbelow(eligible.len());
