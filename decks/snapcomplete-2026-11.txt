@@ -1,0 +1,38 @@
+# SnapComplete best decks, Ranked + Conquest, week ending 2026-11-24 (fetched 2026-11-20).
+# https://snapcomplete.com/play/decks: win-rate order (10+ games), then the most-played runner-up.
+
+# 61.3% win rate across 401 games from 75 players
+# Polaris Horseman of Pestilence, Hellcow Fractured Frontier, Jane Foster Fractured Frontier, Caliban Horseman of Pestilence, Omega Sentinel, Laufey, Captain Marvel, Iron Lad, Ikari, Dragon Lord, Scorpion Brand New Day, Anti-Polar Magneto
+UGxyc0hyc21uRixIbGxjd0ZyY3RyZEZybnRyMTgsSm5Gc3RyRnJjdHJkRnJudHIxQixDbGJuSHJzbW5GLEtybVNocG5kckYsTGY2LENwdG5NcnZsRCxJcm5MZDcsSWtyNSxEcmduTHJkQSxTY3JwbkJybmROd0QxMyxBbnRQbHJNZ250MTA=
+
+# 60.6% win rate across 662 games from 109 players
+# King Eitri, Maria Hill, Hydra Bob, Iron Patriot, Shadowlands Daredevil, Valentina, Mobius M. Mobius, Scarlet Witch Queen of Chaos, Shadow King, Gambit Horseman of Death, Stardust, Kluh
+S25nRXRyOSxNckhsbDksSGRyQmI4LElyblB0cnRCLFNoZHdsbmRzRHJkdmwxNCxWbG50bjksTWJzTU1ic0QsU2NybHRXdGNoUW5PZkNoczE4LFNoZHdLbmdBLEdtYnRIcnNtbkUsU3RyZHN0OCxLbGg0
+
+# 59.8% win rate across 602 games from 100 players
+# Deafening Chord, Majestic Wingbeat, Nico Minoru, Nicholas Scratch, Vampire Killmonger, Joaquin Torres Falcon II, Scarlet Witch Queen of Chaos, Werewolf By Night, Psylocke Fractured Frontier, Mother Askani, Shou-Lao the Undying, Superior Iron Man
+RGZubmdDaHJkRSxNanN0Y1duZ2J0MTAsTmNNbnJBLE5jaGxzU2NydGNoRixWbXByS2xsbW5ncjExLEpxblRycnNELFNjcmx0V3RjaFFuT2ZDaHMxOCxXcndsZkJOZ2h0RixQc2xja0ZyY3RyZEZybnRyMTksTXRockFza25DLFNoTDcsU3Bycklybk1uRg==
+
+# 59.8% win rate across 1,977 games from 373 players
+# Majestic Wingbeat, The Hunger, Nicholas Scratch, Vampire Killmonger, Zombie Mister Fantastic, Joaquin Torres Falcon II, Zombie Blade, Venus, Scarlet Witch Queen of Chaos, Zombie Scarlet Witch, Zombie Giant-Man, Sasquatch
+TWpzdGNXbmdidDEwLFRoSG5ncjksTmNobHNTY3J0Y2hGLFZtcHJLbGxtbmdyMTEsWm1iTXN0ckZudHN0YzE1LEpxblRycnNELFptYkJsZEIsVm5zNSxTY3JsdFd0Y2hRbk9mQ2hzMTgsWm1iU2NybHRXdGNoMTIsWm1iR250TW5FLFNzcXRjaDk=
+
+# 59.5% win rate across 36 games from 3 players
+# Captain Britain, Caliban Horseman of Pestilence, Mordred, Jubilee, Arthur Pendragon, En Sabah Nur, Captain Marvel, Lancelot, Iron Lad, Dragon Lord, Anti-Polar Magneto, Fin Fang Foom
+Q3B0bkJydG5FLENsYm5IcnNtbkYsTXJkcmQ3LEpibDcsQXJ0aHJQbmRyZ25GLEVuU2JoTnJBLENwdG5NcnZsRCxMbmNsdDgsSXJuTGQ3LERyZ25McmRBLEFudFBsck1nbnQxMCxGbkZuZ0ZtQg==
+
+# 59.2% win rate across 233 games from 38 players
+# Majestic Wingbeat, The Hunger, Nicholas Scratch, Vampire Killmonger, Zombie Mister Fantastic, Joaquin Torres Falcon II, Venus, Scarlet Witch Queen of Chaos, Werewolf By Night, Zombie Scarlet Witch, Zombie Giant-Man, Sasquatch
+TWpzdGNXbmdidDEwLFRoSG5ncjksTmNobHNTY3J0Y2hGLFZtcHJLbGxtbmdyMTEsWm1iTXN0ckZudHN0YzE1LEpxblRycnNELFZuczUsU2NybHRXdGNoUW5PZkNoczE4LFdyd2xmQk5naHRGLFptYlNjcmx0V3RjaDEyLFptYkdudE1uRSxTc3F0Y2g5
+
+# 58.9% win rate across 2,471 games from 364 players
+# Zabu, Spider-Man Brand New Day, Surge, Jeff the Baby Dolphin!?, Captain Britain, Mister Fantastic First Steps, Jubilee Silver Surfer, Arthur Pendragon, Wolverine Horseman of War, Lancelot, Iron Lad, Superior Iron Man
+WmI0LFNwZHJNbkJybmROd0QxNCxTcmc1LEpmZlRoQmJEbHBobjEyLENwdG5CcnRuRSxNckZudHN0Y0Zyc3RTdHBzMTUsSmJsU2x2clNyZnIxMyxBcnRoclBuZHJnbkYsV2x2cm5IcnNtbjExLExuY2x0OCxJcm5MZDcsU3Bycklybk1uRg==
+
+# 58.8% win rate across 122 games from 27 players
+# Fastball Special, Kid Omega, Carnage, Tombstone, Magik, Venom, Adamantium Infusion, Shuri, Symbiote Spider-Man, Black Panther, Nimrod, Arnim Zola
+RnN0YmxsU3BjbEYsS2RPbWc4LENybmc3LFRtYnN0bjksTWdrNSxWbm01LEFkbW50bUluZnNuMTIsU2hyNSxTbWJ0U3Bkck1uMTEsQmxja1BudGhyQyxObXJkNixBcm5tWmw5
+
+# most played
+# Deafening Chord, Majestic Wingbeat, Echo, Spider-Man Brand New Day, Adam Warlock, Surge, Magik, Superior Spider-Man, Mister Fantastic First Steps, Wong, Shuri, Zombie Galacti
+RGZubmdDaHJkRSxNanN0Y1duZ2J0MTAsRWNoNCxTcGRyTW5Ccm5kTndEMTQsQWRtV3JsY2tCLFNyZzUsTWdrNSxTcHJyU3Bkck1uMTEsTXJGbnRzdGNGcnN0U3RwczE1LFduZzQsU2hyNSxabWJHbGN0RA==

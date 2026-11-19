@@ -1,5 +1,5 @@
 //! Card registrations. Add a card by defining its hooks in a group module and
-//! adding its descriptor to `REGISTRY`.
+//! listing its descriptor in that module's slice in `GROUPS`.
 use crate::game::Game;
 
 mod agent13;
@@ -26,8 +26,7 @@ pub const NON_OWNABLE: [&str; 10] = [
 
 /// Registered deck cards in the reference's `deck_eligible_ids()` order: sorted IDs.
 static DECK_ELIGIBLE_IDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
-    let mut ids: Vec<_> = REGISTRY
-        .iter()
+    let mut ids: Vec<_> = registry()
         .map(|def| def.id)
         .filter(|id| !NON_OWNABLE.contains(id))
         .collect();
@@ -98,7 +97,7 @@ impl CardDef {
     }
 }
 
-pub static REGISTRY: &[CardDef] = &[
+static BASE: &[CardDef] = &[
     agent13::AGENT_13,
     CardDef::vanilla("Abomination"),
     CardDef::vanilla("Cyclops"),
@@ -195,6 +194,14 @@ pub static REGISTRY: &[CardDef] = &[
     core_rules::SCARLET_WITCH,
 ];
 
+/// Rule descriptors, one slice per card-group module.
+static GROUPS: &[&[CardDef]] = &[BASE];
+
+/// Every registered card rule.
+pub fn registry() -> impl Iterator<Item = &'static CardDef> {
+    GROUPS.iter().flat_map(|group| group.iter())
+}
+
 pub fn get(id: &str) -> Option<&'static CardDef> {
-    REGISTRY.iter().find(|entry| entry.id == id)
+    registry().find(|entry| entry.id == id)
 }

@@ -149,7 +149,7 @@ static CATALOG: LazyLock<HashMap<String, data::CardData>> = LazyLock::new(|| {
         .collect()
 });
 static HAS_EVENT_HOOKS: LazyLock<bool> = LazyLock::new(|| {
-    cards::REGISTRY.iter().any(|entry| entry.on_event.is_some())
+    cards::registry().any(|entry| entry.on_event.is_some())
         || locations::REGISTRY
             .iter()
             .any(|entry| entry.on_event.is_some())

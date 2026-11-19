@@ -20,7 +20,7 @@ static RECRUIT_LOCATIONS: LazyLock<HashSet<String>> = LazyLock::new(|| {
 });
 
 pub fn supported_cards() -> Vec<&'static str> {
-    let mut ids: Vec<_> = cards::REGISTRY.iter().map(|d| d.id).collect();
+    let mut ids: Vec<_> = cards::registry().map(|d| d.id).collect();
     ids.sort_unstable();
     ids.dedup();
     ids
