@@ -7,6 +7,7 @@ use std::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    snapsim::cards::use_reference_pool();
     let path = env::args().nth(1).ok_or("expected JSONL corpus path")?;
     let mut accepted = 0;
     let mut rejected = 0;

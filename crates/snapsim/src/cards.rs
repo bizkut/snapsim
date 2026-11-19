@@ -1,6 +1,8 @@
 //! Card registrations. Add a card by defining its hooks in a group module and
 //! listing its descriptor in that module's slice in `GROUPS`.
 use crate::game::Game;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod agent13;
 mod core_rules;
@@ -35,7 +37,7 @@ pub fn is_token(id: &str) -> bool {
 }
 
 /// Registered deck cards in the reference's `deck_eligible_ids()` order: sorted IDs.
-static DECK_ELIGIBLE_IDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+static DECK_ELIGIBLE_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     let mut ids: Vec<_> = registry()
         .map(|def| def.id)
         .filter(|id| !is_token(id))
@@ -44,8 +46,37 @@ static DECK_ELIGIBLE_IDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::La
     ids
 });
 
+/// The frozen Python reference's `deck_eligible_ids()`. Parity gates compare unchanged
+/// content against that reference, so they pin every pool built from this list to it.
+static REFERENCE_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let ids: Vec<&'static str> =
+        serde_json::from_str(include_str!("../../../parity/reference-pool.json"))
+            .expect("invalid parity/reference-pool.json");
+    assert!(
+        ids.iter().all(|id| get(id).is_some()),
+        "reference pool lists an unregistered card"
+    );
+    ids
+});
+
+static USE_REFERENCE: AtomicBool = AtomicBool::new(false);
+static ENV_REFERENCE: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("SNAPSIM_REFERENCE_POOL").is_some_and(|value| value == "1"));
+
+/// Pin `deck_eligible_ids()` to the reference list for the rest of the process.
+/// Setting `SNAPSIM_REFERENCE_POOL=1` does the same for the CLI and the Python module.
+pub fn use_reference_pool() {
+    USE_REFERENCE.store(true, Ordering::Relaxed);
+}
+
+/// Cards a deck may contain and random-card effects draw from: every registered non-token
+/// card, or the reference list while pinned for parity gates.
 pub fn deck_eligible_ids() -> &'static [&'static str] {
-    &DECK_ELIGIBLE_IDS
+    if USE_REFERENCE.load(Ordering::Relaxed) || *ENV_REFERENCE {
+        &REFERENCE_IDS
+    } else {
+        &DECK_ELIGIBLE_IDS
+    }
 }
 
 pub type CardHook = fn(&mut Game, usize);

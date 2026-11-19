@@ -8,6 +8,7 @@ use snapsim::{
 use std::io::{self, BufRead};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    snapsim::cards::use_reference_pool();
     let options = AdviseOptions {
         rollouts: 1,
         seed: 0,

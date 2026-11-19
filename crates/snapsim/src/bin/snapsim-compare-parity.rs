@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead};
 
 fn main() {
+    snapsim::cards::use_reference_pool();
     for line in io::stdin().lock().lines() {
         let line = line.expect("reading case");
         let case: Value = serde_json::from_str(&line).expect("invalid case");

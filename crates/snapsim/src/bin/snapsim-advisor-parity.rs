@@ -17,6 +17,7 @@ struct Record {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    snapsim::cards::use_reference_pool();
     let path = env::args().nth(1).ok_or("expected corpus path")?;
     let mut count = 0;
     let mut mismatches = 0;
