@@ -12,10 +12,16 @@ pub trait GameRng {
     fn randbelow(&mut self, n: usize) -> usize;
     fn randrange(&mut self, start: i64, stop: i64, step: i64) -> i64;
     fn randint(&mut self, a: i64, b: i64) -> i64;
-    fn choice<'a, T>(&mut self, values: &'a [T]) -> &'a T {
+    fn choice<'a, T>(&mut self, values: &'a [T]) -> &'a T
+    where
+        Self: Sized,
+    {
         &values[self.randbelow(values.len())]
     }
-    fn shuffle<T>(&mut self, values: &mut [T]) {
+    fn shuffle<T>(&mut self, values: &mut [T])
+    where
+        Self: Sized,
+    {
         for i in (1..values.len()).rev() {
             values.swap(i, self.randbelow(i + 1));
         }

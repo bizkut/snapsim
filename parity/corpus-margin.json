@@ -1,0 +1,5 @@
+{
+  "cards": ["Abomination", "Cyclops", "Hulk", "MistyKnight", "Shocker", "TheThing", "Wasp", "Quicksilver", "Hawkeye", "JessicaJones", "Medusa", "Sentinel", "Ultron", "IronMan", "KaZar", "Klaw", "MrFantastic", "BlueMarvel", "Angela", "Bishop", "Kraven", "Carnage", "Blade", "Cosmo", "SwordMaster"],
+  "locations": ["Xandar", "NegativeZone", "Necrosha", "Nidavellir", "SewerSystem", "Ruins", "Wakanda", "KamarTaj", "TinkerersWorkshop", "ProjectPegasus", "MuirIsland"],
+  "policy": "margin"
+}
