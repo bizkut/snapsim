@@ -2,13 +2,14 @@
 use crate::{cards, compare, deckcodes, random::PythonRandom};
 use rayon::prelude::*;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Instant;
 
 type Deck = Vec<String>;
 #[derive(Default)]
 struct Candidate {
-    source: String,
+    source: Cow<'static, str>,
     original: Option<Deck>,
 }
 fn ids(v: &Value) -> Deck {
@@ -20,12 +21,45 @@ fn ids(v: &Value) -> Deck {
         })
         .unwrap_or_default()
 }
+fn entry_ids(v: &Value) -> &Value {
+    if v.is_object() { &v["card_ids"] } else { v }
+}
 fn entry(v: &Value) -> Deck {
-    if v.is_object() {
-        ids(&v["card_ids"])
-    } else {
-        ids(v)
+    ids(entry_ids(v))
+}
+
+fn saved_frequencies(saved: &[Value]) -> HashMap<&str, usize> {
+    let mut frequencies = HashMap::new();
+    let mut seen = HashSet::new();
+    for deck in saved {
+        seen.clear();
+        for id in entry_ids(deck)
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if seen.insert(id) {
+                *frequencies.entry(id).or_default() += 1;
+            }
+        }
     }
+    frequencies
+}
+
+fn fill_from_saved(d: &mut Deck, pool: &BTreeSet<String>, frequencies: &HashMap<&str, usize>) {
+    let missing = 12 - d.len();
+    if missing == 0 {
+        return;
+    }
+    let mut rest: Vec<_> = pool.iter().filter(|c| !d.contains(c)).collect();
+    rest.sort_unstable_by_key(|c| {
+        (
+            std::cmp::Reverse(frequencies.get(c.as_str()).copied().unwrap_or(0)),
+            *c,
+        )
+    });
+    d.extend(rest.into_iter().take(missing).cloned());
 }
 fn name(v: &Value, default: &str) -> String {
     v.get("name")
@@ -87,9 +121,9 @@ fn score(v: &[f64], difference: bool) -> (f64, Vec<f64>) {
         ],
     )
 }
-fn ranked(mut keys: Vec<Deck>, samples: &HashMap<Deck, Vec<f64>>) -> Vec<Deck> {
+fn ranked(mut keys: Vec<Deck>, samples: &HashMap<Deck, impl AsRef<[f64]>>) -> Vec<Deck> {
     let mean = |key: &Deck| {
-        let values = samples.get(key).map(Vec::as_slice).unwrap_or(&[]);
+        let values = samples.get(key).map(AsRef::as_ref).unwrap_or(&[]);
         if values.is_empty() {
             0.5
         } else {
@@ -114,9 +148,9 @@ fn diverse(keys: Vec<Deck>, count: usize) -> Vec<Deck> {
     }
     out
 }
-fn swaps(deck: &Deck, eligible: &BTreeSet<String>) -> Vec<Deck> {
+fn swaps(deck: &Deck, eligible: &BTreeSet<String>, locked: &[String]) -> Vec<Deck> {
     let mut out = Vec::new();
-    for old in deck {
+    for old in deck.iter().filter(|c| !locked.contains(c)) {
         for new in eligible {
             if !deck.contains(new) {
                 let mut d = deck.clone();
@@ -140,33 +174,63 @@ fn changed(a: &Deck, b: &Deck) -> Value {
     removed.sort();
     json!({"in":a.iter().filter(|x| !b.contains(x)).collect::<Vec<_>>(),"out":removed})
 }
+/// Completions in result order: confirmed decks by their confirmation games, then the
+/// rest by screening. The two use different rollouts, so their scores are not comparable.
+fn completion_order(
+    confirm: &HashMap<Deck, Vec<f64>>,
+    screen: &HashMap<Deck, Vec<f64>>,
+    count: usize,
+) -> Vec<Deck> {
+    let scored = |samples: &HashMap<Deck, Vec<f64>>| -> Vec<Deck> {
+        samples
+            .iter()
+            .filter(|(_, scores)| !scores.is_empty())
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+    let mut ordered = ranked(scored(confirm), confirm);
+    let screened: Vec<_> = ranked(scored(screen), screen)
+        .into_iter()
+        .filter(|k| !ordered.contains(k))
+        .collect();
+    ordered.extend(screened);
+    ordered.truncate(count);
+    ordered
+}
+
+#[derive(Clone, Copy)]
+enum SearchMode {
+    Build,
+    Complete,
+    TryCards,
+}
 
 struct Round<'a> {
     stage: &'a str,
     index: usize,
     rollouts: usize,
     fraction: f64,
-    build: bool,
+    mode: SearchMode,
     count: usize,
 }
 impl Round<'_> {
-    fn screen(index: usize, build: bool, count: usize) -> Self {
+    fn screen(index: usize, mode: SearchMode, count: usize) -> Self {
         Self {
             stage: "screen",
             index,
             rollouts: 32,
             fraction: 0.55,
-            build,
+            mode,
             count,
         }
     }
-    fn confirm(index: usize, rollouts: usize, build: bool, count: usize) -> Self {
+    fn confirm(index: usize, rollouts: usize, mode: SearchMode, count: usize) -> Self {
         Self {
             stage: "confirm",
             index,
             rollouts,
             fraction: 1.,
-            build,
+            mode,
             count,
         }
     }
@@ -200,9 +264,10 @@ impl Search<'_> {
             index,
             rollouts,
             fraction,
-            build,
+            mode,
             count,
         } = round;
+        let try_cards = matches!(mode, SearchMode::TryCards);
         if self.expired(fraction) {
             return Ok(false);
         }
@@ -230,8 +295,8 @@ impl Search<'_> {
                 samples.entry(key.clone()).or_default().push(value);
                 self.games += 2;
                 let done = batch * self.workers + offset + 1;
-                if !build || done == 1 || done == keys.len() || done.is_multiple_of(16) {
-                    let candidates = if build {
+                if try_cards || done == 1 || done == keys.len() || done.is_multiple_of(16) {
+                    let candidates = if !try_cards {
                         samples.keys().cloned().collect()
                     } else {
                         keys.iter()
@@ -240,10 +305,13 @@ impl Search<'_> {
                             .collect()
                     };
                     let best = ranked(candidates, samples);
-                    let best = if build {
-                        diverse(best, count)
-                    } else {
-                        best.into_iter().take(3).collect()
+                    let best = match mode {
+                        SearchMode::Build => diverse(best, count),
+                        SearchMode::Complete | SearchMode::TryCards => {
+                            let mut best = best;
+                            best.truncate(if try_cards { 3 } else { count });
+                            best
+                        }
                     };
                     (self.progress)(
                         json!({"type":"progress","stage":stage,"done":done,"total":keys.len(),"elapsed":self.started.elapsed().as_secs_f64(),"best":best.iter().map(|k| json!({"card_ids":k,"score":score(&samples[k],false).0})).collect::<Vec<_>>() }),
@@ -255,7 +323,7 @@ impl Search<'_> {
     }
 }
 
-/// Run build_decks or try_cards. Input keys mirror the Python keyword arguments.
+/// Search for owned decks, try new cards, or complete a deck with fixed cards.
 pub fn deckbuild(
     args: &Value,
     progress: &mut dyn FnMut(Value),
@@ -282,6 +350,15 @@ pub fn deckbuild(
         });
     let rollouts = args["confirm_rollouts"].as_u64().unwrap_or(200) as usize;
     let count = args["count"].as_u64().unwrap_or(3) as usize;
+    if !args["complete"].is_null()
+        && ["cards", "base", "baseline"]
+            .into_iter()
+            .any(|key| !args[key].is_null())
+    {
+        return Err(
+            "--complete cannot be combined with --try-cards, --base-deck or --selected".into(),
+        );
+    }
     if workers == 0 || rollouts == 0 || (args["cards"].is_null() && count == 0) {
         return Err(if args["cards"].is_null() {
             "count, workers and confirm_rollouts must be positive"
@@ -317,7 +394,36 @@ pub fn deckbuild(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let eligible: BTreeSet<String> = all.intersection(&eligible_all).cloned().collect();
+    let mut eligible: BTreeSet<String> = all.intersection(&eligible_all).cloned().collect();
+    let complete = if args["complete"].is_null() {
+        None
+    } else {
+        let input = &args["complete"];
+        let deck = ids(input);
+        if !(1..=11).contains(&deck.len())
+            || input.as_array().is_none_or(|a| a.len() != deck.len())
+            || !unique(&deck)
+        {
+            return Err("A deck to complete must have 1 to 11 different cards".into());
+        }
+        let mut unsupported: Vec<_> = deck
+            .iter()
+            .filter(|id| !eligible_all.contains(*id))
+            .map(String::as_str)
+            .collect();
+        if !unsupported.is_empty() {
+            unsupported.sort_unstable();
+            return Err(format!(
+                "Cards without simulator rules: {}",
+                unsupported.join(", ")
+            ));
+        }
+        eligible.retain(|id| !deck.contains(id));
+        if eligible.len() < 12 - deck.len() {
+            return Err("Not enough owned cards with simulator rules to complete the deck".into());
+        }
+        Some(deck)
+    };
     let mut search = Search {
         started,
         budget,
@@ -335,7 +441,7 @@ pub fn deckbuild(
     if !args["cards"].is_null() {
         return try_cards(args, &all, &eligible, &mut search, rollouts);
     }
-    if eligible.len() < 12 {
+    if complete.is_none() && eligible.len() < 12 {
         return Err("At least 12 distinct supported owned cards are required".into());
     }
     let saved = if args["saved"].is_object() {
@@ -343,7 +449,8 @@ pub fn deckbuild(
     } else {
         &args["saved"]
     };
-    let saved = saved.as_array().cloned().unwrap_or_default();
+    let saved = saved.as_array().map(Vec::as_slice).unwrap_or_default();
+    let frequencies = saved_frequencies(saved);
     let baseline = if args["baseline"].get("decks").is_some() {
         args["baseline"]["decks"]
             .as_array()
@@ -363,7 +470,7 @@ pub fn deckbuild(
         map: &mut BTreeMap<Deck, Candidate>,
         order: &mut Vec<Deck>,
         d: Deck,
-        source: String,
+        source: Cow<'static, str>,
         original: Option<Deck>,
     ) {
         let d = normalized(d);
@@ -372,67 +479,78 @@ pub fn deckbuild(
             map.insert(d, Candidate { source, original });
         }
     }
-    for e in &saved {
-        let original = entry(e);
-        let mut d = Vec::new();
-        for c in &original {
-            if eligible.contains(c) && !d.contains(c) && d.len() < 12 {
-                d.push(c.clone());
+    if let Some(deck) = &complete {
+        let mut d = deck.clone();
+        fill_from_saved(&mut d, &eligible, &frequencies);
+        add(&mut candidates, &mut order, d, "completion".into(), None);
+    } else {
+        for e in saved {
+            let original = entry(e);
+            let mut d = Vec::new();
+            for c in &original {
+                if eligible.contains(c) && !d.contains(c) && d.len() < 12 {
+                    d.push(c.clone());
+                }
             }
+            fill_from_saved(&mut d, &eligible, &frequencies);
+            add(
+                &mut candidates,
+                &mut order,
+                d,
+                name(e, "saved").into(),
+                Some(original),
+            );
         }
-        let mut rest: Vec<_> = eligible
-            .iter()
-            .filter(|c| !d.contains(c))
-            .cloned()
-            .collect();
-        rest.sort_by_key(|c| {
-            (
-                std::cmp::Reverse(saved.iter().filter(|e| entry(e).contains(c)).count()),
-                c.clone(),
-            )
-        });
-        d.extend(rest.into_iter().take(12 - d.len()));
-        add(
-            &mut candidates,
-            &mut order,
-            d,
-            name(e, "saved"),
-            Some(original),
-        );
+        if !base.is_empty() && subset(&base, &eligible) {
+            add(
+                &mut candidates,
+                &mut order,
+                base.clone(),
+                name(&baseline, "baseline").into(),
+                Some(base.clone()),
+            );
+        }
     }
-    if !base.is_empty() && subset(&base, &eligible) {
-        add(
-            &mut candidates,
-            &mut order,
-            base.clone(),
-            name(&baseline, "baseline"),
-            Some(base.clone()),
-        );
-    }
-    let list: Vec<_> = eligible.iter().cloned().collect();
+    let locked = complete.as_deref().unwrap_or_default();
+    let search_mode = if complete.is_some() {
+        SearchMode::Complete
+    } else {
+        SearchMode::Build
+    };
+    let list: Vec<_> = eligible.iter().collect();
     let mut rng = PythonRandom::seed(seed);
     for i in 0..4 {
-        let d = rng
-            .sample_indices(list.len(), 12)
-            .into_iter()
-            .map(|i| list[i].clone())
-            .collect();
+        let mut d = Vec::with_capacity(12);
+        d.extend_from_slice(locked);
+        d.extend(
+            rng.sample_indices(list.len(), 12 - locked.len())
+                .into_iter()
+                .map(|i| list[i].clone()),
+        );
         add(
             &mut candidates,
             &mut order,
             d,
-            format!("random {}", i + 1),
+            if complete.is_some() {
+                "completion".into()
+            } else {
+                format!("random {}", i + 1).into()
+            },
             None,
         );
     }
     let starts = order.clone();
     let mut neighbours = BTreeMap::new();
     for d in &starts {
-        let variants = swaps(d, &eligible);
+        let variants = swaps(d, &eligible, locked);
         for v in &variants {
             let c = &candidates[d];
             let source = c.source.clone();
-            let original = c.original.clone().or_else(|| Some(d.clone()));
+            let original = if complete.is_some() {
+                None
+            } else {
+                c.original.clone().or_else(|| Some(d.clone()))
+            };
             add(&mut candidates, &mut order, v.clone(), source, original);
         }
         neighbours.insert(d.clone(), variants);
@@ -445,7 +563,11 @@ pub fn deckbuild(
     let mut finalists;
     if !search.expired(1.) {
         for i in 0..2 {
-            if !search.play(&screen_keys, &mut screen, Round::screen(i, true, count))? {
+            if !search.play(
+                &screen_keys,
+                &mut screen,
+                Round::screen(i, search_mode, count),
+            )? {
                 break;
             }
         }
@@ -474,7 +596,7 @@ pub fn deckbuild(
                 .filter(|k| screen.get(*k).map_or(0, Vec::len) == i)
                 .cloned()
                 .collect();
-            if !search.play(&ready, &mut screen, Round::screen(i, true, count))? {
+            if !search.play(&ready, &mut screen, Round::screen(i, search_mode, count))? {
                 break;
             }
         }
@@ -510,7 +632,7 @@ pub fn deckbuild(
                 .filter(|k| screen.get(*k).map_or(0, Vec::len) == i)
                 .cloned()
                 .collect();
-            if !search.play(&ready, &mut screen, Round::screen(i, true, count))? {
+            if !search.play(&ready, &mut screen, Round::screen(i, search_mode, count))? {
                 break;
             }
         }
@@ -544,16 +666,22 @@ pub fn deckbuild(
             if !search.play(
                 &keys,
                 &mut confirm,
-                Round::confirm(i, rollouts, true, count),
+                Round::confirm(i, rollouts, search_mode, count),
             )? {
                 break;
             }
         }
     } else {
-        finalists = diverse(screen_keys.clone(), count);
+        finalists = if complete.is_some() {
+            Vec::new()
+        } else {
+            diverse(screen_keys.clone(), count)
+        };
     }
     let stopped = search.expired(1.);
-    finalists.retain(|k| subset(k, &eligible));
+    if complete.is_none() {
+        finalists.retain(|k| subset(k, &eligible));
+    }
     let mut combined = HashMap::new();
     for k in candidates.keys() {
         combined.insert(
@@ -562,25 +690,27 @@ pub fn deckbuild(
                 .get(k)
                 .filter(|v| !v.is_empty())
                 .or_else(|| screen.get(k))
-                .cloned()
+                .map(Vec::as_slice)
                 .unwrap_or_default(),
         );
     }
-    finalists = ranked(finalists, &combined);
-    let fallback: Vec<_> = screen_keys
-        .iter()
-        .filter(|k| !finalists.contains(k))
-        .cloned()
-        .collect();
-    finalists.extend(fallback);
-    finalists = diverse(finalists, count);
-    let bs = confirm.get(&base_key).map(Vec::as_slice).unwrap_or(&[]);
-    let (bscore, bci) = score(bs, false);
-    let baseline_result = if base.is_empty() {
-        Value::Null
+    finalists = if complete.is_some() {
+        if screen.is_empty() && confirm.is_empty() {
+            // As in build mode, keep valid candidates if interrupted before the first score.
+            screen_keys.into_iter().take(count).collect()
+        } else {
+            completion_order(&confirm, &screen, count)
+        }
     } else {
-        json!({"name":name(&baseline,"baseline"),"card_ids":base,"score":bscore,"ci95":bci})
+        let mut ordered = ranked(finalists, &combined);
+        let fallback: Vec<_> = screen_keys
+            .into_iter()
+            .filter(|k| !ordered.contains(k))
+            .collect();
+        ordered.extend(fallback);
+        diverse(ordered, count)
     };
+    let bs = confirm.get(&base_key).map(Vec::as_slice).unwrap_or(&[]);
     let mut decks = Vec::new();
     for k in finalists {
         let c = &candidates[&k];
@@ -591,20 +721,35 @@ pub fn deckbuild(
             cs
         };
         let (s, ci) = score(scores, false);
-        let n = cs.len().min(bs.len());
-        let delta = if n == 0 {
+        let original = complete.as_ref().or(c.original.as_ref());
+        let changes = original.map(|o| changed(&k, o));
+        let mut deck = json!({"card_ids":k,"deck_code":deckcodes::encode_deck(&k)?,"score":s,"ci95":ci,"games":2*scores.len(),"stage":if cs.is_empty(){"screened"}else{"confirmed"},"started_from":c.source,"changes":changes});
+        if complete.is_none() {
+            let n = cs.len().min(bs.len());
+            deck["versus_baseline"] = if n == 0 {
+                Value::Null
+            } else {
+                let d: Vec<_> = cs.iter().zip(bs).take(n).map(|(a, b)| a - b).collect();
+                let (v, ci) = score(&d, true);
+                json!({"difference":v,"ci95":ci})
+            };
+        }
+        decks.push(deck);
+    }
+    let mut result = json!({"status":if stopped {"cancelled"}else{"ok"},"config":{"mode":mode,"count":count,"time_budget":budget,"workers":workers,"seed":seed,"screen_rollouts":32,"confirm_rollouts":rollouts,"engine":"rust"},"decks":decks,"evaluated_decks":combined.values().filter(|v|!v.is_empty()).count(),"games_played":search.games,"elapsed_seconds":started.elapsed().as_secs_f64()});
+    if let Some(deck) = complete {
+        result["mode"] = json!("complete");
+        result["deck"] = json!({"card_ids":deck});
+    } else {
+        result["owned"] = json!({"supported":eligible,"unsupported":all.difference(&eligible).collect::<Vec<_>>()});
+        result["baseline"] = if base.is_empty() {
             Value::Null
         } else {
-            let d: Vec<_> = cs.iter().zip(bs).take(n).map(|(a, b)| a - b).collect();
-            let (v, ci) = score(&d, true);
-            json!({"difference":v,"ci95":ci})
+            let (bscore, bci) = score(bs, false);
+            json!({"name":name(&baseline,"baseline"),"card_ids":base,"score":bscore,"ci95":bci})
         };
-        let changes = c.original.as_ref().map(|o| changed(&k, o));
-        decks.push(json!({"card_ids":k,"deck_code":deckcodes::encode_deck(&k)?,"score":s,"ci95":ci,"games":2*scores.len(),"versus_baseline":delta,"stage":if cs.is_empty(){"screened"}else{"confirmed"},"started_from":c.source,"changes":changes}));
     }
-    Ok(
-        json!({"status":if stopped {"cancelled"}else{"ok"},"config":{"mode":mode,"count":count,"time_budget":budget,"workers":workers,"seed":seed,"screen_rollouts":32,"confirm_rollouts":rollouts,"engine":"rust"},"owned":{"supported":eligible,"unsupported":all.difference(&eligible).collect::<Vec<_>>()},"baseline":baseline_result,"decks":decks,"evaluated_decks":combined.values().filter(|v|!v.is_empty()).count(),"games_played":search.games,"elapsed_seconds":started.elapsed().as_secs_f64()}),
-    )
+    Ok(result)
 }
 
 fn try_cards(
@@ -686,7 +831,11 @@ fn try_cards(
             append_unique(&mut all, placements[c].clone());
         }
         for i in 0..16 {
-            if !search.play(&all, &mut samples, Round::screen(i, false, 3))? {
+            if !search.play(
+                &all,
+                &mut samples,
+                Round::screen(i, SearchMode::TryCards, 3),
+            )? {
                 break;
             }
         }
@@ -727,7 +876,11 @@ fn try_cards(
                 .filter(|k| samples[*k].len() == i)
                 .cloned()
                 .collect();
-            if !search.play(&missing, &mut samples, Round::screen(i, false, 3))? {
+            if !search.play(
+                &missing,
+                &mut samples,
+                Round::screen(i, SearchMode::TryCards, 3),
+            )? {
                 break;
             }
         }
@@ -755,7 +908,11 @@ fn try_cards(
                 .filter(|k| samples[*k].len() == i)
                 .cloned()
                 .collect();
-            if !search.play(&missing, &mut samples, Round::screen(i, false, 3))? {
+            if !search.play(
+                &missing,
+                &mut samples,
+                Round::screen(i, SearchMode::TryCards, 3),
+            )? {
                 break;
             }
         }
@@ -781,7 +938,11 @@ fn try_cards(
             append_unique(&mut keys, [chosen[c].clone()]);
         }
         for i in 0..300 {
-            if !search.play(&keys, &mut confirm, Round::confirm(i, rollouts, false, 3))? {
+            if !search.play(
+                &keys,
+                &mut confirm,
+                Round::confirm(i, rollouts, SearchMode::TryCards, 3),
+            )? {
                 break;
             }
         }
@@ -813,4 +974,163 @@ fn try_cards(
     Ok(
         json!({"status":if stopped{"cancelled"}else{"ok"},"mode":"try-cards","config":{"mode":"recruit","time_budget":search.budget,"workers":search.workers,"seed":search.seed,"screen_rollouts":32,"confirm_rollouts":rollouts,"engine":"rust"},"base":{"card_ids":base_ids,"deck_code":deckcodes::encode_deck(&base_ids)?,"score":base_score,"ci95":base_ci},"cards":results,"games_played":search.games,"elapsed_seconds":search.started.elapsed().as_secs_f64()}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const FIXED: [&str; 11] = [
+        "Ultron",
+        "BlueMarvel",
+        "IronMan",
+        "JessicaJones",
+        "KaZar",
+        "Bishop",
+        "Wolfsbane",
+        "AntMan",
+        "Hawkeye",
+        "SquirrelGirl",
+        "Nightcrawler",
+    ];
+    const POOL: [&str; 6] = [
+        "Abomination",
+        "Angela",
+        "CaptainAmerica",
+        "Hulk",
+        "MistyKnight",
+        "Shocker",
+    ];
+
+    #[test]
+    fn completions_keep_fixed_cards_and_cover_every_card_for_one_slot() {
+        for (fixed, pool) in [(&FIXED[..], &POOL[..]), (&FIXED[..10], &POOL[..3])] {
+            // Most of the fixed cards are not owned, and must still be kept.
+            let owned: Vec<_> = pool
+                .iter()
+                .copied()
+                .chain([fixed[0], "Unsupported"])
+                .collect();
+            let args = json!({
+                "complete":fixed, "owned":owned, "count":pool.len(),
+                "workers":1, "confirm_rollouts":1, "seed":42,
+            });
+            let done = Cell::new(false);
+            let result = deckbuild(
+                &args,
+                &mut |event| {
+                    if event["stage"] == "screen" && event["done"] == event["total"] {
+                        assert_eq!(event["total"], pool.len());
+                        assert_eq!(event["best"].as_array().unwrap().len(), pool.len());
+                        done.set(true);
+                    }
+                },
+                &|| done.get(),
+            )
+            .unwrap();
+            assert_eq!(result["mode"], "complete");
+            assert_eq!(result["status"], "cancelled");
+            assert_eq!(result["deck"]["card_ids"], json!(fixed));
+            assert_eq!(result["evaluated_decks"], pool.len());
+            assert_eq!(result["games_played"], pool.len() * 2);
+            assert!(result.get("baseline").is_none());
+
+            let mut seen = BTreeSet::new();
+            let decks = result["decks"].as_array().unwrap();
+            assert_eq!(decks.len(), pool.len());
+            let mut previous_score = 1.;
+            for deck in decks {
+                let ids = ids(&deck["card_ids"]);
+                assert_eq!(ids.len(), 12);
+                assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+                for card in fixed {
+                    assert!(ids.iter().any(|id| id == card));
+                }
+                let added: Vec<_> = ids
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| !fixed.contains(id))
+                    .collect();
+                assert!(added.iter().all(|id| pool.contains(id)));
+                assert_eq!(deck["changes"], json!({"in":added, "out":[]}));
+                assert_eq!(deck["started_from"], "completion");
+                assert_eq!(deck["stage"], "screened");
+                assert_eq!(deck["games"], 2);
+                assert_eq!(deck["deck_code"], deckcodes::encode_deck(&ids).unwrap());
+                assert!(deck.get("versus_baseline").is_none());
+                let score = deck["score"].as_f64().unwrap();
+                assert!(score <= previous_score);
+                previous_score = score;
+                seen.extend(added.into_iter().map(str::to_owned));
+            }
+            assert_eq!(seen, pool.iter().map(ToString::to_string).collect());
+        }
+    }
+
+    #[test]
+    fn completion_fill_counts_saved_decks_not_duplicate_cards() {
+        let mut deck = FIXED[..10].iter().map(ToString::to_string).collect();
+        let pool = POOL.iter().map(ToString::to_string).collect();
+        let saved = [
+            json!({"card_ids":["Angela", "Hulk", "Hulk"]}),
+            json!(["Angela", "Abomination"]),
+        ];
+        fill_from_saved(&mut deck, &pool, &saved_frequencies(&saved));
+        assert_eq!(&deck[10..], ["Angela", "Abomination"]);
+    }
+
+    #[test]
+    fn completion_rejects_invalid_cards_or_pool() {
+        let too_many: Vec<_> = FIXED.into_iter().chain(["Angela"]).collect();
+        let invalid_deck = "A deck to complete must have 1 to 11 different cards";
+        for (deck, expected) in [
+            (json!([]), invalid_deck),
+            (json!(too_many), invalid_deck),
+            (json!(["Ultron", "Ultron"]), invalid_deck),
+            (json!(["Ultron", 7]), invalid_deck),
+            (
+                json!(["UnsupportedZ", "UnsupportedA"]),
+                "Cards without simulator rules: UnsupportedA, UnsupportedZ",
+            ),
+            (
+                json!(FIXED),
+                "Not enough owned cards with simulator rules to complete the deck",
+            ),
+        ] {
+            let args = json!({"complete":deck, "owned":[FIXED[0], "Unsupported"], "workers":1});
+            assert_eq!(
+                deckbuild(&args, &mut |_| {}, &|| false).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn completion_rejects_incompatible_inputs() {
+        for key in ["cards", "base", "baseline"] {
+            let mut args = json!({"complete":FIXED, "workers":1});
+            args[key] = json!([]);
+            assert_eq!(
+                deckbuild(&args, &mut |_| {}, &|| false).unwrap_err(),
+                "--complete cannot be combined with --try-cards, --base-deck or --selected"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_completions_rank_ahead_of_lucky_screens() {
+        let deck = |card: &str| vec![card.to_owned()];
+        let confirm = HashMap::from([(deck("Confirmed"), vec![0.6, 0.6])]);
+        let screen = HashMap::from([
+            (deck("Confirmed"), vec![0.5; 16]),
+            (deck("Lucky"), vec![1.0, 1.0]),
+            (deck("Steady"), vec![0.7; 16]),
+        ]);
+        assert_eq!(
+            completion_order(&confirm, &screen, 3),
+            [deck("Confirmed"), deck("Lucky"), deck("Steady")]
+        );
+        assert_eq!(completion_order(&confirm, &screen, 1), [deck("Confirmed")]);
+    }
 }

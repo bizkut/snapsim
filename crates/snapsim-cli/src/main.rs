@@ -44,6 +44,9 @@ struct Deckbuild {
     base_deck: Option<String>,
     #[arg(long)]
     try_cards: Option<String>,
+    /// Comma-separated card IDs to keep when completing an incomplete deck.
+    #[arg(long, conflicts_with_all = ["try_cards", "base_deck", "selected"])]
+    complete: Option<String>,
     #[arg(long, default_value_t = 3)]
     count: usize,
     #[arg(long)]
@@ -182,7 +185,14 @@ fn run(cli: Cli) -> Result<(), String> {
                 Some(s) => read(&s)?,
                 None => Value::Null,
             };
-            let args = json!({"owned":read(&a.collection)?,"saved":match a.decks {Some(s)=>read(&s)?,None=>Value::Null},"baseline":match a.selected {Some(s)=>read(&s)?,None=>Value::Null},"base":base,"cards":a.try_cards,"count":a.count,"time_budget":a.time_budget,"workers":a.workers.unwrap_or_else(cli_workers),"seed":a.seed,"confirm_rollouts":a.confirm_rollouts,"plays_only":a.plays_only});
+            let complete = a.complete.as_deref().map(|ids| {
+                if ids.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    ids.split(',').map(str::trim).collect::<Vec<_>>()
+                }
+            });
+            let args = json!({"owned":read(&a.collection)?,"saved":match a.decks {Some(s)=>read(&s)?,None=>Value::Null},"baseline":match a.selected {Some(s)=>read(&s)?,None=>Value::Null},"base":base,"cards":a.try_cards,"complete":complete,"count":a.count,"time_budget":a.time_budget,"workers":a.workers.unwrap_or_else(cli_workers),"seed":a.seed,"confirm_rollouts":a.confirm_rollouts,"plays_only":a.plays_only});
             let mut progress = |v: Value| {
                 if a.progress {
                     println!("{v}");
