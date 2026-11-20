@@ -382,22 +382,37 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
             if card["owner_entity_id"] == local["entity_id"] {
                 let mut reference = card_ref(card, true, seats);
                 if options["plays_only"] != true
-                    && let Some(legal) = array(&game["legal_actions"])
+                    && let Some(table) = game["legal_actions"]
+                        .as_array()
+                        .filter(|table| !table.is_empty())
+                {
+                    if let Some(legal) = table
                         .iter()
                         .find(|entry| entry["entity_id"] == card["entity_id"])
-                {
-                    if let Some(activate) = legal["can_activate"].as_bool() {
-                        reference["can_activate"] = json!(activate);
-                    }
-                    if let Some(targets) = legal["target_entity_ids"].as_array() {
-                        let lanes: Vec<_> = array(&game["locations"])
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, loc)| {
-                                targets.contains(&loc["entity_id"]).then_some(index)
-                            })
-                            .collect();
-                        reference["move_targets"] = json!(lanes);
+                    {
+                        if let Some(activate) = legal["can_activate"].as_bool() {
+                            reference["can_activate"] = json!(activate);
+                        }
+                        if legal["valid"] == false {
+                            // An option the game marks invalid offers no move.
+                            reference["move_targets"] = json!([]);
+                        } else if let Some(targets) = legal["target_entity_ids"].as_array() {
+                            let lanes: Vec<_> = array(&game["locations"])
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, loc)| {
+                                    targets.contains(&loc["entity_id"]).then_some(index)
+                                })
+                                .collect();
+                            reference["move_targets"] = json!(lanes);
+                        }
+                    } else if card["revealed"] == true {
+                        // The game's option table lists every card that can act this turn, so a
+                        // revealed card missing from it can neither move nor activate now. The
+                        // reader's moves_per_turn stays empty after a move, so without this a
+                        // Nightcrawler that already moved looked free to move again.
+                        reference["move_targets"] = json!([]);
+                        reference["can_activate"] = json!(false);
                     }
                 }
                 mine.push(reference);

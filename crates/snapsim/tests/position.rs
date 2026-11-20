@@ -270,3 +270,45 @@ fn known_out_of_play_cards_are_not_sampled_into_the_local_deck() {
             .all(|&id| !matches!(game.cards[id].def.id, "Hulk" | "Medusa"))
     );
 }
+
+#[test]
+fn snap_cards_missing_from_the_option_table_cannot_move() {
+    // Turn 6 of a live match: one Nightcrawler already used its one move (the reader's
+    // moves_per_turn stays empty), so the game lists it no longer or only as an invalid option.
+    let nightcrawler = |entity: i32| {
+        json!({"card_id":"Nightcrawler","entity_id":entity,"owner_entity_id":10,"cost":1,"power":2,
+            "revealed":true,"zone_position":0,"turn_revealed":3,"moves_per_turn":{}})
+    };
+    let observation = json!({"schema_version":1,"source":{},"game":{"turn":6,"total_turns":6,
+        "players":[{"slot":"local","entity_id":10,"energy":3,"ended_turn":5,"zones":{"hand":{"count":0,"cards":[]},"deck":{"count":0}}},
+                   {"slot":"opponent","entity_id":20,"zones":{"hand":{"count":0},"deck":{"count":0}}}],
+        "locations":[{"entity_id":15,"location_id":"Ruins","cards":[nightcrawler(27)]},
+                     {"entity_id":16,"location_id":"Ruins","cards":[nightcrawler(26)]},
+                     {"entity_id":17,"location_id":"Ruins","cards":[nightcrawler(50)]}],
+        "legal_actions":[
+            {"entity_id":26,"target_entity_ids":[17],"can_activate":false,"valid":false,"no_stage_reason":"NotPlayable"},
+            {"entity_id":50,"target_entity_ids":[15],"can_activate":false,"valid":true,"no_stage_reason":"None"}]}});
+    let value = snapsim::snap::position_from_snap(&observation, &json!({})).unwrap();
+    for (lane, targets) in [(0, json!([])), (1, json!([])), (2, json!([0]))] {
+        assert_eq!(
+            value["locations"][lane]["mine"][0]["move_targets"], targets,
+            "lane {lane}"
+        );
+    }
+    assert_eq!(value["locations"][0]["mine"][0]["can_activate"], false);
+    let p = Position::from_json(&value.to_string()).unwrap();
+    let mut rng = PythonRandom::seed(1);
+    let game = build_game(&p, &mut rng).unwrap();
+    let (missing, invalid, free) = (
+        game.lanes[0].cards[0],
+        game.lanes[1].cards[0],
+        game.lanes[2].cards[0],
+    );
+    for destination in 0..3 {
+        assert!(
+            !game.can_player_move(missing, destination, 0)
+                && !game.can_player_move(invalid, destination, 0)
+        );
+    }
+    assert!(game.can_player_move(free, 0, 0) && !game.can_player_move(free, 1, 0));
+}
