@@ -138,11 +138,13 @@ fn mirror_dimension(game: &mut Game<'_>, lane: usize) {
     if game.turn == 4 {
         let choices: Vec<_> = (0..3)
             .filter(|&i| i != lane && game.lanes[i].revealed)
-            .map(|i| game.lanes[i].def.id)
             .collect();
         if !choices.is_empty() {
             let index = game.rng.borrow_mut().randbelow(choices.len());
-            game.replace_location(lane, choices[index]);
+            // Copy the definition itself: a location without rules is an unregistered stand-in.
+            let source = &game.lanes[choices[index]];
+            let (def, observed_id) = (source.def, source.observed_id.clone());
+            game.replace_location_def(lane, def, observed_id);
         }
     }
 }
@@ -284,5 +286,45 @@ fn white_palace(game: &mut Game<'_>, _: usize) {
             let copy = game.copy_card(source, seat);
             game.add_hand(seat, copy, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::game::Game;
+    use crate::position::UNKNOWN_LOCATION;
+    use crate::random::PythonRandom;
+
+    #[test]
+    fn mirror_dimension_copies_a_location_without_rules() {
+        let deck: Vec<String> = ["Hulk", "Medusa", "Sentinel", "IronMan", "Hawkeye", "Wasp"]
+            .into_iter()
+            .chain([
+                "Cyclops",
+                "Shocker",
+                "TheThing",
+                "MistyKnight",
+                "Abomination",
+                "Quicksilver",
+            ])
+            .map(str::to_owned)
+            .collect();
+        let locations: Vec<String> = ["MirrorDimension", "Ruins", "Xandar"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut rng = PythonRandom::seed(1);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        game.lanes[0].def = crate::locations::get("MirrorDimension").unwrap();
+        game.lanes[0].revealed = true;
+        game.lanes[1].def = &UNKNOWN_LOCATION;
+        game.lanes[1].observed_id = Some("Utopia".into());
+        game.lanes[1].revealed = true;
+        game.lanes[2].revealed = false;
+        game.turn = 4;
+        super::mirror_dimension(&mut game, 0);
+        assert!(std::ptr::eq(game.lanes[0].def, &UNKNOWN_LOCATION));
+        assert_eq!(game.lanes[0].observed_id.as_deref(), Some("Utopia"));
+        assert!(game.lanes[0].revealed);
     }
 }

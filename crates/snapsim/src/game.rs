@@ -1376,8 +1376,19 @@ impl<'a> Game<'a> {
     /// Replace and immediately reveal a location without moving its cards.
     pub fn replace_location(&mut self, lane: usize, id: &str) {
         let def = locations::get(id).expect("unregistered replacement location");
+        self.replace_location_def(lane, def, None);
+    }
+
+    /// Replace with a given definition, which may be the approximate stand-in for a location
+    /// without rules (then `observed_id` names the real one).
+    pub fn replace_location_def(
+        &mut self,
+        lane: usize,
+        def: &'static LocationDef,
+        observed_id: Option<String>,
+    ) {
         self.lanes[lane].def = def;
-        self.lanes[lane].observed_id = None;
+        self.lanes[lane].observed_id = observed_id;
         self.lanes[lane].state = def.initial_state.map(|init| init());
         self.lanes[lane].revealed = true;
         self.lanes[lane].revealed_turn = Some(self.turn);
