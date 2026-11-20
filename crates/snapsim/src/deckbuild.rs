@@ -121,6 +121,20 @@ fn score(v: &[f64], difference: bool) -> (f64, Vec<f64>) {
         ],
     )
 }
+/// Wilson 95% interval over the games behind `samples` (each averages one seat-swapped pair).
+/// Unlike the normal approximation it keeps a width when every game was won or lost.
+fn wilson_95(samples: &[f64]) -> Vec<f64> {
+    if samples.is_empty() {
+        return vec![0., 1.];
+    }
+    let games = 2. * samples.len() as f64;
+    let p = compare::python_float_sum(samples.iter().copied()) / samples.len() as f64;
+    let z2 = 1.959963984540054_f64.powi(2);
+    let centre = (p + z2 / (2. * games)) / (1. + z2 / games);
+    let radius =
+        (z2 * (p * (1. - p) / games + z2 / (4. * games * games))).sqrt() / (1. + z2 / games);
+    vec![(centre - radius).max(0.), (centre + radius).min(1.)]
+}
 fn ranked(mut keys: Vec<Deck>, samples: &HashMap<Deck, impl AsRef<[f64]>>) -> Vec<Deck> {
     let mean = |key: &Deck| {
         let values = samples.get(key).map(AsRef::as_ref).unwrap_or(&[]);
@@ -721,6 +735,12 @@ pub fn deckbuild(
             cs
         };
         let (s, ci) = score(scores, false);
+        // Completions are often short runs where every game is won; keep an honest width.
+        let ci = if complete.is_some() {
+            wilson_95(scores)
+        } else {
+            ci
+        };
         let original = complete.as_ref().or(c.original.as_ref());
         let changes = original.map(|o| changed(&k, o));
         let mut deck = json!({"card_ids":k,"deck_code":deckcodes::encode_deck(&k)?,"score":s,"ci95":ci,"games":2*scores.len(),"stage":if cs.is_empty(){"screened"}else{"confirmed"},"started_from":c.source,"changes":changes});
@@ -1132,5 +1152,16 @@ mod tests {
             [deck("Confirmed"), deck("Lucky"), deck("Steady")]
         );
         assert_eq!(completion_order(&confirm, &screen, 1), [deck("Confirmed")]);
+    }
+
+    #[test]
+    fn completion_interval_keeps_a_width_for_perfect_short_runs() {
+        // Nine seat-swapped pairs, all won: the normal approximation collapses to 100–100%.
+        assert_eq!(score(&[1.0; 9], false).1, [1.0, 1.0]);
+        let ci = wilson_95(&[1.0; 9]);
+        assert!((0.80..0.85).contains(&ci[0]), "{ci:?}");
+        assert_eq!(ci[1], 1.0);
+        let mixed = wilson_95(&[1.0, 0.5, 1.0, 0.0, 1.0, 1.0]);
+        assert!(mixed[0] < 0.75 && 0.75 < mixed[1], "{mixed:?}");
     }
 }
