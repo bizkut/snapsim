@@ -58,6 +58,13 @@ fn recruit_card_pool() -> String {
 fn recruit_card_weights() -> String {
     serde_json::json!(snapsim::position::recruit_weights()).to_string()
 }
+/// The deck code the game imports for 12 distinct card IDs (a JSON array), in their order.
+#[pyfunction]
+fn encode_deck(card_ids_json: &str) -> PyResult<String> {
+    let ids: Vec<String> = serde_json::from_str(card_ids_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    snapsim::deckcodes::encode_deck(&ids).map_err(PyValueError::new_err)
+}
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(advise, module)?)?;
@@ -66,5 +73,6 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(deck_eligible_ids, module)?)?;
     module.add_function(wrap_pyfunction!(recruit_card_pool, module)?)?;
     module.add_function(wrap_pyfunction!(recruit_card_weights, module)?)?;
+    module.add_function(wrap_pyfunction!(encode_deck, module)?)?;
     Ok(())
 }
