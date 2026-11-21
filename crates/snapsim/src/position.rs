@@ -100,6 +100,8 @@ pub struct Opponent {
     pub energy: Option<i32>,
     #[serde(default)]
     pub seen: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<String>,
     #[serde(default)]
     pub deck_list: Option<Vec<String>>,
     #[serde(default)]
@@ -423,7 +425,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     let recruit = opp.deck_list.is_none()
         && opp.pool.is_none()
         && position.mode.as_deref() == Some("recruit")
-        && !outside(opp.seen.iter());
+        && !outside(opp.seen.iter().chain(&opp.known));
     let mut pool = if let Some(list) = &opp.deck_list {
         list.clone()
     } else if let Some(list) = &opp.pool {
@@ -434,9 +436,26 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         all_cards()
     };
     pool.sort();
+    let mut known_set = HashSet::new();
+    for id in &opp.known {
+        if cards::get(id).is_none() || cards::is_token(id) {
+            return Err("opponent.known contains a non-deck-eligible card ID".into());
+        }
+        known_set.insert(id);
+    }
+    if known_set.len() > 12 {
+        return Err("opponent.known contains more than 12 unique card IDs".into());
+    }
+    let mut forced_set = HashSet::new();
+    let mut forced: Vec<String> = opp
+        .known
+        .iter()
+        .filter(|id| !opp.seen.contains(id) && forced_set.insert(*id))
+        .cloned()
+        .collect();
     let mut candidates: Vec<_> = pool
         .iter()
-        .filter(|id| !opp.seen.contains(id))
+        .filter(|id| !opp.seen.contains(id) && !known_set.contains(id))
         .cloned()
         .collect();
     let count = opp.hand
@@ -446,7 +465,11 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             .iter()
             .map(|l| l.theirs_face_down)
             .sum::<usize>();
-    let hidden = if count == 0 {
+    if forced.len() > count {
+        return Err("opponent.known exceeds the hidden card count".into());
+    }
+    let count = count - forced.len();
+    let mut hidden = if count == 0 {
         Vec::new()
     } else if candidates.len() >= count {
         if recruit && opp.prior.as_deref() != Some("uniform") {
@@ -465,18 +488,28 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             sample(rng, &candidates, count)?
         }
     } else {
-        if pool.is_empty() {
+        let fallback = if opp.known.is_empty() {
+            &pool
+        } else {
+            &candidates
+        };
+        if fallback.is_empty() {
             return Err(format!(
                 "opponent needs {count} hidden cards, but the pool is empty"
             ));
         }
+        let fallback = fallback.clone();
         while candidates.len() < count {
-            let index = (rng.random() * pool.len() as f64) as usize;
-            candidates.push(pool[index].clone());
+            let index = (rng.random() * fallback.len() as f64) as usize;
+            candidates.push(fallback[index].clone());
         }
         rng.shuffle(&mut candidates);
         candidates
     };
+    if !forced.is_empty() {
+        hidden.append(&mut forced);
+        rng.shuffle(&mut hidden);
+    }
     let known_locations: Vec<_> = position
         .locations
         .iter()

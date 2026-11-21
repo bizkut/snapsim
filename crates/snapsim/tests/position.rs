@@ -11,6 +11,64 @@ fn position(locations: serde_json::Value) -> Position {
 }
 
 #[test]
+fn opponent_known_is_forced_hidden_without_resampling_seen() {
+    let mut p = position(json!([
+        {"id":"Xandar", "mine":[], "theirs":[]},
+        {"id":"OttosLab", "mine":[], "theirs":[]},
+        {"id":"KamarTaj", "mine":[], "theirs":[]}
+    ]));
+    p.opponent.hand = 1;
+    p.opponent.deck = 1;
+    p.opponent.seen = vec!["Hulk".into()];
+    p.opponent.known = vec!["Hulk".into(), "AntMan".into(), "AntMan".into()];
+    p.opponent.pool = Some(vec!["Hulk".into(), "AntMan".into(), "Cyclops".into()]);
+    let mut rng = PythonRandom::seed(33);
+    let game = build_game(&p, &mut rng).unwrap();
+    let ids: Vec<_> = game.players[1]
+        .hand
+        .iter()
+        .chain(&game.players[1].deck)
+        .map(|&i| game.cards[i].def.id)
+        .collect();
+    assert!(ids.contains(&"AntMan"));
+    assert!(ids.contains(&"Cyclops"));
+    assert!(!ids.contains(&"Hulk"));
+}
+
+#[test]
+fn opponent_known_rejects_impossible_hidden_state() {
+    let mut p = position(json!([
+        {"id":"Xandar", "mine":[], "theirs":[]},
+        {"id":"OttosLab", "mine":[], "theirs":[]},
+        {"id":"KamarTaj", "mine":[], "theirs":[]}
+    ]));
+    p.opponent.known = vec!["Hulk".into()];
+    let mut rng = PythonRandom::seed(34);
+    assert!(build_game(&p, &mut rng).is_err());
+    p.opponent.hand = 1;
+    p.opponent.known = vec!["Rock".into()];
+    assert!(build_game(&p, &mut rng).is_err());
+}
+
+#[test]
+fn opponent_known_changes_recruit_sampling_prior() {
+    let mut p = position(json!([
+        {"id":"Xandar", "mine":[], "theirs":[]},
+        {"id":"OttosLab", "mine":[], "theirs":[]},
+        {"id":"KamarTaj", "mine":[], "theirs":[]}
+    ]));
+    p.mode = Some("recruit".into());
+    let recruit = snapsim::position::recruit_cards();
+    let id = snapsim::cards::deck_eligible_ids()
+        .iter()
+        .find(|id| !recruit.iter().any(|card| card == **id))
+        .unwrap();
+    p.opponent.known.push((*id).to_string());
+    let prior = snapsim::coverage::sampling_priors(&p);
+    assert_eq!(prior["opponent_cards"]["source"], "all-supported");
+}
+
+#[test]
 fn pending_watches_obey_historic_reveal_conditions() {
     let p = position(json!([
         {"id":"KamarTaj", "mine":[{"id":"Hawkeye", "played_turn":2}], "theirs":[], "revealed_turn":1},

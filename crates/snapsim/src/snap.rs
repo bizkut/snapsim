@@ -302,6 +302,28 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     if observation["schema_version"].as_i64() != Some(1) {
         return Err(invalid("Unsupported SNAP schema_version (expected 1)"));
     }
+    let mut prior_ids = HashSet::new();
+    if let Some(prior) = options.get("opponent_seen_prior") {
+        let prior = prior
+            .as_array()
+            .ok_or_else(|| invalid("opponent_seen_prior must be an array"))?;
+        for value in prior {
+            let id = value.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
+                invalid("opponent_seen_prior entries must be nonempty card ID strings")
+            })?;
+            if crate::cards::get(id).is_none() || crate::cards::is_token(id) {
+                return Err(invalid(
+                    "opponent_seen_prior contains a non-deck-eligible card ID",
+                ));
+            }
+            prior_ids.insert(id);
+            if prior_ids.len() > 12 {
+                return Err(invalid(
+                    "opponent_seen_prior contains more than 12 unique card IDs",
+                ));
+            }
+        }
+    }
     let game = &observation["game"];
     let players = array(&game["players"]);
     if players.is_empty() {
@@ -462,6 +484,11 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     for card in cards(opponent_zones) {
         seen.push(card["card_id"].clone());
     }
+    let mut known = Vec::new();
+    if let Some(prior) = options.get("opponent_seen_prior").and_then(Value::as_array) {
+        let mut unique = HashSet::new();
+        known.extend(prior.iter().filter(|id| unique.insert(key(id))).cloned());
+    }
     let mut unique = HashSet::new();
     seen.retain(|v| unique.insert(key(v)));
     let mode = if options["mode"].is_null() && source["league"] == "RankedRecruit" {
@@ -470,6 +497,9 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         options["mode"].clone()
     };
     let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    if !known.is_empty() {
+        position["opponent"]["known"] = json!(known);
+    }
     for (owner, source) in [(0, zones), (1, opponent_zones)] {
         for name in ["graveyard", "banished"] {
             let public: Vec<_> = array(&source[name]["cards"])
@@ -508,6 +538,64 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prior_observation() -> Value {
+        json!({"schema_version":1,"source":{},"game":{"turn":2,"total_turns":6,
+        "players":[
+            {"slot":"local","entity_id":10,"energy":2,"ended_turn":1,
+             "zones":{"hand":{"count":0,"cards":[]},"deck":{"count":0}}},
+            {"slot":"opponent","entity_id":20,
+             "zones":{"hand":{"count":0},"deck":{"count":0},
+                      "graveyard":{"cards":[{"card_id":"IronMan"}]},
+                      "banished":{"cards":[{"card_id":"Cyclops"}]}}}],
+        "locations":[{"location_id":"Ruins","cards":[
+            {"card_id":"Hulk","owner_entity_id":20,"revealed":true},
+            {"card_id":"AntMan","owner_entity_id":20,"revealed":false}
+        ]}]}})
+    }
+
+    #[test]
+    fn opponent_seen_prior_is_separate_from_current_evidence() {
+        let value = position_from_snap(
+            &prior_observation(),
+            &json!({
+                "opponent_seen_prior":["Cyclops","AntMan","Hulk","Medusa","AntMan"]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            value["opponent"]["seen"],
+            json!(["Hulk", "IronMan", "Cyclops"])
+        );
+        assert_eq!(
+            value["opponent"]["known"],
+            json!(["Cyclops", "AntMan", "Hulk", "Medusa"])
+        );
+    }
+
+    #[test]
+    fn opponent_seen_prior_rejects_invalid_evidence() {
+        for prior in [
+            json!(null),
+            json!("Hulk"),
+            json!([null]),
+            json!([1]),
+            json!([""]),
+            json!(["NotACard"]),
+            json!(["Rock"]),
+            json!(&crate::cards::deck_eligible_ids()[..13]),
+        ] {
+            assert!(matches!(
+                position_from_snap(&prior_observation(), &json!({"opponent_seen_prior":prior})),
+                Err(SnapError::Invalid(_))
+            ));
+        }
+        let mut ids = crate::cards::deck_eligible_ids()[..12].to_vec();
+        ids.push(ids[0]);
+        assert!(
+            position_from_snap(&prior_observation(), &json!({"opponent_seen_prior":ids})).is_ok()
+        );
+    }
 
     #[test]
     fn locations_track_replacements_and_match_reset() {

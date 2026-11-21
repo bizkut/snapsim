@@ -42,14 +42,17 @@ fn opponent_candidates(position: &Position) -> (&'static str, Vec<String>) {
     } else if let Some(pool) = &opponent.pool {
         ("pool", pool.clone())
     } else if position.mode.as_deref() == Some("recruit")
-        && !position::outside(opponent.seen.iter())
+        && !position::outside(opponent.seen.iter().chain(&opponent.known))
     {
         ("mode:recruit", position::recruit_cards())
     } else {
         ("all-supported", position::all_cards())
     };
-    let seen: HashSet<_> = opponent.seen.iter().collect();
-    let mut remaining: Vec<_> = pool.into_iter().filter(|id| !seen.contains(id)).collect();
+    let excluded: HashSet<_> = opponent.seen.iter().chain(&opponent.known).collect();
+    let mut remaining: Vec<_> = pool
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect();
     remaining.sort();
     (source, remaining)
 }
@@ -117,6 +120,7 @@ pub fn coverage(position: &Position) -> Value {
         .map(|c| c.id.as_str())
         .chain(position.deck.iter().map(String::as_str))
         .chain(position.opponent.seen.iter().map(String::as_str))
+        .chain(position.opponent.known.iter().map(String::as_str))
         .chain(
             position
                 .opponent

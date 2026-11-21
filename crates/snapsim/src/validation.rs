@@ -182,6 +182,23 @@ impl Position {
             Some(0),
         )?;
         card_ids(opponent.get("seen").unwrap_or(&empty), "opponent.seen")?;
+        let mut known = HashSet::new();
+        for id in array(
+            opponent.get("known").unwrap_or(&empty),
+            "opponent.known",
+            None,
+        )? {
+            let id = id
+                .as_str()
+                .ok_or("opponent.known entries must be card ID strings")?;
+            if id.is_empty() || crate::cards::get(id).is_none() || crate::cards::is_token(id) {
+                return Err("opponent.known contains a non-deck-eligible card ID".into());
+            }
+            known.insert(id);
+        }
+        if known.len() > 12 {
+            return Err("opponent.known contains more than 12 unique card IDs".into());
+        }
         for field in ["deck_list", "pool"] {
             let v = opponent.get(field).unwrap_or(&null);
             if !v.is_null() {
@@ -228,6 +245,31 @@ mod tests {
                           {"mine": [], "theirs": []}],
             "opponent": {"hand": 0, "deck": 0}
         })
+    }
+
+    #[test]
+    fn validates_opponent_known_deck_evidence() {
+        let mut input = position();
+        for invalid in [
+            json!(null),
+            json!("Hulk"),
+            json!([null]),
+            json!([""]),
+            json!(["Rock"]),
+            json!(["NotACard"]),
+            json!(&crate::cards::deck_eligible_ids()[..13]),
+        ] {
+            input["opponent"]["known"] = invalid;
+            assert!(
+                Position::from_json(&input.to_string())
+                    .unwrap_err()
+                    .contains("opponent.known")
+            );
+        }
+        let mut ids = crate::cards::deck_eligible_ids()[..12].to_vec();
+        ids.push(ids[0]);
+        input["opponent"]["known"] = json!(ids);
+        assert!(Position::from_json(&input.to_string()).is_ok());
     }
 
     #[test]
