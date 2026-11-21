@@ -295,14 +295,49 @@ fn zombie_giant_man(g: &mut Game, id: usize) {
 }
 fn zombie_blade(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
+    let Some(lane) = g.cards[id].lane else {
+        return;
+    };
     if !g.played_on_reveal[owner] {
         return;
     }
-    if let Some(horde) = g.horde(g.cards[id].lane.unwrap(), owner, 0) {
+    if let Some(horde) = g.horde(lane, owner, 0) {
         let hand = &g.players[1 - owner].hand;
         if !hand.is_empty() {
             let target = hand[g.rng.borrow_mut().randbelow(hand.len())];
             g.steal_power(target, horde, 1, owner);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::position::{Position, build_game};
+    use crate::random::PythonRandom;
+    use serde_json::json;
+
+    #[test]
+    fn destroyed_zombie_blade_has_no_end_turn_effect() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 2,
+            "energy": 2,
+            "hand": [],
+            "deck": [],
+            "locations": [
+                {"id": null, "mine": [{"id": "ZombieBlade"}], "theirs": []},
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        }))
+        .unwrap();
+        let mut rng = PythonRandom::seed(1);
+        let mut game = build_game(&position, &mut rng).unwrap();
+        let blade = game.lanes[0].cards[0];
+        game.played_on_reveal[0] = true;
+
+        assert!(game.destroy_card(blade));
+        zombie_blade(&mut game, blade);
     }
 }
