@@ -595,6 +595,44 @@ mod tests {
     }
 
     #[test]
+    fn same_turn_nico_spell_before_ally_is_not_checkable() {
+        let mut start = observation(2, "nico-same-turn", false);
+        start["game"]["locations"][1]["location_id"] = json!("Ruins");
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(2);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"] = json!([
+            {"entity_id": 34, "owner_entity_id": 2, "zone_position": 0, "revealed": false},
+            {"entity_id": 35, "owner_entity_id": 2, "zone_position": 1, "revealed": false}
+        ]);
+        let mut nico = submitted.clone();
+        nico["game"]["locations"][1]["cards"][0] = json!({
+            "entity_id": 34, "owner_entity_id": 2, "zone_position": 0,
+            "card_id": "NicoMinoru", "revealed": true, "power": 2, "turn_revealed": 2
+        });
+        let mut ally = nico.clone();
+        ally["game"]["locations"][1]["cards"][1] = json!({
+            "entity_id": 35, "owner_entity_id": 2, "zone_position": 1,
+            "card_id": "Agony", "revealed": true, "power": 2, "turn_revealed": 2
+        });
+        let mut next = ally.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][2]["location_id"] = json!("Ruins");
+        next["game"]["locations"][1]["cards"][1]["card_id"] = json!("Demon");
+        next["game"]["locations"][1]["cards"][1]["power"] = json!(6);
+        let rows = check_observations(
+            vec![(1, start), (2, submitted), (3, nico), (4, ally), (5, next)],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("spell for a later play this turn"));
+    }
+
+    #[test]
     fn maverick_pending_activation_is_not_reported_as_rule_failure() {
         let mut start = observation(2, "maverick", false);
         start["game"]["locations"][0]["cards"] = json!([{

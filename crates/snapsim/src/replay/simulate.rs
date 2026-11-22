@@ -284,6 +284,59 @@ pub(super) fn simulate(
         destroyed: Some(Vec::new()),
         rng: RefCell::new(&mut game_rng),
     };
+    // CaveOfTheDragonBehavior::AddCard (0x7d45454) makes one random
+    // selection per player. A visible new card with this exact provenance
+    // proves the result; consume the ordinary RNG draw in the location hook.
+    // The frozen reference must retain its original seed-only simulation.
+    if !crate::cards::reference_rules_enabled() && start.turn == 4 {
+        for lane in 0..3 {
+            if start.locations[lane] != "CaveOfTheDragon" {
+                continue;
+            }
+            let catalog = crate::data::cards();
+            let mut choices = [None; 2];
+            let mut first_revealed = [None; 2];
+            for (seat, choice) in choices.iter_mut().enumerate() {
+                let mut observed = target.board.iter().filter(|card| {
+                    card.owner == seat
+                        && card.revealed
+                        && card.created_by_location == "CaveOfTheDragon"
+                        && card.flipped.as_i64() == Some(start.turn)
+                        && entity(start, &card.entity).is_none()
+                });
+                if let Some(card) = observed.next()
+                    && observed.next().is_none()
+                    && let Some(id) = card.id.as_str()
+                    && let Some(def) = crate::cards::get(id)
+                    && crate::cards::deck_eligible_ids().contains(&def.id)
+                    && catalog.iter().any(|row| {
+                        row.carddefid == id
+                            && !row.random_pool_excluded
+                            && locations::cave_candidate(row)
+                    })
+                {
+                    *choice = Some(def.id);
+                    first_revealed[seat] = frames
+                        .iter()
+                        .filter(|frame| frame.line > start.line && frame.line <= target.line)
+                        .find(|frame| {
+                            entity(frame, &card.entity).is_some_and(|entry| entry.revealed)
+                        })
+                        .map(|frame| frame.line);
+                }
+            }
+            // A strictly earlier visible reveal proves the resolution order;
+            // a shared or missing frame does not.
+            if let [Some(a), Some(b)] = first_revealed
+                && a != b
+            {
+                game.reveal_priority = Some(usize::from(b < a));
+            }
+            if choices.iter().any(Option::is_some) {
+                game.lanes[lane].state = Some(Box::new(choices));
+            }
+        }
+    }
     for card in &start.hand {
         let id = card["card_id"].as_str().ok_or("missing card_id")?;
         let index = push(&mut game, id, 0, &card["cost"], &card["power"])?;

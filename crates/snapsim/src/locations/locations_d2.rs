@@ -77,6 +77,14 @@ fn world_forge(game: &mut Game<'_>, lane: usize) {
 
 // CaveOfTheDragonBehavior::AddCard @ 0x7d45454, predicate 0x7d45f70;
 // the five exclusions are assembled by its constructor @ 0x7d45924.
+pub(crate) fn cave_candidate(row: &crate::data::CardData) -> bool {
+    row.cost >= 5
+        && !matches!(
+            row.carddefid.as_str(),
+            "Galactus" | "Alioth" | "Destroyer" | "Ultron" | "Modok"
+        )
+}
+
 fn cave_of_the_dragon(game: &mut Game<'_>, lane: usize) {
     if game.turn != 4 {
         return;
@@ -85,14 +93,17 @@ fn cave_of_the_dragon(game: &mut Game<'_>, lane: usize) {
         game.reveal_priority.unwrap_or(0),
         1 - game.reveal_priority.unwrap_or(0),
     ] {
-        if let Some(id) = game.random_card(|row| {
-            row.cost >= 5
-                && !matches!(
-                    row.carddefid.as_str(),
-                    "Galactus" | "Alioth" | "Destroyer" | "Ultron" | "Modok"
-                )
-        }) && game.has_space(lane, seat, 0)
+        if let Some(random) = game.random_card(cave_candidate)
+            && game.has_space(lane, seat, 0)
         {
+            // Replay may supply an observed, validated result. Still consume the
+            // client's one random draw so subsequent effects retain their stream.
+            let id = game.lanes[lane]
+                .state
+                .as_deref()
+                .and_then(|state| state.as_any().downcast_ref::<[Option<&'static str>; 2]>())
+                .and_then(|choices| choices[seat])
+                .unwrap_or(random);
             let card = game.create_card(id, seat);
             game.add_card(card, lane, seat, true);
         }
@@ -198,6 +209,34 @@ mod tests {
         let card = game.create_card(id, seat);
         assert!(game.add_card(card, lane, seat, false));
         card
+    }
+    #[test]
+    fn cave_observed_choices_preserve_two_random_draws() {
+        let mut rng = PythonRandom::seed(18);
+        let mut control_rng = PythonRandom::seed(18);
+        let control = game(&mut control_rng);
+        let mut game = game(&mut rng);
+        game.turn = 4;
+        game.lanes[0].state = Some(Box::new([Some("IronMan"), Some("BlueMarvel")]));
+        cave_of_the_dragon(&mut game, 0);
+        assert!(
+            game.lanes[0]
+                .cards
+                .iter()
+                .any(|&id| game.cards[id].def.id == "IronMan")
+        );
+        assert!(
+            game.lanes[0]
+                .cards
+                .iter()
+                .any(|&id| game.cards[id].def.id == "BlueMarvel")
+        );
+        assert!(control.random_card(cave_candidate).is_some());
+        assert!(control.random_card(cave_candidate).is_some());
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.rng.borrow_mut().randbelow(10000)
+        );
     }
     #[test]
     fn dark_dimension_holds_only_its_lane_until_game_end() {

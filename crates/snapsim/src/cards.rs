@@ -20,6 +20,9 @@ mod meta_f1;
 mod meta_f2;
 mod meta_f3;
 mod meta_g;
+mod meta_h1;
+mod meta_h2;
+mod meta_h3;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
@@ -58,6 +61,9 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_f2::TOKENS,
     meta_f3::TOKENS,
     meta_g::TOKENS,
+    meta_h1::TOKENS,
+    meta_h2::TOKENS,
+    meta_h3::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -172,6 +178,9 @@ pub struct CardDef {
     pub move_limit: u8,
     /// Intrinsic move remains available on subsequent turns.
     pub move_each_turn: bool,
+    /// Ongoing source grants a voluntary move to another card in its lane.
+    pub grants_move_from: Option<fn(&Game<'_>, usize, usize) -> bool>,
+    pub pre_end_turn: Option<CardHook>,
     pub end_turn: Option<CardHook>,
     pub on_move_here: Option<PlayHook>,
     pub on_move: Option<PlayHook>,
@@ -216,6 +225,8 @@ impl CardDef {
             activate_cost: 0,
             move_limit: 0,
             move_each_turn: false,
+            grants_move_from: None,
+            pre_end_turn: None,
             blocks_spawns: false,
             end_turn: None,
             blocks_reveal: false,
@@ -352,6 +363,9 @@ static GROUPS: &[&[CardDef]] = &[
     meta_f2::CARDS,
     meta_f3::CARDS,
     meta_g::CARDS,
+    meta_h1::CARDS,
+    meta_h2::CARDS,
+    meta_h3::CARDS,
 ];
 
 /// Every registered card rule.

@@ -161,7 +161,60 @@ pub fn check_observations(
                 {
                     return Err("target has revealed cards with no recorded power".into());
                 }
+                // FullLocationPowerAugmentBehavior::BuffPerFullLocation (0x7e59a60)
+                // is an ongoing ability whose attachment is not exported. A changed
+                // augment ledger cannot safely be reconstructed from its final value.
+                if !crate::cards::reference_rules_enabled()
+                    && target.board.iter().any(|card| {
+                        let augment_updates = |card: &super::BoardCard| {
+                            card.stat_updates
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter(|entry| !entry["updater_augment_id"].is_null())
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        };
+                        let after = augment_updates(card);
+                        let before = entity(start, &card.entity)
+                            .map(augment_updates)
+                            .unwrap_or_default();
+                        (!after.is_empty() || !before.is_empty()) && before != after
+                    })
+                {
+                    return Err("augment ability state is not recorded".into());
+                }
+                if !crate::cards::reference_rules_enabled()
+                    && start.board.iter().any(|card| {
+                        card.revealed
+                            && card.id == "HumanTorchFirstSteps"
+                            && card.flipped.as_i64().is_none_or(|t| t < turn)
+                    })
+                {
+                    return Err("Human Torch First Steps doubling use is not recorded".into());
+                }
+                if !crate::cards::reference_rules_enabled()
+                    && target.board.iter().any(|stone| {
+                        stone.revealed
+                            && stone.id == "PowerStone"
+                            && target.board.iter().any(|thanos| {
+                                thanos.revealed
+                                    && thanos.owner == stone.owner
+                                    && (thanos.id == "Thanos" || thanos.id == "ThanosChampion")
+                            })
+                    })
+                {
+                    return Err("Power Stone distinct played-stone history is not recorded".into());
+                }
                 for (lane, id) in start.locations.iter().enumerate() {
+                    if !crate::cards::reference_rules_enabled()
+                        && (id == "TheAbbey" || id == "Raft")
+                        && start.location_turns[lane]
+                            .as_i64()
+                            .is_none_or(|revealed| revealed < turn)
+                    {
+                        return Err(format!("{id} consumed trigger state is not recorded"));
+                    }
                     if id == "TimeTheater"
                         && theater_unknown(
                             start.location_turns[lane].as_i64(),
@@ -207,6 +260,18 @@ pub fn check_observations(
                     })
                 {
                     return Err("Vormir's per-player trigger state is not recorded".into());
+                }
+                for card in &start.board {
+                    if card.revealed && card.flipped.as_i64().is_none_or(|t| t < turn) {
+                        if card.id == "Nebula" {
+                            return Err("Nebula pre-end trigger state is not recorded".into());
+                        }
+                        if card.id == "TheThingFirstSteps" {
+                            return Err(
+                                "The Thing First Steps fill-trigger use is not recorded".into()
+                            );
+                        }
+                    }
                 }
                 // Target is a next-turn planning frame, after World Forge's
                 // start-of-turn morph and any replacement's reveal effects.
@@ -265,6 +330,21 @@ pub fn check_observations(
                             .any(|play| play.card.owner == card.owner)
                 }) {
                     return Err("Nico Minoru's spell and pending next-card effect are not observable at the start of the turn".into());
+                }
+                // Spell01NicoMinoruBehaviorDef::AddNextCardTriggerToPlayer
+                // (0x7f46cbc) also affects a later play in the same turn.
+                // A newly revealed Nico does not expose her prepared spell.
+                if !cards::reference_rules_enabled()
+                    && staged.plays.iter().enumerate().any(|(index, play)| {
+                        play.id == "NicoMinoru"
+                            && staged.plays[index + 1..]
+                                .iter()
+                                .any(|later| later.card.owner == play.card.owner)
+                    })
+                {
+                    return Err(
+                        "Nico Minoru's spell for a later play this turn is not observable".into(),
+                    );
                 }
                 // MaverickBehavior::AddBuffCardTriggerToPlayer (0x7ef54b8)
                 // creates a player-owned trigger; observations do not expose

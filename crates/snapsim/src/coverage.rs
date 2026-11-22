@@ -134,6 +134,30 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    // A ledger entry proves augments are in use, but it does not enumerate
+    // attached abilities that have not produced a stat update yet.
+    if !cards::reference_rules_enabled()
+        && position
+            .hand
+            .iter()
+            .chain(
+                position
+                    .locations
+                    .iter()
+                    .flat_map(|lane| lane.mine.iter().chain(&lane.theirs)),
+            )
+            .any(|card| {
+                card.stat_updates.as_ref().is_some_and(|updates| {
+                    updates
+                        .iter()
+                        .any(|update| update.updater_augment_id.is_some())
+                })
+            })
+        && (!position.hand.is_empty()
+            || position.locations.iter().any(|lane| !lane.mine.is_empty()))
+    {
+        extra_state.insert("Card augment attachments are not exported".to_owned());
+    }
     for id in &position.opponent.seen {
         if matches!(id.as_str(), "IronFist" | "Enchantress") {
             state.insert(id.as_str());
@@ -147,6 +171,14 @@ pub fn coverage(position: &Position) -> Value {
             .any(|l| l.id.as_deref() == Some("Lemuria") && l.revealed_turn == Some(previous));
     let mut face_down = 0;
     for lane in &position.locations {
+        if position.turn == 5
+            && lane
+                .mine
+                .iter()
+                .any(|card| card.revealed && card.id == "Daredevil")
+        {
+            extra_state.insert("Daredevil-visible opponent plays not exported".to_owned());
+        }
         face_down += lane.theirs_face_down;
         let refs: Vec<_> = lane
             .mine
@@ -158,6 +190,27 @@ pub fn coverage(position: &Position) -> Value {
             let id = card.id.as_str();
             card_ids.insert(id);
             if card.revealed {
+                if id == "HumanTorchFirstSteps"
+                    && card.played_turn.is_none_or(|turn| turn < position.turn)
+                {
+                    extra_state.insert("Human Torch First Steps doubling use unknown".to_owned());
+                }
+                if id == "PowerStone" {
+                    extra_state
+                        .insert("Power Stone distinct played-stone history unknown".to_owned());
+                }
+                if card.played_turn.is_none_or(|turn| turn < position.turn) {
+                    if id == "JuggernautHorseman" {
+                        extra_state
+                            .insert("Juggernaut Horseman objective completion unknown".to_owned());
+                    }
+                    if id == "Nebula" {
+                        extra_state.insert("Nebula pre-end trigger state unknown".to_owned());
+                    } else if id == "TheThingFirstSteps" {
+                        extra_state
+                            .insert("The Thing First Steps fill-trigger use unknown".to_owned());
+                    }
+                }
                 if matches!(id, "IronFist" | "Enchantress")
                     || (card.played_turn.is_none() && matches!(id, "Hawkeye" | "JessicaJones"))
                 {
@@ -220,6 +273,11 @@ pub fn coverage(position: &Position) -> Value {
                         extra_state.insert(format!("Quantum Realm base unknown for {}", card.id));
                     }
                 }
+            }
+            if matches!(id.as_str(), "TheAbbey" | "Raft")
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+            {
+                extra_state.insert(format!("{id} consumed trigger state unknown"));
             }
             if (lane.revealed_turn.is_none()
                 && matches!(

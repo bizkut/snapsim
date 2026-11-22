@@ -223,7 +223,7 @@ pub(crate) fn all_locations(recruit: bool) -> Vec<String> {
     let mut ids: Vec<_> = locations::REGISTRY
         .iter()
         .filter(|d| !pinned || REFERENCE_LOCATIONS.contains(&d.id))
-        .filter(|d| d.id != "SubterraneaTutorial")
+        .filter(|d| !matches!(d.id, "SubterraneaTutorial" | "SakaarTutorial"))
         .filter(|d| {
             !recruit
                 || LOCATION_DATA.get(d.id).is_some_and(|x| {

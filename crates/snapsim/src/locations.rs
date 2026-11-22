@@ -7,8 +7,11 @@ mod locations_c;
 mod locations_d1;
 mod locations_d2;
 mod locations_d3;
+mod locations_e;
 mod recruit_a;
 mod turns;
+
+pub(crate) use locations_d2::cave_candidate;
 
 pub type LocationHook = fn(&mut Game<'_>, usize);
 pub type CardHook = fn(&mut Game<'_>, usize, usize);
@@ -29,6 +32,7 @@ pub struct LocationDef {
     pub delays_reveals: bool,
     pub delays_reveals_until_end: bool,
     pub disables_ongoing: bool,
+    pub disables_on_reveal: bool,
     pub on_reveal: Option<LocationHook>,
     pub on_turn_start: Option<LocationHook>,
     pub on_staging_end: Option<LocationHook>,
@@ -40,6 +44,7 @@ pub struct LocationDef {
     pub on_card_added: Option<CardHook>,
     pub on_event: Option<fn(&mut Game<'_>, usize, crate::game::Event)>,
     pub allows_play: Option<PlayPredicate>,
+    pub allows_play_with_count: Option<fn(&Game<'_>, usize, usize) -> bool>,
     pub allows_play_elsewhere: Option<PlayPredicate>,
     pub allows_addition: Option<PlayPredicate>,
     pub allows_move_from: Option<PlayPredicate>,
@@ -69,6 +74,7 @@ pub(crate) const fn location(
         delays_reveals: false,
         delays_reveals_until_end: false,
         disables_ongoing: false,
+        disables_on_reveal: false,
         on_reveal: None,
         on_turn_start: None,
         on_staging_end: None,
@@ -80,6 +86,7 @@ pub(crate) const fn location(
         on_card_added: None,
         on_event: None,
         allows_play: None,
+        allows_play_with_count: None,
         allows_play_elsewhere: None,
         allows_addition: None,
         allows_move_from: None,
@@ -211,6 +218,18 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_d3::JOSIES_BAR,
     locations_d3::KLYNTAR,
     locations_d3::TA_LO,
+    // locations_e (append below)
+    locations_e::KNOWHERE,
+    locations_e::MORAG,
+    locations_e::SAKAAR_TUTORIAL,
+    locations_e::SANCTUM_SANCTORUM,
+    locations_e::PIT_OF_EXILE,
+    locations_e::PET_AVENGERS_MANSION,
+    locations_e::SPIDER_ISLAND,
+    locations_e::YGGDRASIL,
+    locations_e::THUNDERBOLTS_TOWER,
+    locations_e::THE_ABBEY,
+    locations_e::RAFT,
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {

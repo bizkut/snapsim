@@ -44,6 +44,7 @@ impl Policy {
         let mut multiplier = [1; 3];
         let mut scores = [0.0; 3];
         if matches!(self, Self::Margin) {
+            let sees_staged = game.daredevil_viewer() == Some(seat);
             for lane in 0..3 {
                 let location = &game.lanes[lane];
                 let mut power = [0; 2];
@@ -51,7 +52,16 @@ impl Policy {
                 for &id in &location.cards {
                     let card = &game.cards[id];
                     occupied[card.owner] += 1;
-                    power[card.owner] += if card.revealed { card.power() } else { 3 };
+                    let visible_staged = sees_staged
+                        && card.owner != seat
+                        && game.players[card.owner].staged_history.iter().any(|play| {
+                            play.card == id && play.turn == game.turn && !play.resolved
+                        });
+                    power[card.owner] += if card.revealed || visible_staged {
+                        card.power()
+                    } else {
+                        3
+                    };
                 }
                 if location.revealed {
                     for (s, value) in power.iter_mut().enumerate() {
@@ -83,7 +93,8 @@ impl Policy {
                 }
                 let mut best = None;
                 for &lane in &lanes {
-                    if !game.can_play(id, lane, seat, energy, queued[lane]) {
+                    if !game.can_play_with_count(id, lane, seat, energy, queued[lane], plays.len())
+                    {
                         continue;
                     }
                     let mut gain = card.power() + lane_power[lane];
@@ -117,7 +128,7 @@ impl Policy {
                 }
             } else {
                 for &lane in &lanes {
-                    if game.can_play(id, lane, seat, energy, queued[lane]) {
+                    if game.can_play_with_count(id, lane, seat, energy, queued[lane], plays.len()) {
                         plays.push((id, lane));
                         queued[lane] += 1;
                         energy -= game.card_cost(id);

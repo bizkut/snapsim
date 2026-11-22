@@ -80,6 +80,21 @@ fn limbo_replacement_and_ongoing_repetition() {
 }
 
 #[test]
+fn removing_limbo_does_not_cancel_an_already_started_turn() {
+    let mut rng = PythonRandom::seed(20);
+    let mut game = game(&mut rng);
+    game.turn = 6;
+    game.replace_location(0, "Limbo");
+    assert_eq!(game.total_turns, 7);
+    game.replace_location(0, "Ruins");
+    assert_eq!(game.total_turns, 6);
+    game.replace_location(0, "Limbo");
+    game.turn = 7;
+    game.replace_location(0, "Ruins");
+    assert_eq!(game.total_turns, 7);
+}
+
+#[test]
 fn delayed_card_is_not_revealed_until_delay_clears() {
     let mut rng = PythonRandom::seed(20);
     let mut game = game(&mut rng);

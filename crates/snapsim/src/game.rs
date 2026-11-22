@@ -311,6 +311,8 @@ pub struct Player {
     pub staged_history: Vec<StagedPlay>,
     /// Turn of a player-staged move or activation, even if resolution fails.
     pub non_play_action_turn: Option<u8>,
+    /// Last turn on which a voluntary move was staged from each lane.
+    pub move_from_turn: [Option<u8>; 3],
     /// Turns on which this player snapped.
     pub snapped_turns: Vec<u8>,
     /// (turn, energy spent, all available energy spent).
@@ -376,6 +378,11 @@ pub enum Event {
     CardAdded {
         card: usize,
         lane: usize,
+    },
+    BeforeCardMoved {
+        card: usize,
+        from: usize,
+        to: usize,
     },
     CardMoved {
         card: usize,
@@ -617,6 +624,13 @@ impl<'a> Game<'a> {
     }
 
     pub fn set_total_turns(&mut self, turns: u8) {
+        // Game::ModifyTotalNumTurns @ 0x7db19c0 clamps the new total to
+        // the current turn, so removing Limbo cannot cancel an ongoing turn 7.
+        let turns = if cards::reference_rules_enabled() {
+            turns
+        } else {
+            turns.max(self.turn)
+        };
         let old = self.total_turns;
         self.total_turns = turns;
         if old != turns {
@@ -683,6 +697,11 @@ impl<'a> Game<'a> {
         if stat == Stat::Cost && !self.cost_change_allowed(card, old, new) {
             return;
         }
+        let correction_before = if stat == Stat::Power {
+            self.luke_power_correction(card)
+        } else {
+            0
+        };
         let target = &mut self.cards[card];
         target.stat_updates.push(CardStatUpdate {
             stat,
@@ -694,6 +713,9 @@ impl<'a> Game<'a> {
         match stat {
             Stat::Power => target.permanent = new,
             Stat::Cost => target.cost = new,
+        }
+        if stat == Stat::Power {
+            self.cards[card].ongoing += self.luke_power_correction(card) - correction_before;
         }
         if stat == Stat::Power && new > old {
             self.emit(Event::Empower {
@@ -713,10 +735,11 @@ impl<'a> Game<'a> {
         if !self.is_character(card) {
             return;
         }
-        let target = &mut self.cards[card];
-        if amount < 0 && !target.can_reduce_power() {
+        if amount < 0 && !self.cards[card].can_reduce_power() {
             return;
         }
+        let correction_before = self.luke_power_correction(card);
+        let target = &mut self.cards[card];
         target.permanent += amount;
         target.stat_updates.push(CardStatUpdate {
             stat: Stat::Power,
@@ -725,6 +748,7 @@ impl<'a> Game<'a> {
             source,
             ongoing: false,
         });
+        self.cards[card].ongoing += self.luke_power_correction(card) - correction_before;
     }
     pub fn set_power(&mut self, card: usize, value: i32, source: usize) {
         self.change_stat(card, Stat::Power, StatOperation::Set, value, source, false);
@@ -762,7 +786,7 @@ impl<'a> Game<'a> {
             }
         }
         let delta = new - old;
-        if delta < 0 && !target.can_reduce_power() {
+        if delta < 0 && !self.can_reduce_card_power(card) {
             return;
         }
         self.cards[card].base_power_override = Some(value);
@@ -793,6 +817,25 @@ impl<'a> Game<'a> {
     pub fn steal_power_many(&mut self, from: &[usize], to: usize, amount: i32, source: usize) {
         let mut stolen = 0;
         for &card in from {
+            // StealPowerPermanently (0x7cb733c) checks immunity before adding a modifier.
+            if !self.can_reduce_card_power(card) {
+                continue;
+            }
+            let before = self.cards[card].permanent;
+            self.add_power(card, -amount, source);
+            stolen += before - self.cards[card].permanent;
+        }
+        if stolen > 0 {
+            self.change_stat(to, Stat::Power, StatOperation::Add, stolen, source, true);
+        }
+    }
+    /// Steal distinct amounts per target, emitting one aggregate Empower.
+    pub fn steal_power_weighted(&mut self, from: &[(usize, i32)], to: usize, source: usize) {
+        let mut stolen = 0;
+        for &(card, amount) in from {
+            if !self.can_reduce_card_power(card) {
+                continue;
+            }
             let before = self.cards[card].permanent;
             self.add_power(card, -amount, source);
             stolen += before - self.cards[card].permanent;
@@ -808,7 +851,7 @@ impl<'a> Game<'a> {
         self.change_stat(card, Stat::Cost, StatOperation::Set, value, source, false);
     }
     pub fn add_ongoing_power(&mut self, card: usize, amount: i32, source: usize) {
-        if self.is_character(card) && (amount >= 0 || self.cards[card].can_reduce_power()) {
+        if self.is_character(card) && (amount >= 0 || self.can_reduce_card_power(card)) {
             self.cards[card].ongoing += amount;
             self.cards[card].stat_updates.push(CardStatUpdate {
                 stat: Stat::Power,
@@ -974,6 +1017,49 @@ impl<'a> Game<'a> {
     /// Location::IsCardInFrontRow (0x7ddf5e8).
     pub fn is_front_row(&self, card: usize) -> bool {
         self.zone_position(card).is_some_and(|slot| slot < 2)
+    }
+    /// LukeCageBehavior::BuffCards (0x7eeb1d4), across all locations.
+    fn can_reduce_card_power(&self, card: usize) -> bool {
+        self.cards[card].can_reduce_power()
+            && (cards::reference_rules_enabled()
+                || !self.cards[card].revealed
+                || !self.is_front_row(card)
+                || !self.lanes.iter().any(|lane| {
+                    lane.cards.iter().any(|&id| {
+                        self.cards[id].owner == self.cards[card].owner
+                            && self.cards[id].revealed
+                            && self.cards[id].ability_def().id == "LukeCage"
+                            && self.ongoing_active(id)
+                    })
+                }))
+    }
+
+    // Card::AddPowerPermanently (0x7cb7210) always adds its modifier; Luke's
+    // SetCanHavePowerReduced (0x7cb8478) suppresses it until protection ends.
+    fn luke_power_correction(&self, card: usize) -> i32 {
+        if self.can_reduce_card_power(card) || !self.cards[card].can_reduce_power() {
+            return 0;
+        }
+        let target = &self.cards[card];
+        let base = target
+            .base_power_override
+            .unwrap_or(CATALOG[target.def.id].power);
+        let mut normal = base;
+        let mut protected = base;
+        for update in target
+            .stat_updates
+            .iter()
+            .filter(|u| u.stat == Stat::Power && !u.ongoing)
+        {
+            let apply = |old: i32| match update.operation {
+                StatOperation::Add => old + update.value,
+                StatOperation::Multiply => old * update.value,
+                StatOperation::Set => update.value,
+            };
+            normal = apply(normal);
+            protected = protected.max(apply(protected));
+        }
+        protected - normal
     }
     pub fn is_back_row(&self, card: usize) -> bool {
         self.zone_position(card).is_some_and(|slot| slot > 1)
@@ -1542,6 +1628,18 @@ impl<'a> Game<'a> {
         energy: i32,
         queued: usize,
     ) -> bool {
+        self.can_play_with_count(card, lane, seat, energy, queued, queued)
+    }
+
+    pub fn can_play_with_count(
+        &self,
+        card: usize,
+        lane: usize,
+        seat: usize,
+        energy: i32,
+        queued: usize,
+        queued_total: usize,
+    ) -> bool {
         if self.card_cost(card) > energy || !self.has_space(lane, seat, queued) {
             return false;
         }
@@ -1568,6 +1666,12 @@ impl<'a> Game<'a> {
             };
             if let Some(test) = predicate
                 && !test(self, source, card, lane, seat)
+            {
+                return false;
+            }
+            if source == lane
+                && let Some(test) = location.def.allows_play_with_count
+                && !test(self, seat, queued_total)
             {
                 return false;
             }
@@ -1634,6 +1738,14 @@ impl<'a> Game<'a> {
                 || target.ability_def().move_each_turn
                     && target.player_move_turn != Some(self.turn)))
             || self.matching_move_grant(card, seat).is_some()
+            || self.lanes[source].cards.iter().copied().any(|provider| {
+                self.cards[provider].revealed
+                    && self.ongoing_active(provider)
+                    && self.cards[provider]
+                        .ability_def()
+                        .grants_move_from
+                        .is_some_and(|test| test(self, provider, card))
+            })
             || (self.lanes[destination].revealed
                 && self.lanes[destination]
                     .def
@@ -1647,10 +1759,12 @@ impl<'a> Game<'a> {
             return false;
         }
         let grant = self.matching_move_grant(card, seat);
+        let source = self.cards[card].lane.unwrap();
         if !self.move_card(card, destination) {
             return false;
         }
         self.players[seat].non_play_action_turn = Some(self.turn);
+        self.players[seat].move_from_turn[source] = Some(self.turn);
         if self.cards[card].ability_def().move_limit > 0 {
             self.cards[card].player_moves_used =
                 self.cards[card].player_moves_used.saturating_add(1);
@@ -1752,7 +1866,7 @@ impl<'a> Game<'a> {
         Ok(())
     }
 
-    fn apply_staged_action(&mut self, seat: usize, action: Action, cost: i32) {
+    pub(crate) fn apply_staged_action(&mut self, seat: usize, action: Action, cost: i32) {
         match action {
             Action::Play { card, lane } => {
                 let slot = self.players[seat]
@@ -1784,6 +1898,7 @@ impl<'a> Game<'a> {
             Action::Move { card, lane } => {
                 self.players[seat].non_play_action_turn = Some(self.turn);
                 let from = self.cards[card].lane.unwrap();
+                self.players[seat].move_from_turn[from] = Some(self.turn);
                 let grant = self.matching_move_grant(card, seat).map(|index| {
                     let grant = &mut self.players[seat].move_grants[index];
                     grant.remaining -= 1;
@@ -1866,6 +1981,13 @@ impl<'a> Game<'a> {
                         if let (Some(from), Some(lane)) =
                             (self.cards[card].last_lane, self.cards[card].lane)
                         {
+                            if !crate::cards::reference_rules_enabled() {
+                                self.emit(Event::BeforeCardMoved {
+                                    card,
+                                    from,
+                                    to: lane,
+                                });
+                            }
                             self.finish_move(card, from, lane);
                         }
                     }
@@ -1914,6 +2036,13 @@ impl<'a> Game<'a> {
             && !test(self, destination, card, destination, self.cards[card].owner)
         {
             return false;
+        }
+        if !crate::cards::reference_rules_enabled() {
+            self.emit(Event::BeforeCardMoved {
+                card,
+                from: source,
+                to: destination,
+            });
         }
         self.lanes[source].cards.retain(|&id| id != card);
         self.cards[card].last_lane = Some(source);
@@ -2458,6 +2587,9 @@ impl<'a> Game<'a> {
             card.location_power = 0;
             card.stat_updates.retain(|update| !update.ongoing);
         }
+        for id in 0..self.cards.len() {
+            self.cards[id].ongoing += self.luke_power_correction(id);
+        }
         for seat in 0..2 {
             for index in 0..self.players[seat].hand.len() {
                 let card = self.players[seat].hand[index];
@@ -2505,7 +2637,7 @@ impl<'a> Game<'a> {
                     let id = self.lanes[lane].cards[index];
                     if self.cards[id].revealed
                         && power != 0
-                        && (power >= 0 || self.cards[id].can_reduce_power())
+                        && (power >= 0 || self.can_reduce_card_power(id))
                     {
                         self.add_location_power(id, power);
                     }
@@ -2570,6 +2702,7 @@ impl<'a> Game<'a> {
             return;
         };
         if self.cards[card].abilities_removed
+            || (self.lanes[lane].revealed && self.lanes[lane].def.disables_on_reveal)
             || self.lanes[lane].cards.iter().any(|&id| {
                 self.cards[id].revealed
                     && self.ongoing_active(id)
@@ -2680,6 +2813,9 @@ impl<'a> Game<'a> {
                 self.players[seat].movable_cards_played.push(id);
             }
         }
+        // Card::ResolveForPlay @ 0x7cb9d90 can change the card's owner while
+        // resolving; the play remains attributed to the staging player.
+        let staging_owner = self.cards[id].owner;
         self.cards[id].latest_resolution_order = self.next_resolution_order;
         self.next_resolution_order += 1;
         self.trigger_on_reveal(id);
@@ -2702,10 +2838,10 @@ impl<'a> Game<'a> {
             }
         }
         if self.cards[id].turn_played > 0 {
-            self.players[self.cards[id].owner]
+            self.players[staging_owner]
                 .play_history
                 .push((self.turn, id));
-            let seat = self.cards[id].owner;
+            let seat = staging_owner;
             if let Some(play) = self.players[seat]
                 .staged_history
                 .iter_mut()
@@ -2837,6 +2973,25 @@ impl<'a> Game<'a> {
         Ok(result)
     }
 
+    /// DaredevilBehavior::ForceOpponentToStageFirst @ 0x7e87de0.
+    pub(crate) fn daredevil_viewer(&self) -> Option<usize> {
+        if self.turn != 5 || cards::reference_rules_enabled() {
+            return None;
+        }
+        let mut owners = [false; 2];
+        for &id in self.lanes.iter().flat_map(|lane| &lane.cards) {
+            let card = &self.cards[id];
+            if card.revealed && !card.abilities_removed && card.ability_def().id == "Daredevil" {
+                owners[card.owner] = true;
+            }
+        }
+        match owners {
+            [true, false] => Some(0),
+            [false, true] => Some(1),
+            _ => None,
+        }
+    }
+
     /// Play a new turn with player moves and activations enabled.
     pub fn play_turn_actions(
         &mut self,
@@ -2846,20 +3001,52 @@ impl<'a> Game<'a> {
         let priority = self.action_priority(None);
         let plans = {
             let mut rng = self.rng.borrow_mut();
-            [
-                policy.plan_actions(self, 0, &mut **rng),
-                policy.plan_actions(self, 1, &mut **rng),
-            ]
+            if let Some(viewer) = self.daredevil_viewer() {
+                let first = 1 - viewer;
+                let opponent = policy.plan_actions(self, first, &mut **rng);
+                let mut fork_rng = rng.clone_rng();
+                let mut view = self.fork(fork_rng.as_mut());
+                for &action in &opponent {
+                    view.stage_action(first, action)?;
+                }
+                let response = policy.plan_actions(&view, viewer, &mut **rng);
+                if viewer == 0 {
+                    [response, opponent]
+                } else {
+                    [opponent, response]
+                }
+            } else {
+                [
+                    policy.plan_actions(self, 0, &mut **rng),
+                    policy.plan_actions(self, 1, &mut **rng),
+                ]
+            }
         };
         self.resolve_action_plans(plans, priority)
     }
     pub fn play_turn_with_actions<F>(&mut self, mut planner: F) -> Result<TurnTrace, String>
     where
-        F: FnMut(&Game<'a>, usize, usize) -> Result<Vec<Action>, String>,
+        F: for<'b> FnMut(&Game<'b>, usize, usize) -> Result<Vec<Action>, String>,
     {
         self.begin_turn();
         let priority = self.action_priority(None);
-        let plans = [planner(self, 0, priority)?, planner(self, 1, priority)?];
+        let plans = if let Some(viewer) = self.daredevil_viewer() {
+            let first = 1 - viewer;
+            let opponent = planner(self, first, priority)?;
+            let mut rng = self.fork_rng();
+            let mut view = self.fork(rng.as_mut());
+            for &action in &opponent {
+                view.stage_action(first, action)?;
+            }
+            let response = planner(&view, viewer, priority)?;
+            if viewer == 0 {
+                [response, opponent]
+            } else {
+                [opponent, response]
+            }
+        } else {
+            [planner(self, 0, priority)?, planner(self, 1, priority)?]
+        };
         self.resolve_action_plans(plans, priority)
     }
 
@@ -2894,10 +3081,26 @@ impl<'a> Game<'a> {
         self.begin_turn();
         self.resolve_started_turn(None, |game, _| {
             let mut rng = game.rng.borrow_mut();
-            Ok([
-                policy.plan(game, 0, &mut **rng),
-                policy.plan(game, 1, &mut **rng),
-            ])
+            if let Some(viewer) = game.daredevil_viewer() {
+                let first = 1 - viewer;
+                let opponent = policy.plan(game, first, &mut **rng);
+                let mut fork_rng = rng.clone_rng();
+                let mut view = game.fork(fork_rng.as_mut());
+                for &(card, lane) in &opponent {
+                    view.stage_action(first, Action::Play { card, lane })?;
+                }
+                let response = policy.plan(&view, viewer, &mut **rng);
+                Ok(if viewer == 0 {
+                    [response, opponent]
+                } else {
+                    [opponent, response]
+                })
+            } else {
+                Ok([
+                    policy.plan(game, 0, &mut **rng),
+                    policy.plan(game, 1, &mut **rng),
+                ])
+            }
         })
         .expect("built-in policies always plan")
     }
@@ -2907,11 +3110,27 @@ impl<'a> Game<'a> {
     /// same RNG order as Python's turn loop). Plans hold arena card indices and lanes.
     pub fn play_turn_with<F>(&mut self, mut planner: F) -> Result<TurnTrace, String>
     where
-        F: FnMut(&Game<'a>, usize, usize) -> Result<Vec<(usize, usize)>, String>,
+        F: for<'b> FnMut(&Game<'b>, usize, usize) -> Result<Vec<(usize, usize)>, String>,
     {
         self.begin_turn();
         self.resolve_started_turn(None, |game, priority| {
-            Ok([planner(game, 0, priority)?, planner(game, 1, priority)?])
+            if let Some(viewer) = game.daredevil_viewer() {
+                let first = 1 - viewer;
+                let opponent = planner(game, first, priority)?;
+                let mut rng = game.fork_rng();
+                let mut view = game.fork(rng.as_mut());
+                for &(card, lane) in &opponent {
+                    view.stage_action(first, Action::Play { card, lane })?;
+                }
+                let response = planner(&view, viewer, priority)?;
+                Ok(if viewer == 0 {
+                    [response, opponent]
+                } else {
+                    [opponent, response]
+                })
+            } else {
+                Ok([planner(game, 0, priority)?, planner(game, 1, priority)?])
+            }
         })
     }
 
@@ -3018,6 +3237,11 @@ impl<'a> Game<'a> {
             for &id in &observers {
                 expire(self, id);
                 self.resolve_attached_watches(id);
+                if !self.cards[id].abilities_removed
+                    && let Some(hook) = self.cards[id].ability_def().pre_end_turn
+                {
+                    hook(self, id);
+                }
             }
         }
         for id in observers {

@@ -136,7 +136,7 @@ fn legal_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<
             }
             let card = game.players[0].hand[index];
             for lane in 0..3 {
-                if !game.can_play(card, lane, 0, energy, queued[lane]) {
+                if !game.can_play_with_count(card, lane, 0, energy, queued[lane], plays.len()) {
                     continue;
                 }
                 plays.push((index, lane));
