@@ -19,6 +19,7 @@ mod meta_e2;
 mod meta_f1;
 mod meta_f2;
 mod meta_f3;
+mod meta_g;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
@@ -56,6 +57,7 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_f1::TOKENS,
     meta_f2::TOKENS,
     meta_f3::TOKENS,
+    meta_g::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -349,6 +351,7 @@ static GROUPS: &[&[CardDef]] = &[
     meta_f1::CARDS,
     meta_f2::CARDS,
     meta_f3::CARDS,
+    meta_g::CARDS,
 ];
 
 /// Every registered card rule.

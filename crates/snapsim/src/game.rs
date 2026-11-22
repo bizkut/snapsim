@@ -1449,6 +1449,20 @@ impl<'a> Game<'a> {
             + queued
             < 4
     }
+    // SoulStoneBehavior::ProtectThanos (0x7f42b00) and
+    // SpaceStoneBehavior::MakeThanosUnrestrictedPlay (0x7f442cc).
+    fn thanos_stone_active(&self, card: usize, stone: &str) -> bool {
+        let target = &self.cards[card];
+        matches!(target.def.id, "Thanos" | "ThanosChampion")
+            && self.lanes.iter().flat_map(|lane| &lane.cards).any(|&id| {
+                let source = &self.cards[id];
+                source.owner == target.owner
+                    && source.revealed
+                    && source.has_ongoing()
+                    && source.ability_def().id == stone
+            })
+    }
+
     pub fn can_play(
         &self,
         card: usize,
@@ -1457,9 +1471,13 @@ impl<'a> Game<'a> {
         energy: i32,
         queued: usize,
     ) -> bool {
-        if self.card_cost(card) > energy
-            || !self.has_space(lane, seat, queued)
-            || self.lane_locked(lane)
+        if self.card_cost(card) > energy || !self.has_space(lane, seat, queued) {
+            return false;
+        }
+        if self.thanos_stone_active(card, "SpaceStone") {
+            return true;
+        }
+        if self.lane_locked(lane)
             || (!self.cards[card].abilities_removed
                 && self.cards[card]
                     .ability_def()
@@ -2069,6 +2087,9 @@ impl<'a> Game<'a> {
         true
     }
     pub fn discard_card(&mut self, seat: usize, card: usize) {
+        if self.thanos_stone_active(card, "SoulStone") {
+            return;
+        }
         let slot = self.players[seat]
             .hand
             .iter()
@@ -2142,6 +2163,9 @@ impl<'a> Game<'a> {
     }
 
     pub fn destroy_card(&mut self, card: usize) -> bool {
+        if self.cards[card].revealed && self.thanos_stone_active(card, "SoulStone") {
+            return false;
+        }
         let Some(lane) = self.cards[card].lane else {
             return false;
         };
