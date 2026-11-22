@@ -161,6 +161,7 @@ pub struct Card {
     pub observed_entity_id: Option<i64>,
     pub merged_to_entity_id: Option<i64>,
     pub permanent: i32,
+    pub base_power_override: Option<i32>,
     pub stat_updates: Vec<CardStatUpdate>,
     pub ongoing: i32,
     pub location_power: i32,
@@ -308,6 +309,8 @@ pub struct Player {
     pub play_history: Vec<(u8, usize)>,
     /// Snapshot of all staged plays, including those not yet resolved.
     pub staged_history: Vec<StagedPlay>,
+    /// Turn of a player-staged move or activation, even if resolution fails.
+    pub non_play_action_turn: Option<u8>,
     /// Turns on which this player snapped.
     pub snapped_turns: Vec<u8>,
     /// (turn, energy spent, all available energy spent).
@@ -418,6 +421,7 @@ pub enum Event {
 pub struct Game<'a> {
     pub cards: Vec<Card>,
     pub players: [Player; 2],
+    pub human_seat: Option<usize>,
     pub lanes: [Lane; 3],
     pub location_pool: Vec<&'static LocationDef>,
     pub next_resolution_order: u32,
@@ -429,6 +433,7 @@ pub struct Game<'a> {
     pub pending_plays: [Vec<(usize, usize)>; 2],
     pub played_on_reveal: [bool; 2],
     pub delays_reveals: bool,
+    pub(crate) ending_reveals: bool,
     pub delayed_reveals: [Vec<usize>; 2],
     pub(crate) deferred_added_reveals: Vec<usize>,
     /// Python's `current_location`: scheduled reveals consumed so far. A lane that a
@@ -464,6 +469,7 @@ impl<'a> Game<'a> {
         Game {
             cards: self.cards.clone(),
             players: self.players.clone(),
+            human_seat: self.human_seat,
             lanes: self.lanes.clone(),
             location_pool: self.location_pool.clone(),
             next_resolution_order: self.next_resolution_order,
@@ -475,6 +481,7 @@ impl<'a> Game<'a> {
             pending_plays: self.pending_plays.clone(),
             played_on_reveal: self.played_on_reveal,
             delays_reveals: self.delays_reveals,
+            ending_reveals: self.ending_reveals,
             delayed_reveals: self.delayed_reveals.clone(),
             deferred_added_reveals: self.deferred_added_reveals.clone(),
             current_location: self.current_location,
@@ -722,6 +729,53 @@ impl<'a> Game<'a> {
     pub fn set_power(&mut self, card: usize, value: i32, source: usize) {
         self.change_stat(card, Stat::Power, StatOperation::Set, value, source, false);
     }
+    /// QuantumRealmBehavior::SetCardPower (0x7d765ac) sets the base,
+    /// preserving the ordered permanent modifiers on top of it.
+    pub fn set_base_power(&mut self, card: usize, value: i32) {
+        if !self.is_character(card) {
+            return;
+        }
+        let target = &self.cards[card];
+        let old_base = target
+            .base_power_override
+            .unwrap_or(CATALOG[target.def.id].power);
+        let mut old = old_base;
+        let mut new = value;
+        for update in target
+            .stat_updates
+            .iter()
+            .filter(|u| !u.ongoing && u.stat == Stat::Power)
+        {
+            match update.operation {
+                StatOperation::Add => {
+                    old += update.value;
+                    new += update.value;
+                }
+                StatOperation::Multiply => {
+                    old *= update.value;
+                    new *= update.value;
+                }
+                StatOperation::Set => {
+                    old = update.value;
+                    new = update.value;
+                }
+            }
+        }
+        let delta = new - old;
+        if delta < 0 && !target.can_reduce_power() {
+            return;
+        }
+        self.cards[card].base_power_override = Some(value);
+        self.cards[card].permanent += delta;
+        if delta > 0 {
+            self.emit(Event::Empower {
+                card,
+                amount: delta,
+                operation: StatOperation::Set,
+                is_steal: false,
+            });
+        }
+    }
     pub fn multiply_power(&mut self, card: usize, factor: i32, source: usize) {
         self.change_stat(
             card,
@@ -807,6 +861,14 @@ impl<'a> Game<'a> {
         }
     }
 
+    /// IsleOfSilenceBehavior::DisableOngoing (0x7d5a9ec).
+    pub fn ongoing_active(&self, card: usize) -> bool {
+        self.cards[card].has_ongoing()
+            && self.cards[card].lane.is_none_or(|lane| {
+                !self.lanes[lane].revealed || !self.lanes[lane].def.disables_ongoing
+            })
+    }
+
     pub fn cost_change_allowed(&self, card: usize, old: i32, new: i32) -> bool {
         if !*HAS_COST_GUARDS {
             return true;
@@ -816,7 +878,7 @@ impl<'a> Game<'a> {
             .flat_map(|lane| lane.cards.iter().copied())
             .all(|id| {
                 !self.cards[id].revealed
-                    || !self.cards[id].has_ongoing()
+                    || !self.ongoing_active(id)
                     || self.cards[id]
                         .def
                         .cost_guard
@@ -928,6 +990,7 @@ impl<'a> Game<'a> {
     }
     pub fn reset_power(&mut self, card: usize) {
         let target = &mut self.cards[card];
+        target.base_power_override = None;
         target.permanent = CATALOG[target.def.id].power;
         target
             .stat_updates
@@ -1025,6 +1088,7 @@ impl<'a> Game<'a> {
                     observed_entity_id: None,
                     merged_to_entity_id: None,
                     permanent: data.power,
+                    base_power_override: None,
                     stat_updates: Vec::new(),
                     ongoing: 0,
                     location_power: 0,
@@ -1067,6 +1131,7 @@ impl<'a> Game<'a> {
         let mut game = Self {
             cards,
             players,
+            human_seat: None,
             lanes,
             location_pool: available,
             turn: 0,
@@ -1078,6 +1143,7 @@ impl<'a> Game<'a> {
             pending_plays: Default::default(),
             played_on_reveal: [false; 2],
             delays_reveals: false,
+            ending_reveals: false,
             delayed_reveals: Default::default(),
             deferred_added_reveals: Vec::new(),
             current_location: 0,
@@ -1148,6 +1214,7 @@ impl<'a> Game<'a> {
             temporary_hand_cost: None,
             cost: row.cost,
             permanent: row.power,
+            base_power_override: None,
             stat_updates: Vec::new(),
             created: true,
             created_by_card_id: None,
@@ -1186,6 +1253,7 @@ impl<'a> Game<'a> {
         let card = self.create_card(self.cards[source].def.id, owner);
         self.cards[card].cost = self.cards[source].cost;
         self.cards[card].permanent = self.cards[source].permanent;
+        self.cards[card].base_power_override = self.cards[source].base_power_override;
         self.cards[card].stat_updates = self.cards[source]
             .stat_updates
             .iter()
@@ -1290,6 +1358,7 @@ impl<'a> Game<'a> {
         target.abilities_removed = false;
         target.state = def.initial_state.map(|init| init());
         target.permanent = power;
+        target.base_power_override = None;
         target.cost = cost;
         target
             .attached_abilities
@@ -1332,6 +1401,7 @@ impl<'a> Game<'a> {
             .collect();
         let cost = self.cards[source].cost;
         let power = self.cards[source].permanent;
+        let base_power_override = self.cards[source].base_power_override;
         let replaced_card_def_id = self.cards[source].replaced_card_def_id;
         let removed = self.cards[source].abilities_removed;
         let target = &mut self.cards[card];
@@ -1344,6 +1414,7 @@ impl<'a> Game<'a> {
         target.stat_updates = updates;
         target.cost = cost;
         target.permanent = power;
+        target.base_power_override = base_power_override;
         target.abilities_removed = removed;
         target
             .attached_abilities
@@ -1358,7 +1429,7 @@ impl<'a> Game<'a> {
     pub fn lane_locked(&self, lane: usize) -> bool {
         self.lanes[lane].cards.iter().any(|&card| {
             self.cards[card].revealed
-                && self.cards[card].has_ongoing()
+                && self.ongoing_active(card)
                 && self.cards[card].ability_def().locks_lane
         })
     }
@@ -1541,6 +1612,12 @@ impl<'a> Game<'a> {
         {
             return false;
         }
+        if self.lanes[source].revealed
+            && let Some(test) = self.lanes[source].def.allows_move_from
+            && !test(self, source, card, destination, seat)
+        {
+            return false;
+        }
         if self.lanes[destination].revealed
             && let Some(test) = self.lanes[destination].def.allows_addition
             && !test(self, destination, card, destination, seat)
@@ -1573,6 +1650,7 @@ impl<'a> Game<'a> {
         if !self.move_card(card, destination) {
             return false;
         }
+        self.players[seat].non_play_action_turn = Some(self.turn);
         if self.cards[card].ability_def().move_limit > 0 {
             self.cards[card].player_moves_used =
                 self.cards[card].player_moves_used.saturating_add(1);
@@ -1638,6 +1716,7 @@ impl<'a> Game<'a> {
         self.set_energy(seat, self.players[seat].energy - def.activate_cost);
         self.players[seat].energy_spent_this_turn += def.activate_cost;
         self.cards[card].activated = true;
+        self.players[seat].non_play_action_turn = Some(self.turn);
         self.ongoing();
         if let Some(hook) = def.on_activate {
             hook(self, card);
@@ -1703,6 +1782,7 @@ impl<'a> Game<'a> {
                     .push(StagedAction { action });
             }
             Action::Move { card, lane } => {
+                self.players[seat].non_play_action_turn = Some(self.turn);
                 let from = self.cards[card].lane.unwrap();
                 let grant = self.matching_move_grant(card, seat).map(|index| {
                     let grant = &mut self.players[seat].move_grants[index];
@@ -1742,6 +1822,7 @@ impl<'a> Game<'a> {
                 self.ongoing();
             }
             Action::Activate { card } => {
+                self.players[seat].non_play_action_turn = Some(self.turn);
                 self.set_energy(seat, self.players[seat].energy - cost);
                 self.players[seat].energy_spent_this_turn += cost;
                 self.cards[card].activate_staged = true;
@@ -1753,9 +1834,22 @@ impl<'a> Game<'a> {
         }
     }
 
+    fn location_staging_end(&mut self) {
+        // JosiesBarBehavior::BuffUnrevealedCards (0x7d5b898) is registered
+        // on EndOfStagingTrigger before any staged cards resolve.
+        for lane in 0..self.lanes.len() {
+            if self.lanes[lane].revealed
+                && let Some(hook) = self.lanes[lane].def.on_staging_end
+            {
+                hook(self, lane);
+            }
+        }
+    }
+
     /// Resolve each player's staged actions in priority order and original stage order.
     pub fn resolve_staged_actions(&mut self, priority: usize) {
         self.is_wait_for_staging = false;
+        self.location_staging_end();
         let pending = std::mem::take(&mut self.delayed_reveals);
         for seat in [priority, 1 - priority] {
             for &card in &pending[seat] {
@@ -1806,6 +1900,12 @@ impl<'a> Game<'a> {
             || destination >= 3
             || source == destination
             || !self.has_space(destination, self.cards[card].owner, 0)
+        {
+            return false;
+        }
+        if self.lanes[source].revealed
+            && let Some(test) = self.lanes[source].def.allows_move_from
+            && !test(self, source, card, destination, self.cards[card].owner)
         {
             return false;
         }
@@ -1877,7 +1977,7 @@ impl<'a> Game<'a> {
         !*HAS_SPAWN_BLOCKERS
             || !self.lanes.iter().flat_map(|lane| &lane.cards).any(|&id| {
                 self.cards[id].revealed
-                    && self.cards[id].has_ongoing()
+                    && self.ongoing_active(id)
                     && self.cards[id].ability_def().blocks_spawns
             })
     }
@@ -2178,7 +2278,7 @@ impl<'a> Game<'a> {
         }
         if self.lanes[lane].cards.iter().any(|&id| {
             self.cards[id].revealed
-                && self.cards[id].has_ongoing()
+                && self.ongoing_active(id)
                 && self.cards[id].ability_def().prevents_destroy
         }) {
             return false;
@@ -2222,6 +2322,15 @@ impl<'a> Game<'a> {
     pub fn draw(&mut self, seat: usize) {
         if self.players[seat].hand.len() >= 7 {
             return;
+        }
+        for lane in 0..3 {
+            if self.lanes[lane].revealed
+                && let Some(hook) = self.lanes[lane].def.before_draw
+                && let Some(card) = hook(self, lane, seat)
+            {
+                self.add_hand(seat, card, true);
+                return;
+            }
         }
         if let Some(slot) = self.next_draw_slot(seat) {
             let card = self.players[seat].deck.remove(slot);
@@ -2360,6 +2469,9 @@ impl<'a> Game<'a> {
             }
         }
         for lane in 0..3 {
+            if self.lanes[lane].revealed && self.lanes[lane].def.disables_ongoing {
+                continue;
+            }
             let base = if self.lanes[lane].revealed {
                 usize::from(self.lanes[lane].def.ongoing_repeats)
             } else {
@@ -2404,6 +2516,9 @@ impl<'a> Game<'a> {
             }
         }
         for lane in 0..3 {
+            if self.lanes[lane].revealed && self.lanes[lane].def.disables_ongoing {
+                continue;
+            }
             let base = if self.lanes[lane].revealed {
                 usize::from(self.lanes[lane].def.ongoing_repeats)
             } else {
@@ -2457,7 +2572,7 @@ impl<'a> Game<'a> {
         if self.cards[card].abilities_removed
             || self.lanes[lane].cards.iter().any(|&id| {
                 self.cards[id].revealed
-                    && self.cards[id].has_ongoing()
+                    && self.ongoing_active(id)
                     && self.cards[id].ability_def().blocks_reveal
             })
         {
@@ -2475,7 +2590,7 @@ impl<'a> Game<'a> {
             1
         };
         for &source in &self.lanes[lane].cards {
-            if !self.cards[source].revealed || !self.cards[source].has_ongoing() {
+            if !self.cards[source].revealed || !self.ongoing_active(source) {
                 continue;
             }
             if let Some(repetitions) = self.cards[source].ability_def().reveal_repetitions {
@@ -2487,7 +2602,7 @@ impl<'a> Game<'a> {
                     .filter(|&other| {
                         other != source
                             && self.cards[other].revealed
-                            && self.cards[other].has_ongoing()
+                            && self.ongoing_active(other)
                             && self.cards[other].owner == self.cards[source].owner
                     })
                     .map(|other| usize::from(self.cards[other].ability_def().extra_ongoing_runs))
@@ -2510,7 +2625,13 @@ impl<'a> Game<'a> {
         if self.cards[id].revealed {
             return;
         }
-        if self.delays_reveals {
+        // DarkDimensionBehavior::MakeCardsHidden @ 0x7d4d94c stops
+        // hiding cards once the client enters EndGame.
+        if self.delays_reveals
+            || (!self.ending_reveals
+                && self.lanes[lane].revealed
+                && self.lanes[lane].def.delays_reveals_until_end)
+        {
             let pending = &mut self.delayed_reveals[self.cards[id].owner];
             if !pending.contains(&id) {
                 pending.push(id);
@@ -2818,9 +2939,23 @@ impl<'a> Game<'a> {
     /// Resolve all remaining face-down cards at the completed game boundary.
     pub fn finish_reveals(&mut self) {
         self.delays_reveals = false;
+        self.ending_reveals = true;
         let pending = std::mem::take(&mut self.delayed_reveals);
-        for seat in pending {
-            for id in seat {
+        // EndTurn::GetOrderedStagedCardsThisGameForResolve @ 0x7e0a8e0
+        // enumerates players in resolution order. Preserve the reference order
+        // when no persistent lane delay was involved.
+        let persistent = pending.iter().flatten().any(|&card| {
+            self.cards[card].lane.is_some_and(|lane| {
+                self.lanes[lane].revealed && self.lanes[lane].def.delays_reveals_until_end
+            })
+        });
+        let first = if persistent {
+            self.reveal_priority.unwrap_or(0)
+        } else {
+            0
+        };
+        for seat in [first, 1 - first] {
+            for &id in &pending[seat] {
                 self.reveal(id);
             }
         }
@@ -2833,6 +2968,7 @@ impl<'a> Game<'a> {
         for id in unresolved {
             self.reveal(id);
         }
+        self.ending_reveals = false;
     }
 
     /// Dispatch card-owned proximity triggers independently of current text.
@@ -2986,6 +3122,7 @@ impl<'a> Game<'a> {
             self.ongoing();
         }
         self.is_wait_for_staging = false;
+        self.location_staging_end();
         for seat in [priority, 1 - priority] {
             for &id in &pending[seat] {
                 self.reveal(id);

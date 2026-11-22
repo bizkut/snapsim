@@ -133,6 +133,7 @@ pub fn coverage(position: &Position) -> Value {
         .collect();
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
+    let mut extra_state = BTreeSet::new();
     for id in &position.opponent.seen {
         if matches!(id.as_str(), "IronFist" | "Enchantress") {
             state.insert(id.as_str());
@@ -200,12 +201,34 @@ pub fn coverage(position: &Position) -> Value {
         }
         if let Some(id) = &lane.id {
             loc_ids.insert(id.as_str());
+            if id == "TimeTheater" && position.turn < position.total_turns {
+                if !position.deck.is_empty() && position.hand.len() < 7 {
+                    extra_state.insert("Time Theater use unknown for seat 0".to_owned());
+                }
+                if position.opponent.deck > 0 && position.opponent.hand < 7 {
+                    extra_state.insert("Time Theater use unknown for seat 1".to_owned());
+                }
+            }
+            if id == "QuantumRealm" {
+                for (_, card) in &refs {
+                    if card.revealed
+                        && card.played_turn.is_none_or(|turn| {
+                            turn < position.turn
+                                && lane.revealed_turn.is_none_or(|reveal| turn >= reveal)
+                        })
+                    {
+                        extra_state.insert(format!("Quantum Realm base unknown for {}", card.id));
+                    }
+                }
+            }
             if (lane.revealed_turn.is_none()
                 && matches!(
                     id.as_str(),
                     "Lemuria" | "Sakaar" | "TinkerersWorkshop" | "ProjectPegasus"
                 ))
                 || (id == "OttosLab" && lane.ottos_lab_spent.is_none())
+                // These per-player trigger/action histories are not in live observations.
+                || matches!(id.as_str(), "Vormir" | "CollapsedMine")
             {
                 state.insert(id.as_str());
             }
@@ -226,5 +249,10 @@ pub fn coverage(position: &Position) -> Value {
     let hidden = position.opponent.hand + position.opponent.deck + face_down;
     let unseen = opponent_candidates(position).1.len();
     let opponent = (hidden > unseen).then(|| json!({"hidden":hidden,"unseen_in_pool":unseen}));
+    let state: BTreeSet<String> = state
+        .into_iter()
+        .map(str::to_owned)
+        .chain(extra_state)
+        .collect();
     json!({"cards":unknown_cards,"locations":unknown_locations,"state":state,"deck":deck,"opponent":opponent,"face_down":if delayed || face_down == 0 {None} else {Some(face_down)}})
 }

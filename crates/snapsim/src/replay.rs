@@ -15,6 +15,9 @@ pub struct BoardCard {
     pub cost: Value,
     pub flipped: Value,
     pub staged: Value,
+    pub created_by_location: Value,
+    /// Reader ledger is only public after the opponent's card is revealed.
+    pub stat_updates: Value,
 }
 
 /// One valid observation with the visibility history known at that point.
@@ -139,6 +142,16 @@ pub fn matches(
                     },
                     staged: if owner == 0 {
                         card["staged_turn"].clone()
+                    } else {
+                        Value::Null
+                    },
+                    created_by_location: if revealed || owner == 0 {
+                        card["created_by_location_id"].clone()
+                    } else {
+                        Value::Null
+                    },
+                    stat_updates: if revealed || owner == 0 {
+                        card["stat_updates"].clone()
                     } else {
                         Value::Null
                     },
@@ -613,6 +626,101 @@ mod tests {
         .unwrap();
         assert_eq!(rows[0].status, super::Status::Uncheckable);
         assert!(rows[0].detail.contains("Maverick's pending"));
+    }
+
+    #[test]
+    fn ta_lo_hidden_hand_power_is_not_reported_as_rule_failure() {
+        let mut prior = observation(1, "talo", false);
+        prior["game"]["locations"][0]["location_id"] = json!("TaLo");
+        prior["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut start = prior.clone();
+        start["game"]["turn"] = json!(2);
+        start["game"]["locations"][1]["location_id"] = json!("Ruins");
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "card_id": "Hulk",
+            "revealed": true, "power": 15, "turn_revealed": 2
+        }]);
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][2]["location_id"] = json!("Ruins");
+        let rows = check_observations(
+            vec![
+                (1, prior),
+                (2, start),
+                (3, submitted),
+                (4, revealed),
+                (5, next),
+            ],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(rows[1].status, super::Status::Uncheckable);
+        assert!(rows[1].detail.contains("Ta Lo"));
+    }
+
+    fn hidden_power_case(updates: Value, power: i32) -> Vec<super::ResultRow> {
+        let mut start = observation(2, "hidden-power", false);
+        start["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 35, "owner_entity_id": 2, "card_id": "Surge",
+            "revealed": true, "power": 1, "turn_revealed": 1
+        }]);
+        start["game"]["locations"][1]["location_id"] = json!("Ruins");
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "card_id": "Agony",
+            "revealed": true, "power": power, "turn_revealed": 2,
+            "stat_updates": updates
+        }]);
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][2]["location_id"] = json!("Ruins");
+        check_observations(
+            vec![(1, start), (2, submitted), (3, revealed), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn hidden_deck_buff_is_recovered_from_revealed_ledger() {
+        let rows = hidden_power_case(
+            json!([{
+                "stat": "Power", "update": "Add", "value": 1,
+                "updater_card_id": "Surge"
+            }]),
+            3,
+        );
+        assert_eq!(rows[0].status, super::Status::Consistent);
+    }
+
+    #[test]
+    fn hidden_ambiguous_set_is_not_guessed() {
+        let rows = hidden_power_case(
+            json!([{
+                "stat": "Power", "update": "Set", "value": 6
+            }]),
+            6,
+        );
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("cannot be timed"));
     }
 
     #[test]

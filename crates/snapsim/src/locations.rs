@@ -4,6 +4,9 @@ use crate::game::Game;
 mod locations_b;
 mod locations_b_extra;
 mod locations_c;
+mod locations_d1;
+mod locations_d2;
+mod locations_d3;
 mod recruit_a;
 mod turns;
 
@@ -13,6 +16,7 @@ pub type MoveHook = fn(&mut Game<'_>, usize, usize, usize);
 pub type PlayPredicate = fn(&Game<'_>, usize, usize, usize, usize) -> bool;
 pub type EnergyHook = fn(&Game<'_>, usize, usize) -> i32;
 pub type CostHook = fn(&Game<'_>, usize, usize, i32) -> i32;
+pub type DrawHook = fn(&mut Game<'_>, usize, usize) -> Option<usize>;
 
 pub struct LocationDef {
     pub id: &'static str,
@@ -23,8 +27,11 @@ pub struct LocationDef {
     pub no_destroy: bool,
     pub blocks_activate: bool,
     pub delays_reveals: bool,
+    pub delays_reveals_until_end: bool,
+    pub disables_ongoing: bool,
     pub on_reveal: Option<LocationHook>,
     pub on_turn_start: Option<LocationHook>,
+    pub on_staging_end: Option<LocationHook>,
     pub on_turn_end: Option<LocationHook>,
     pub ongoing: Option<LocationHook>,
     pub before_card_reveal: Option<CardHook>,
@@ -35,6 +42,8 @@ pub struct LocationDef {
     pub allows_play: Option<PlayPredicate>,
     pub allows_play_elsewhere: Option<PlayPredicate>,
     pub allows_addition: Option<PlayPredicate>,
+    pub allows_move_from: Option<PlayPredicate>,
+    pub before_draw: Option<DrawHook>,
     pub grants_move_to: Option<PlayPredicate>,
     pub energy_bonus: Option<EnergyHook>,
     pub modify_cost: Option<CostHook>,
@@ -58,8 +67,11 @@ pub(crate) const fn location(
         no_destroy,
         blocks_activate: false,
         delays_reveals: false,
+        delays_reveals_until_end: false,
+        disables_ongoing: false,
         on_reveal: None,
         on_turn_start: None,
+        on_staging_end: None,
         on_turn_end: None,
         ongoing: None,
         before_card_reveal: None,
@@ -70,6 +82,8 @@ pub(crate) const fn location(
         allows_play: None,
         allows_play_elsewhere: None,
         allows_addition: None,
+        allows_move_from: None,
+        before_draw: None,
         grants_move_to: None,
         energy_bonus: None,
         modify_cost: None,
@@ -174,6 +188,29 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_c::NEW_YORK,
     locations_c::PYRAMID_OF_RAMA_TUT,
     locations_c::ASTEROID_M,
+    // locations_d1 (append below)
+    locations_d1::CELESTIAL_CIRCUIT,
+    locations_d1::DEATHS_DOMAIN,
+    locations_d1::ISLAND_PRISON,
+    locations_d1::ISLE_OF_SILENCE,
+    locations_d1::QUANTUM_REALM,
+    locations_d1::SUBTERRANEA_TUTORIAL,
+    locations_d1::TIME_THEATER,
+    // locations_d2 (append below)
+    locations_d2::VORMIR,
+    locations_d2::WORLD_FORGE,
+    locations_d2::CAVE_OF_THE_DRAGON,
+    locations_d2::COLLAPSED_MINE,
+    locations_d2::DARK_DIMENSION,
+    locations_d2::BIFROST,
+    locations_d2::BOARDWALK,
+    // locations_d3 (append below)
+    locations_d3::CHRONOSPHERE_SPHINX,
+    locations_d3::CRIMSON_CITADEL,
+    locations_d3::HALA,
+    locations_d3::JOSIES_BAR,
+    locations_d3::KLYNTAR,
+    locations_d3::TA_LO,
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {

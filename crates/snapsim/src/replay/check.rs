@@ -3,6 +3,14 @@ use crate::{cards, locations};
 use serde_json::Value;
 use std::{collections::BTreeSet, fs, path::Path};
 
+fn theater_unknown(_reveal: Option<i64>, turn: i64, target_turn: i64, can_draw: bool) -> bool {
+    target_turn > turn && can_draw
+}
+
+fn quantum_unknown(reveal: Option<i64>, played: Option<i64>, turn: i64) -> bool {
+    played.is_none_or(|played| played < turn && reveal.is_none_or(|r| played >= r))
+}
+
 fn io_error(path: &Path, error: std::io::Error) -> String {
     if let Some(code) = error.raw_os_error() {
         let message = error.to_string();
@@ -153,6 +161,58 @@ pub fn check_observations(
                 {
                     return Err("target has revealed cards with no recorded power".into());
                 }
+                for (lane, id) in start.locations.iter().enumerate() {
+                    if id == "TimeTheater"
+                        && theater_unknown(
+                            start.location_turns[lane].as_i64(),
+                            start.turn,
+                            target.turn,
+                            (0..2)
+                                .any(|seat| start.deck_counts[seat].as_u64().is_none_or(|n| n > 0)),
+                        )
+                    {
+                        return Err("Time Theater per-player draw use is not recorded".into());
+                    }
+                    if id == "QuantumRealm"
+                        && start.board.iter().any(|card| {
+                            card.lane == lane
+                                && card.revealed
+                                && quantum_unknown(
+                                    start.location_turns[lane].as_i64(),
+                                    card.flipped.as_i64(),
+                                    start.turn,
+                                )
+                        })
+                    {
+                        return Err("Quantum Realm card base power is not recorded".into());
+                    }
+                }
+                // Player::HasSkippedTurn also checks staged moves and activations;
+                // recordings do not expose a complete action history.
+                if start.locations.iter().any(|id| id == "CollapsedMine")
+                    && start
+                        .board
+                        .iter()
+                        .any(|card| card.revealed && card.id == "Rock")
+                {
+                    return Err("Collapsed Mine skip actions are not fully recorded".into());
+                }
+                // The location's trigger consumption is not part of snapshots.
+                if start
+                    .locations
+                    .iter()
+                    .zip(&start.location_turns)
+                    .any(|(id, revealed)| {
+                        id == "Vormir" && revealed.as_i64().is_none_or(|t| t < turn)
+                    })
+                {
+                    return Err("Vormir's per-player trigger state is not recorded".into());
+                }
+                // Target is a next-turn planning frame, after World Forge's
+                // start-of-turn morph and any replacement's reveal effects.
+                if target.turn != turn && start.locations.iter().any(|id| id == "WorldForge") {
+                    return Err("World Forge changes the board at the next turn start".into());
+                }
                 for card in &start.board {
                     if !card.revealed {
                         let first = frames
@@ -218,6 +278,23 @@ pub fn check_observations(
                             .any(|play| play.card.owner == card.owner)
                 }) {
                     return Err("Maverick's pending next-card effect is not observable at the start of the turn".into());
+                }
+                // TaLoBehavior::PlayCards (0x7d87688) can alter a hidden
+                // opponent hand card on a previous turn; its identity and
+                // accumulated power are not recorded until it is played.
+                if staged.plays.iter().any(|play| play.card.owner == 1)
+                    && frames.iter().any(|frame| {
+                        frame.turn < turn
+                            && frame.locations.iter().zip(&frame.location_turns).any(
+                                |(id, revealed)| {
+                                    id == "TaLo"
+                                        && revealed.as_i64().is_some_and(|t| t <= frame.turn)
+                                },
+                            )
+                            && frame.hand_counts[1].as_i64().is_none_or(|count| count > 0)
+                    })
+                {
+                    return Err("Ta Lo may have buffed an unobserved opponent hand card".into());
                 }
                 let mut best = None;
                 for seed in 0..seeds {
@@ -329,4 +406,24 @@ pub fn check_observations(
         }
     }
     Ok(output)
+}
+#[cfg(test)]
+mod location_state_tests {
+    use super::{quantum_unknown, theater_unknown};
+
+    #[test]
+    fn theater_old_reveal_needs_unknown_draw_context() {
+        assert!(theater_unknown(Some(2), 3, 4, true));
+        assert!(theater_unknown(Some(3), 3, 4, true));
+        assert!(!theater_unknown(Some(2), 3, 3, true));
+        assert!(!theater_unknown(Some(2), 3, 4, false));
+    }
+
+    #[test]
+    fn quantum_old_play_needs_unknown_base() {
+        assert!(quantum_unknown(Some(2), Some(2), 3));
+        assert!(quantum_unknown(Some(2), None, 3));
+        assert!(!quantum_unknown(Some(2), Some(1), 3));
+        assert!(!quantum_unknown(Some(2), Some(3), 3));
+    }
 }

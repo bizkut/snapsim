@@ -223,6 +223,7 @@ pub(crate) fn all_locations(recruit: bool) -> Vec<String> {
     let mut ids: Vec<_> = locations::REGISTRY
         .iter()
         .filter(|d| !pinned || REFERENCE_LOCATIONS.contains(&d.id))
+        .filter(|d| d.id != "SubterraneaTutorial")
         .filter(|d| {
             !recruit
                 || LOCATION_DATA.get(d.id).is_some_and(|x| {
@@ -270,6 +271,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         observed_entity_id: None,
         merged_to_entity_id: None,
         permanent: row.power,
+        base_power_override: None,
         stat_updates: Vec::new(),
         ongoing: 0,
         location_power: 0,
@@ -566,6 +568,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     let mut game = Game {
         cards: Vec::new(),
         players: [Player::default(), Player::default()],
+        human_seat: Some(0),
         lanes,
         location_pool: all_locations(position.mode.as_deref() == Some("recruit"))
             .iter()
@@ -580,6 +583,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         pending_plays: Default::default(),
         played_on_reveal: [false; 2],
         delays_reveals: false,
+        ending_reveals: false,
         delayed_reveals: Default::default(),
         deferred_added_reveals: Vec::new(),
         current_location: 0,

@@ -22,6 +22,105 @@ fn sample(pool: &[String], count: usize, rng: &mut PythonRandom) -> Vec<String> 
 fn number(value: &Value) -> Option<i32> {
     value.as_i64().and_then(|n| i32::try_from(n).ok())
 }
+
+/// Recover only modifications proven to predate this turn; the first visible
+/// ledger may also contain effects produced by the current resolution.
+fn hidden_preplay_power(
+    play: &super::Play,
+    staged: &Staging<'_>,
+    frames: &[Frame],
+    initial: i32,
+) -> Result<Option<i32>, String> {
+    // The frozen reference samples hidden pre-play power; parity gates keep that.
+    if crate::cards::reference_rules_enabled() {
+        return Ok(None);
+    }
+    let Some(visible) = frames
+        .iter()
+        .find_map(|frame| entity(frame, &play.card.entity).filter(|card| card.revealed))
+    else {
+        return Ok(None);
+    };
+    let Some(updates) = visible.stat_updates.as_array() else {
+        return Ok(None);
+    };
+    let prior = |update: &Value| {
+        let source = update["updater_card_id"].as_str();
+        matches!(
+            source,
+            Some("Surge" | "AmericaChavez" | "MrFantasticFirstSteps")
+        ) && staged.before.board.iter().any(|card| {
+            card.owner == play.card.owner && card.revealed && card.id == update["updater_card_id"]
+        }) && (source == Some("MrFantasticFirstSteps")
+            || !staged.plays.iter().any(|other| {
+                if other.card.owner != play.card.owner || other.flip_line >= play.flip_line {
+                    return false;
+                }
+                if other.id == "Odin" {
+                    return true;
+                }
+                source == Some("Surge")
+                    && frames
+                        .iter()
+                        .find_map(|frame| {
+                            entity(frame, &other.card.entity).filter(|card| card.revealed)
+                        })
+                        .and_then(|card| card.stat_updates.as_array())
+                        .is_none_or(|ledger| {
+                            ledger
+                                .iter()
+                                .any(|entry| entry["updater_card_id"] == "Surge")
+                        })
+            }))
+    };
+    let mut power = initial;
+    for (index, update) in updates.iter().enumerate() {
+        if update["stat"] != "Power" {
+            continue;
+        }
+        let current = update["updater_card_id"].as_str().is_some_and(|source| {
+            staged.plays.iter().any(|other| {
+                other.card.owner == play.card.owner
+                    && other.id == source
+                    && other.flip_line <= play.flip_line
+            })
+        });
+        if current {
+            continue;
+        }
+        let anonymous_set = update["update"] == "Set"
+            && update["updater_card_id"].is_null()
+            && update["updater_location_id"].is_null();
+        // A later proven pre-turn update orders an otherwise anonymous Set.
+        let before_turn = prior(update) || anonymous_set && updates[index + 1..].iter().any(prior);
+        if !before_turn {
+            return Err(format!(
+                "pre-play Power update for {} [{}] cannot be timed from the recorded ledger",
+                label(&play.id),
+                label(&play.card.entity)
+            ));
+        }
+        let value = number(&update["value"]).ok_or_else(|| {
+            format!(
+                "invalid pre-play Power update for {} [{}]",
+                label(&play.id),
+                label(&play.card.entity)
+            )
+        })?;
+        match update["update"].as_str() {
+            Some("Add") => power += value,
+            Some("Set") => power = value,
+            _ => {
+                return Err(format!(
+                    "unsupported pre-play Power operation for {} [{}]",
+                    label(&play.id),
+                    label(&play.card.entity)
+                ));
+            }
+        }
+    }
+    Ok(Some(power))
+}
 fn make(id: &str, owner: usize, cost: &Value, power: &Value) -> Result<crate::game::Card, String> {
     if crate::cards::get(id).is_none() {
         return Err(format!("no card rules for {id}"));
@@ -158,6 +257,7 @@ pub(super) fn simulate(
     let mut game = Game {
         cards: Vec::new(),
         players: [Player::default(), Player::default()],
+        human_seat: Some(0),
         lanes,
         location_pool: position::all_locations(start.recruit)
             .iter()
@@ -176,6 +276,7 @@ pub(super) fn simulate(
             .iter()
             .zip(&start.location_turns)
             .any(|(id, turn)| id == "Lemuria" && turn.as_i64() == Some(start.turn)),
+        ending_reveals: false,
         delayed_reveals: Default::default(),
         deferred_added_reveals: Vec::new(),
         current_location,
@@ -385,6 +486,22 @@ pub(super) fn simulate(
     game.players[1]
         .hand
         .truncate(staged.opponent_count.max(0) as usize);
+    // A resolved Morph's observed identity proves that card was in the
+    // opposing hand when it resolved. Include it in the sampled hand rather
+    // than hoping a small seed budget rediscovers a now-large card pool.
+    // The frozen reference samples without this evidence; parity gates keep that.
+    if !crate::cards::reference_rules_enabled()
+        && let Some(observed) = staged.plays.iter().find_map(|play| {
+            (play.card.owner == 0 && play.id == "Morph")
+                .then(|| entity(target, &play.card.entity))
+                .flatten()
+                .and_then(|card| card.id.as_str())
+                .filter(|id| *id != "Morph" && crate::cards::get(id).is_some())
+        })
+        && let Some(&slot) = game.players[1].hand.first()
+    {
+        game.cards[slot] = make(observed, 1, &Value::Null, &Value::Null)?;
+    }
     for (entity_id, lane) in &staged.moves {
         let index = cards.iter().find(|(id, _)| id == entity_id).unwrap().1;
         if !game.move_card(index, *lane) {
@@ -402,13 +519,27 @@ pub(super) fn simulate(
         let id = play.id.as_str().ok_or("missing card_id")?;
         let index = push(&mut game, id, play.card.owner, &play.cost, &play.power)?;
         if play.card.owner == 1 {
-            game.cards[index].permanent +=
-                2 * hidden_rng.randint(0, history.embassy_reveals as i64) as i32;
-            if history.chavez_reveals > 0
-                && hidden_rng.randrange(0, start.hand_counts[1].as_i64().unwrap_or(0).max(1), 1)
-                    == 0
+            // PyramidOfRamaTutBehavior::AddRock (0x7d75c10) sets the
+            // generated Rock's power to 3; use its visible provenance.
+            if id == "Rock"
+                && entity(target, &play.card.entity)
+                    .is_some_and(|card| card.created_by_location == "PyramidOfRamaTut")
             {
-                game.cards[index].permanent += 3;
+                game.set_power(index, 3, 1);
+            }
+            if let Some(power) =
+                hidden_preplay_power(play, staged, frames, game.cards[index].permanent)?
+            {
+                game.cards[index].permanent = power;
+            } else {
+                game.cards[index].permanent +=
+                    2 * hidden_rng.randint(0, history.embassy_reveals as i64) as i32;
+                if history.chavez_reveals > 0
+                    && hidden_rng.randrange(0, start.hand_counts[1].as_i64().unwrap_or(0).max(1), 1)
+                        == 0
+                {
+                    game.cards[index].permanent += 3;
+                }
             }
         }
         game.cards[index].lane = Some(play.card.lane);
