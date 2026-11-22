@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Extract Rama-Tut's fixed 59.15.1 whitelist and captured resolve-capable IDs.
+
+The client hard-codes IDs in GetPastYearsCards (0x7f1f418), not series dates.
+Its predicate at 0x7f22580 requires a ThisCardResolvedTrigger; the generic
+random pool additionally requires EnabledDate <= game StartTimestamp, a date
+other than DateTime.MaxValue, and ExcludedFromInGameRandomPool == false.
+The captured EnabledDate values are all zero. CardDef iteration order follows
+the captured JSON order; verify that order against the live client for RNG parity.
+
+Usage: python3 parity/generate_past_years_pool.py CLIENT_DIR START_UTC
+START_UTC is an ISO-8601 game-start timestamp with an explicit UTC offset.
+CLIENT_DIR contains libil2cpp.so, rules/{carddefs,defs}.json and dump/.
+Requires an AArch64-capable objdump. Game configuration can further restrict
+the pool; this output reflects the captured definitions, not such overrides.
+"""
+import argparse
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import re
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('client_dir', type=Path)
+parser.add_argument('start_utc', help='game start as ISO-8601 timestamp, e.g. 2026-11-19T00:00:00Z')
+args = parser.parse_args()
+client = args.client_dir
+start_time = datetime.fromisoformat(args.start_utc.replace('Z', '+00:00'))
+if start_time.tzinfo is None:
+    parser.error('start_utc must include a timezone')
+start_time = start_time.astimezone(timezone.utc).replace(tzinfo=None)
+delta = start_time - datetime(1, 1, 1)
+start_ticks = (delta.days * 86400 + delta.seconds) * 10_000_000 + delta.microseconds * 10
+carddefs = json.loads((client / 'rules/carddefs.json').read_text())
+behaviors = json.loads((client / 'rules/defs.json').read_text())
+dump = (client / 'dump/com.nvsgames.snap/59.15.1/SecondDinner/CubeDef.cs').read_text()
+# Limit to CardDef's nested Id class: the offsets in that class index static fields.
+start = dump.index('static /*0x130*/ CubeDef.Id<CubeDef.CardDef> Abomination;')
+start = dump.rfind('class Id', 0, start)
+end = dump.index('\n        }', start)
+fields = dict((int(offset, 16), name) for offset, name in re.findall(
+    r'static /\*(0x[0-9a-f]+)\*/ CubeDef\.Id<CubeDef\.CardDef> (\w+);', dump[start:end]))
+assembly = subprocess.check_output([
+    'objdump', '-d', '--no-show-raw-insn', '--start-address=0x7f1f508',
+    '--stop-address=0x7f21ed8', str(client / 'libil2cpp.so')], text=True)
+offsets = [int(offset, 16) for offset in re.findall(r'ldr\s+x1, \[x9, #(0x[0-9a-f]+)\]', assembly)]
+if len(offsets) < 100 or any(offset not in fields for offset in offsets):
+    raise ValueError('Could not recover the expected static ID loads from this client')
+whitelist = {fields[offset] for offset in offsets}
+missing = whitelist - carddefs.keys()
+if missing:
+    raise ValueError(f'Captured card definitions missing whitelist IDs: {sorted(missing)}')
+
+
+def eligible(card):
+    ticks = int(card['EnabledDate']['_dateData']) & 0x3fffffffffffffff
+    return (not card['ExcludedFromInGameRandomPool']
+            and ticks != 3155378975999999999 and ticks <= start_ticks)
+
+
+ids = [card_id for card_id, card in carddefs.items() if card_id in whitelist and eligible(card) and any(
+    ability.get('class') == 'CubeGame.TriggerAbilityDef'
+    and ability.get('TriggerType') == 'CubeGame.ThisCardResolvedTrigger'
+    for ability in behaviors.get(card_id, {}).get('Abilities', []) or [])]
+(ROOT / 'data/past_years_pool.json').write_text(json.dumps(ids, indent=2) + '\n')
+print(f'{len(offsets)} whitelist entries, {len(whitelist)} unique; {len(ids)} resolve-capable IDs')
