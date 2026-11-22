@@ -609,6 +609,16 @@ fn stake_estimate(
         .ok_or_else(|| "stake estimate unavailable".to_owned())
 }
 
+/// Whether snaps may raise the stake. In the owner's recordings RankedRecruit matches stayed at
+/// stake 1 with no projected raise (7 matches, 702 frames, 2026-11-22), so Recruit mode forbids
+/// raising unless `stake_prevent_raise` is given explicitly.
+fn stake_can_raise(mode: Option<&str>, args: &Value) -> bool {
+    !args
+        .get("stake_prevent_raise")
+        .and_then(Value::as_bool)
+        .unwrap_or(mode == Some("recruit"))
+}
+
 fn stake_game(
     decks: &[Vec<String>; 2],
     seed: i128,
@@ -649,10 +659,7 @@ fn stake_game(
         current: initial,
         next: initial_next,
         maximum,
-        can_raise: !args
-            .get("stake_prevent_raise")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        can_raise: stake_can_raise(mode, args),
         player_multiplier: [1; 2],
         end_game_multiplier: 1,
         game_multiplier: 1,
@@ -1029,6 +1036,43 @@ mod tests {
         let first = super::compare(&options).unwrap();
         let second = super::compare(&options).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn recruit_stakes_cannot_be_raised_by_default() {
+        // Recorded RankedRecruit matches never raise the stake, so a snapping policy must play
+        // exactly like a never-snapping one there unless raising is explicitly allowed.
+        let base = json!({"stakes": true, "mode": "recruit", "games": 2, "workers": 1,
+            "rollouts": 2, "seed": 19});
+        let mut snapping = base.clone();
+        snapping["a_snap_threshold"] = json!(0.0);
+        let never = super::compare(&base).unwrap();
+        let fixed = super::compare(&snapping).unwrap();
+        assert_eq!(fixed["paired"], never["paired"]);
+        snapping["stake_prevent_raise"] = json!(true);
+        assert_eq!(
+            super::compare(&snapping).unwrap()["paired"],
+            never["paired"]
+        );
+    }
+
+    #[test]
+    fn stake_raise_setting_defaults_by_mode_and_honours_overrides() {
+        use super::stake_can_raise;
+        assert!(!stake_can_raise(Some("recruit"), &json!({})));
+        assert!(!stake_can_raise(
+            Some("recruit"),
+            &json!({"stake_prevent_raise": null})
+        ));
+        assert!(stake_can_raise(
+            Some("recruit"),
+            &json!({"stake_prevent_raise": false})
+        ));
+        assert!(stake_can_raise(None, &json!({})));
+        assert!(!stake_can_raise(
+            None,
+            &json!({"stake_prevent_raise": true})
+        ));
     }
 
     #[test]

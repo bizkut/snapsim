@@ -143,8 +143,9 @@ struct Compare {
     stake_initial: u32,
     #[arg(long)]
     stake_initial_next: Option<u32>,
+    /// `true` forbids snapping, `false` allows it; default: forbidden in Recruit mode, allowed otherwise.
     #[arg(long)]
-    stake_prevent_raise: bool,
+    stake_prevent_raise: Option<bool>,
     #[arg(long, default_value_t = 8)]
     stake_maximum: u32,
     #[arg(long, default_value_t = 2)]
