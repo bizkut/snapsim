@@ -26,6 +26,8 @@ mod meta_h2;
 mod meta_h3;
 mod meta_i1;
 mod meta_i2;
+mod meta_j1;
+mod meta_j2;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
@@ -373,6 +375,8 @@ static GROUPS: &[&[CardDef]] = &[
     meta_h3::CARDS,
     meta_i1::CARDS,
     meta_i2::CARDS,
+    meta_j1::CARDS,
+    meta_j2::CARDS,
     kahhori::CARDS,
 ];
 

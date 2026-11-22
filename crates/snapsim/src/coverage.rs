@@ -252,6 +252,60 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    // Stones may originate from Thanos even when Thanos himself is not visible.
+    // The opponent's post-shuffle deck composition is not exported.
+    let stone = |id: &str| {
+        matches!(
+            id,
+            "SpaceStone" | "TimeStone" | "RealityStone" | "PowerStone" | "MindStone" | "SoulStone"
+        )
+    };
+    let own_stone = position.hand.iter().any(|card| stone(&card.id))
+        || position.deck.iter().any(|id| stone(id))
+        || position
+            .graveyard
+            .iter()
+            .flatten()
+            .any(|card| stone(&card.id))
+        || position
+            .banished
+            .iter()
+            .flatten()
+            .any(|card| stone(&card.id))
+        || position
+            .locations
+            .iter()
+            .any(|lane| lane.mine.iter().any(|card| stone(&card.id)));
+    let opposing_stone = position
+        .opponent
+        .seen
+        .iter()
+        .chain(&position.opponent.known)
+        .chain(position.opponent.deck_list.iter().flatten())
+        .chain(position.opponent.pool.iter().flatten())
+        .any(|id| stone(id))
+        || position
+            .opponent
+            .graveyard
+            .iter()
+            .flatten()
+            .any(|card| stone(&card.id))
+        || position
+            .opponent
+            .banished
+            .iter()
+            .flatten()
+            .any(|card| stone(&card.id))
+        || position
+            .locations
+            .iter()
+            .any(|lane| lane.theirs.iter().any(|card| stone(&card.id)));
+    if !cards::reference_rules_enabled()
+        && ((own_stone && position.deck_count != Some(position.deck.len())) || opposing_stone)
+    {
+        extra_state
+            .insert("Infinity Stone owner's post-shuffle deck composition unknown".to_owned());
+    }
     if !cards::reference_rules_enabled() {
         for id in ["Wave", "Stick"] {
             if installed_effect_possible(position, id) {

@@ -2,7 +2,7 @@
 
 Generated 2026-11-22 from the website catalog (`data/cards.json`, `data/locations.json`), the 59.15.1 client descriptions (`snap-client/59.15.1/rules/carddefs.json`) and the simulator's `snapsim coverage` at `0220a4a2e8`. Released collectible characters: 497, supported 183, **unsupported 314**. Released locations: 183 (one catalog entry without an id excluded), supported 120, **unsupported 62**. Recordings: the owner's 60 matches in `Snapper-Assist/runs`.
 
-**Every row is `text-only`:** the mechanic, hook and size columns are classifications from ability text and client descriptions, not from client methods; no unsupported card or location has a `rules/cards/<Id>.md` or location evidence file. Unexported state is `unknown` for every row. Each implementation must first establish behaviour from the client methods (cite RVAs) and may change its classification.
+Rows marked `text-only` retain provisional classifications from ability text and client descriptions. Rows marked `client-method` have been checked against the cited client methods; unsupported entries retain the reason they cannot be simulated exactly. Summary counts describe the original baseline, not the subsequently updated rows.
 
 ## Summary
 
@@ -105,8 +105,8 @@ Gates per wave as in PLAN.md M14.
 | Dracula | 4/2 | other(end-of-game), discard, hand-manipulation, power-buff | no — end-game hand discard and dynamically gain selected power | unknown | L | 0 | text-only | Requires end-game trigger and private hand choice. |
 | DragonOfTheMoon | 3/4 | on-reveal, afflict, hand-manipulation, power-buff | no — alter even-cost cards in both players' hands | unknown | L | 0 | text-only | Opponent hand roster and card stats hidden. |
 | EbonyMaw | 1/7 | ongoing, other(play-requirement) | yes — generic play-requirement and lane lock hooks; missing turn cap | unknown | M | 0 | text-only | Turn-3 play deadline plus ongoing lane restriction. |
-| Electro | 3/5 | on-reveal, ongoing, turn-change | partial — existing energy and one-card/turn hooks cover core; needs card rule registration | unknown | S | 1 | text-only | +1 max energy and one play per turn. |
-| Elixir | 2/3 | on-reveal, destroy, location-interaction | partial — select own card destroyed specifically last turn and revive here | unknown | M | 1 | text-only | Needs last-turn destruction history. |
+| Electro | 3/5 | on-reveal, ongoing, turn-change | no — permanent maximum-energy and staging restriction | max-energy history not exported | S | 1 | client-method | AddPermanentEnergy (0x7e9e3d8) persists after removal; current reader lacks its prior grant and the engine lacks max-energy state. Unsupported. |
+| Elixir | 2/3 | on-reveal, destroy, location-interaction | no — resurrection from prior destruction | complete destruction history and destruction turn not exported | M | 1 | client-method | ReviveCandidates (0x7e9fb08) reads player destruction history; insufficient historical state. Unsupported. |
 | ElsaBloodstone | 3/5 | power-buff, rows | partial — bonus only when play fills own lane, not merely addition/move | unknown | M | 0 | text-only | Fill-on-play trigger distinction. |
 | EntropicHavok | 3/4 | start-of-turn, turn-change | no — steal opponent's bonus energy | unknown | M | 0 | text-only | Opponent bonus energy state. |
 | EsmeCuckoo | 3/4 | on-reveal, copy-effect, deck-manipulation, hand-manipulation, cost-change, power-buff | no — copy hidden deck card and assign cost/power | unknown | L | 0 | text-only | Deck selection identity/order. |
@@ -131,7 +131,7 @@ Gates per wave as in PLAN.md M14.
 | GhostRider | 4/5 | on-reveal, discard, created-cards | partial — revive one of own discarded card to lane | unknown | M | 0 | text-only | Discard-pile selection. |
 | GhostSpider | 1/3 | on-reveal, move | partial — move last played card to this lane | unknown | M | 0 | text-only | Last-played card tracking. |
 | GhostTheFirstRider | 2/8 | on-reveal, discard, hand-manipulation, power-buff | partial — discard lowest-power hand character, subtract its power | unknown | M | 0 | text-only | Own hand target selection. |
-| Giganto | 6/16 | other(play-requirement), rows | yes — generic play-requirement hook; missing leftmost-lane predicate descriptor | unknown | S | 1 | text-only | Left-lane restriction. |
+| Giganto | 6/16 | other(play-requirement) | yes — card play requirement | none | S | 1 | client-method | CanPlay (0x7eb6610) requires location index zero; additions and moves are unaffected. |
 | Gilgamesh | 5/9 | on-reveal, power-buff | partial — count other allies with increased power | unknown | S | 0 | text-only | Increased-vs-base power classification. |
 | Gladiator | 3/8 | on-reveal, deck-manipulation, destroy, location-change | no — draw/add opponent hidden deck card then compare and destroy | unknown | L | 0 | text-only | Opponent deck identity and ability resolution after placement. |
 | Goose | 2/2 | ongoing, other(play-requirement) | yes — generic play-requirement hook; missing cost threshold/lane restriction descriptor | unknown | S | 0 | text-only | Block 4+ cost cards at this lane. |
@@ -174,7 +174,7 @@ Gates per wave as in PLAN.md M14.
 | Killmonger | 3/3 | on-reveal, destroy | partial — destroy all 1-cost cards | unknown | S | 0 | text-only | — |
 | Kingpin | 1/3 | move, afflict | partial — afflict enemy entering lane | unknown | S | 0 | text-only | — |
 | KittyPryde | 1/1 | start-of-turn, hand-manipulation, power-buff | partial — return to hand each start, buff on return | unknown | M | 0 | text-only | — |
-| Knull | 6/0 | ongoing, destroy, power-buff | partial — aggregate total power of all destroyed cards game-wide | unknown | M | 1 | text-only | Needs durable global destroyed-power accounting. |
+| Knull | 6/0 | ongoing, destroy, power-buff | no — sum both players' historical destroyed-card power | complete destruction history and power at destruction not exported | M | 1 | client-method | GetPowerChange (0x7ee1774) sums CardDestroyed records for both players; snapshots cannot reconstruct their recorded power. Unsupported. |
 | Kraglin | 3/5 | on-reveal, banish, cost-change, power-buff | partial — banish deck top, conditional next energy or self buff | unknown | M | 0 | text-only | — |
 | LadyBullseye | 2/3 | on-reveal, afflict, power-buff | partial — repeatedly target distinct enemies by unspent energy | unknown | M | 0 | text-only | — |
 | LadyDeathstrike | 5/7 | on-reveal, destroy | partial — destroy lane cards at power threshold | unknown | S | 0 | text-only | — |
@@ -270,17 +270,17 @@ Gates per wave as in PLAN.md M14.
 | Scorn | 1/2 | discard, hand-manipulation, power-buff | partial — discarded trigger, return to hand, self/ally buffs | unknown | M | 0 | text-only | Ally choice details uncertain. |
 | Scorpion | 2/3 | on-reveal, afflict, hand-manipulation | no — afflict each card in opponent hand; identities absent | opponent hand identities/powers not exported | M | 0 | text-only | Target effects may need belief/approximation. |
 | Scream | 2/1 | move, power-buff | partial — enemy-move event and steal power; once-per-turn flag | unknown | M | 0 | text-only | Client description fills missing website text. |
-| SebastianShaw | 3/5 | empower, power-buff | partial — Empower event exists; grant additional +2 in hand/deck/play | unknown | M | 1 | text-only |  |
+| SebastianShaw | 3/5 | empower, power-buff | yes — post-permanent-power-increase event | none | M | 1 | client-method | AdditionalBuffOnBuff (0x7f337a0) adds 2 without another trigger in hand, deck, or play. |
 | SeleneHorseman | 4/4 | objective, power-buff, afflict | partial — objective hooks; count abilityless allies and steal from enemy | unknown | M | 0 | text-only |  |
 | Sentry | 4/9 | on-reveal, created-cards, location-interaction | partial — right-lane play restriction and Void spawn | none | S | 0 | text-only |  |
 | Sersi | 5/7 | on-reveal, transform, random-pool | partial — transform/random primitives; sequential +1-cost selection | unknown | L | 0 | text-only | Random pool must include eligible cards. |
 | ShangChi | 4/3 | on-reveal, destroy | partial — destroy enemy at power threshold | none | S | 0 | text-only |  |
-| ShangChiMasterOfTheRings | 3/5 | game-start, created-cards, other(empower) | no — start Ten Rings in hand and unlock ability | none | L | 3 | text-only |  |
+| ShangChiMasterOfTheRings | 3/5 | game-start, created-cards, transform, draw | no — create Ten Rings at game start and upgrade/draw it on reveal | original Rings identity/zone and upgrade state | L | 3 | client-method | Unsupported: game-start creation and upgrade/draw of the specific Rings cannot be reconstructed exactly. AddRingsToHand 0x7f39228; UpgradeAndDrawRings 0x7f39378. |
 | Shanna | 3/5 | on-reveal, created-cards, random-pool | partial — random 1-cost character per lane | none | M | 0 | text-only |  |
 | SheHulk | 6/10 | cost-change | partial — cost reduction based on previous-turn unspent energy | previous-turn energy spend not exported | M | 0 | text-only |  |
 | Silk | 2/5 | move | partial — react to any play at lane, move to another lane | none | M | 0 | text-only | Destination policy required. |
 | SilverSamurai | 4/6 | on-reveal, discard | no — lowest-power character in both hands; opponent hand contents unavailable | opponent hand identities/powers not exported | L | 0 | text-only |  |
-| SilverSurfer | 3/2 | on-reveal, power-buff | partial — buff other allied 3-cost cards | none | S | 2 | text-only |  |
+| SilverSurfer | 3/2 | on-reveal, power-buff | yes — revealed allied printed-cost selector and power action | none | S | 2 | client-method | +2 to other revealed allies of printed cost 3 across all lanes; ExecuteTriggerAction 0x7e0f6e4, ByDefCost 0x7d29ad8. |
 | SilverSurferFirstSteps | 3/5 | end-of-turn, ability-copy | partial — choose winning-lane On Reveal card and copy text | none | M | 0 | text-only |  |
 | SinisterSix | 6/12 | game-start, created-cards, merge, objective, deck-manipulation | no — mark first six drawn, track their plays, merge and place | draw-tag progression not exported | L | 0 | text-only |  |
 | Skaar | 7/12 | cost-change | partial — cost based on number of allies with power ≥10 | none | M | 0 | text-only |  |
@@ -311,8 +311,8 @@ Gates per wave as in PLAN.md M14.
 | Taskmaster | 6/0 | on-reveal, copy-effect, power-buff | partial — copy power of last card played | last-played identity/power history | M | 0 | text-only |  |
 | Terrax | 3/4 | on-reveal, created-cards, deck-manipulation | partial — determine losing player per lane and shuffle Rock into their deck | lane loser/deck ownership | M | 0 | text-only |  |
 | ThaddeusRoss | 2/2 | end-of-turn, deck-manipulation | partial — if enemy has unspent energy draw card with power ≥10 | energy + deck-top/card identity | M | 0 | text-only |  |
-| Thanos | 6/12 | game-start, created-cards, deck-manipulation | partial — game-start shuffle six stones; Stone card implementations partly exist | deck shuffle order/stone state | M | 1 | text-only | Some Stone machinery exists, no Thanos registration verified. |
-| ThanosFracturedFrontier | 5/7 | game-start, quickdraw, created-cards, power-buff | no — grant Quickdraw ability to all cards, maintain loaded-shot state and fire | loaded-shot count/card attachment state | L | 4 | text-only |  |
+| Thanos | 6/12 | game-start, created-cards, deck-manipulation | no — game-start shuffle of six named Stones | post-shuffle deck composition and remaining Stone identities | M | 1 | client-method | Unsupported: AddInfinityStones 0x7cd5e3c inserts and shuffles six Stones; inferred incomplete decks cannot represent their remaining composition exactly. |
+| ThanosFracturedFrontier | 5/7 | game-start, quickdraw, ability-copy, on-reveal | no — attach global Quickdraw and fire loaded Infinity Shots | shot identities/count and per-card attached trigger state | L | 4 | client-method | Unsupported: AddGlobalLoadQuickdrawToPlayer 0x7cd6bdc and FireLoadedShots 0x7cd8054 require historical shot and attachment state. This variant does not shuffle Infinity Stones. |
 | TheAncientOne | 3/5 | on-reveal, created-cards | partial — add Tao Mandala to hand | none | S | 0 | text-only |  |
 | ThePhoenixForce | 4/5 | on-reveal, destroy, merge, move | partial — revive destroyed card, merge, grant move | destroyed-card lane/target eligibility | L | 0 | text-only | Graveyard lane not exported. |
 | Thena | 2/0 | end-of-turn, power-buff | partial — exact-two-plays-this-turn condition | current turn play count/history | M | 0 | text-only |  |
