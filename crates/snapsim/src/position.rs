@@ -212,9 +212,17 @@ pub(crate) fn all_cards() -> Vec<String> {
         .map(|s| (*s).to_owned())
         .collect()
 }
+/// The frozen Python reference's locations. Parity gates pin location pools to it, so locations
+/// added since (like cards beyond the reference pool) do not change the reference's random draws.
+static REFERENCE_LOCATIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../parity/reference-locations.json"))
+        .expect("invalid parity/reference-locations.json")
+});
 pub(crate) fn all_locations(recruit: bool) -> Vec<String> {
+    let pinned = cards::reference_pool_enabled();
     let mut ids: Vec<_> = locations::REGISTRY
         .iter()
+        .filter(|d| !pinned || REFERENCE_LOCATIONS.contains(&d.id))
         .filter(|d| {
             !recruit
                 || LOCATION_DATA.get(d.id).is_some_and(|x| {
@@ -273,6 +281,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         repeating: false,
         move_turns: Vec::new(),
         player_moves_used: 0,
+        player_move_turn: None,
         activated: false,
         move_staged: false,
         activate_staged: false,

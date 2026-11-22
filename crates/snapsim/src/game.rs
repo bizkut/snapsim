@@ -177,6 +177,7 @@ pub struct Card {
     pub move_turns: Vec<u8>,
     /// Voluntary movement and activation state (forced movement does not consume stacks).
     pub player_moves_used: u8,
+    pub player_move_turn: Option<u8>,
     pub activated: bool,
     pub move_staged: bool,
     pub activate_staged: bool,
@@ -362,6 +363,10 @@ pub enum Event {
     CardPlayed {
         card: usize,
     },
+    /// PostCardResolvedTrigger, after the resolving card's skill banishment.
+    CardResolved {
+        card: usize,
+    },
     CardActivated {
         card: usize,
     },
@@ -496,6 +501,17 @@ impl<'a> Game<'a> {
                     && self.cards[id].ability_def().on_event.is_some()
             })
             .collect();
+        // Game::ActivateTriggerAbility @ 0x7da93a0 dispatches locations
+        // before card abilities for PostCardResolvedTrigger.
+        if matches!(event, Event::CardResolved { .. }) {
+            for lane in 0..3 {
+                if self.lanes[lane].revealed
+                    && let Some(hook) = self.lanes[lane].def.on_event
+                {
+                    hook(self, lane, event);
+                }
+            }
+        }
         for card in observers {
             if self.cards[card].lane.is_some()
                 && !self.cards[card].abilities_removed
@@ -551,11 +567,13 @@ impl<'a> Game<'a> {
                 }
             }
         }
-        for lane in 0..3 {
-            if self.lanes[lane].revealed
-                && let Some(hook) = self.lanes[lane].def.on_event
-            {
-                hook(self, lane, event);
+        if !matches!(event, Event::CardResolved { .. }) {
+            for lane in 0..3 {
+                if self.lanes[lane].revealed
+                    && let Some(hook) = self.lanes[lane].def.on_event
+                {
+                    hook(self, lane, event);
+                }
             }
         }
     }
@@ -1021,6 +1039,7 @@ impl<'a> Game<'a> {
                     draw_extends_quickdraw: false,
                     move_turns: Vec::new(),
                     player_moves_used: 0,
+                    player_move_turn: None,
                     activated: false,
                     move_staged: false,
                     activate_staged: false,
@@ -1069,28 +1088,36 @@ impl<'a> Game<'a> {
         game.emit(Event::GameStart);
         // StartGame::OnEnter (0x7e47c68) triggers game-start before the opening draw.
         for seat in 0..2 {
-            if let Some(slot) = game.players[seat]
-                .deck
-                .iter()
-                .position(|&index| game.cards[index].def.id == "Quicksilver")
-            {
-                let card = game.players[seat].deck.remove(slot);
-                game.add_hand(seat, card, true);
-            }
-            while game.players[seat].hand.len() < 3 {
-                let Some(slot) = game.players[seat]
-                    .deck
-                    .iter()
-                    .position(|&index| game.cards[index].def.draw_turn.is_none())
-                else {
-                    break;
-                };
-                let card = game.players[seat].deck.remove(slot);
-                game.add_hand(seat, card, true);
-            }
+            game.draw_initial_hand(seat);
         }
         game.turn = 1;
         Ok(game)
+    }
+
+    fn draw_initial_hand(&mut self, seat: usize) {
+        // DrawSelfDef::DrawSelf (0x7cc1158) intercepts initial-hand draws only.
+        // Keep the existing Quicksilver behavior when no other such card exists.
+        while self.players[seat].hand.len() < 3 {
+            let slot = self.players[seat]
+                .deck
+                .iter()
+                .position(|&id| {
+                    !self.cards[id].abilities_removed
+                        && (self.cards[id].ability_def().start_in_hand
+                            || self.cards[id].def.id == "Quicksilver")
+                })
+                .or_else(|| {
+                    self.players[seat]
+                        .deck
+                        .iter()
+                        .position(|&id| self.cards[id].def.draw_turn.is_none())
+                });
+            let Some(slot) = slot else {
+                break;
+            };
+            let card = self.players[seat].deck.remove(slot);
+            self.add_hand(seat, card, true);
+        }
     }
 
     pub fn played_cards_at(&self, seat: usize, lane: usize) -> impl Iterator<Item = usize> + '_ {
@@ -1141,6 +1168,7 @@ impl<'a> Game<'a> {
             draw_extends_quickdraw: false,
             move_turns: Vec::new(),
             player_moves_used: 0,
+            player_move_turn: None,
             activated: false,
             move_staged: false,
             activate_staged: false,
@@ -1504,8 +1532,18 @@ impl<'a> Game<'a> {
         if let Some(mask) = target.observed_move_targets {
             return mask & (1 << destination) != 0;
         }
-        (!target.abilities_removed && target.player_moves_used < target.ability_def().move_limit)
+        // HasMovesRemainingCondition::Evaluate (0x7d26688): zero stacks are unlimited;
+        // Card::IsMovableByPlayer (0x7cb0cac) rejects a card already staged to move.
+        (!target.abilities_removed
+            && (target.player_moves_used < target.ability_def().move_limit
+                || target.ability_def().move_each_turn
+                    && target.player_move_turn != Some(self.turn)))
             || self.matching_move_grant(card, seat).is_some()
+            || (self.lanes[destination].revealed
+                && self.lanes[destination]
+                    .def
+                    .grants_move_to
+                    .is_some_and(|test| test(self, destination, card, source, seat)))
     }
 
     /// Resolve one voluntary movement, consuming its intrinsic and granted stacks.
@@ -1520,6 +1558,9 @@ impl<'a> Game<'a> {
         if self.cards[card].ability_def().move_limit > 0 {
             self.cards[card].player_moves_used =
                 self.cards[card].player_moves_used.saturating_add(1);
+        }
+        if self.cards[card].ability_def().move_each_turn {
+            self.cards[card].player_move_turn = Some(self.turn);
         }
         if let Some(index) = grant {
             let grant = &mut self.players[seat].move_grants[index];
@@ -1668,6 +1709,9 @@ impl<'a> Game<'a> {
                 if self.cards[card].ability_def().move_limit > 0 {
                     self.cards[card].player_moves_used =
                         self.cards[card].player_moves_used.saturating_add(1);
+                }
+                if self.cards[card].ability_def().move_each_turn {
+                    self.cards[card].player_move_turn = Some(self.turn);
                 }
                 self.cards[card].move_staged = true;
                 self.cards[card].last_lane = Some(from);
@@ -2484,6 +2528,7 @@ impl<'a> Game<'a> {
         if self.cards[id].turn_played > 0 {
             let seat = self.cards[id].owner;
             if (self.cards[id].ability_def().move_limit > 0
+                || self.cards[id].ability_def().move_each_turn
                 || self.matching_move_grant(id, seat).is_some())
                 && !self.players[seat].movable_cards_played.contains(&id)
             {
@@ -2528,14 +2573,6 @@ impl<'a> Game<'a> {
             self.trigger_player_effects(self.cards[id].owner, PlayerTrigger::CardPlayed, Some(id));
         }
         self.ongoing();
-        if self.cards[id].turn_played > 0
-            && let Some(lane) = self.cards[id].lane
-            && self.lanes[lane].revealed
-            && let Some(hook) = self.lanes[lane].def.after_card_play
-        {
-            hook(self, lane, id);
-            self.ongoing();
-        }
         if self.is_skill(id)
             && let Some(lane) = self.cards[id].lane
         {
@@ -2543,6 +2580,17 @@ impl<'a> Game<'a> {
             self.cards[id].last_lane = Some(lane);
             self.cards[id].lane = None;
             self.players[self.cards[id].owner].banished.push(id);
+            self.ongoing();
+        }
+        // Card::ResolveForPlay @ 0x7cb9d90: banish skills before
+        // PostCardResolvedTrigger, which reaches cards and locations.
+        self.emit(Event::CardResolved { card: id });
+        if self.cards[id].turn_played > 0
+            && let Some(lane) = self.cards[id].lane
+            && self.lanes[lane].revealed
+            && let Some(hook) = self.lanes[lane].def.after_card_play
+        {
+            hook(self, lane, id);
             self.ongoing();
         }
         for _ in 0..left_moves {
@@ -2797,12 +2845,26 @@ impl<'a> Game<'a> {
             .flat_map(|lane| lane.cards.iter().copied())
             .filter(|&id| self.cards[id].revealed)
             .collect();
-        for id in observers {
-            let turn = self.turn;
-            self.cards[id].attached_abilities.retain(|ability| !matches!(
+        // Fsm.EndTurn::OnEnter (0x7e09558) dispatches PreEndOfTurn before EndOfTurn.
+        // The frozen Python reference interleaves them per card.
+        let interleave = crate::cards::reference_rules_enabled();
+        let turn = self.turn;
+        let expire = |game: &mut Self, id: usize| {
+            game.cards[id].attached_abilities.retain(|ability| !matches!(
                 ability.kind, AttachedAbilityKind::MovePower { turn: expiration, .. } if expiration <= turn
             ));
-            self.resolve_attached_watches(id);
+        };
+        if !interleave {
+            for &id in &observers {
+                expire(self, id);
+                self.resolve_attached_watches(id);
+            }
+        }
+        for id in observers {
+            if interleave {
+                expire(self, id);
+                self.resolve_attached_watches(id);
+            }
             if let Some(hook) = self.cards[id].ability_def().end_turn {
                 hook(self, id);
             }
@@ -2966,12 +3028,100 @@ mod staging_tests {
         game
     }
 
+    #[test]
+    fn initial_hand_prioritizes_self_draw_only_during_opening() {
+        let mut rng = PythonRandom::seed(8);
+        let mut game = game(&mut rng);
+        game.players[0].hand.clear();
+        game.players[0].deck.clear();
+        let hulk = game.create_card("Hulk", 0);
+        let rings = game.create_card("TenRings", 0);
+        let cyclops = game.create_card("Cyclops", 0);
+        let thing = game.create_card("TheThing", 0);
+        game.players[0].deck.extend([hulk, cyclops, thing, rings]);
+        game.draw_initial_hand(0);
+        assert_eq!(game.players[0].hand, [rings, hulk, cyclops]);
+        game.players[0].hand.clear();
+        game.players[0].deck.clear();
+        game.players[0].deck.extend([hulk, rings]);
+        game.draw(0);
+        assert_eq!(game.players[0].hand, [hulk]);
+    }
+
+    #[test]
+    fn initial_hand_without_self_draw_uses_existing_deck_order() {
+        let mut rng = PythonRandom::seed(9);
+        let mut game = game(&mut rng);
+        game.players[0].hand.clear();
+        game.players[0].deck.clear();
+        let hulk = game.create_card("Hulk", 0);
+        let cyclops = game.create_card("Cyclops", 0);
+        let thing = game.create_card("TheThing", 0);
+        game.players[0].deck.extend([hulk, cyclops, thing]);
+        game.draw_initial_hand(0);
+        assert_eq!(game.players[0].hand, [hulk, cyclops, thing]);
+    }
+
     fn place(game: &mut Game<'_>, name: &str, seat: usize, lane: usize) -> usize {
         let card = game.create_card(name, seat);
         game.cards[card].lane = Some(lane);
         game.cards[card].revealed = true;
         game.lanes[lane].cards.push(card);
         card
+    }
+
+    fn check_pre_end_order(expected: i32) {
+        let mut rng = PythonRandom::seed(33);
+        let mut game = game(&mut rng);
+        game.turn = 3;
+        let isca = place(&mut game, "Isca", 0, 0);
+        let hawkeye = place(&mut game, "Hawkeye", 1, 0);
+        game.cards[hawkeye].attach_watch(hawkeye, game.turn, 0, true, 4);
+        game.played[1].push((hawkeye, 0));
+        game.cards[hawkeye].turn_played = game.turn;
+        game.end_turn_effects();
+        assert_eq!(game.cards[hawkeye].power(), 5);
+        assert_eq!(game.cards[isca].power(), expected);
+    }
+
+    #[test]
+    fn pre_end_watches_resolve_before_end_turn_hooks() {
+        check_pre_end_order(4);
+    }
+
+    #[test]
+    fn reference_mode_preserves_interleaved_end_turn_order() {
+        const CHILD: &str = "SNAPSIM_TEST_REFERENCE_END_ORDER";
+        if std::env::var_os(CHILD).is_some() {
+            check_pre_end_order(2);
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "game::staging_tests::reference_mode_preserves_interleaved_end_turn_order",
+            ])
+            .env(CHILD, "1")
+            .env("SNAPSIM_REFERENCE_RULES", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn intrinsic_each_turn_movement_resets_without_resetting_lifetime_stacks() {
+        let mut rng = PythonRandom::seed(31);
+        let mut game = game(&mut rng);
+        game.turn = 3;
+        let vision = place(&mut game, "Vision", 0, 0);
+        let crawler = place(&mut game, "Nightcrawler", 0, 0);
+        assert!(game.move_player_card(vision, 1, 0));
+        assert!(!game.can_player_move(vision, 2, 0));
+        assert!(game.move_player_card(crawler, 1, 0));
+        game.turn = 4;
+        assert!(game.can_player_move(vision, 2, 0));
+        assert!(!game.can_player_move(crawler, 2, 0));
+        assert!(game.move_player_card(vision, 2, 0));
     }
 
     #[test]

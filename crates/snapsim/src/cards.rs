@@ -16,6 +16,9 @@ mod meta_c;
 mod meta_d;
 mod meta_e1;
 mod meta_e2;
+mod meta_f1;
+mod meta_f2;
+mod meta_f3;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
@@ -50,6 +53,9 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_d::TOKENS,
     meta_e1::TOKENS,
     meta_e2::TOKENS,
+    meta_f1::TOKENS,
+    meta_f2::TOKENS,
+    meta_f3::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -109,11 +115,16 @@ pub(crate) fn reference_rules_enabled() -> bool {
 /// Cards a deck may contain and random-card effects draw from: every registered non-token
 /// card, or the reference list while pinned for parity gates.
 pub fn deck_eligible_ids() -> &'static [&'static str] {
-    if USE_REFERENCE.load(Ordering::Relaxed) || *ENV_REFERENCE {
+    if reference_pool_enabled() {
         &REFERENCE_IDS
     } else {
         &DECK_ELIGIBLE_IDS
     }
+}
+
+/// Whether pools are pinned to the frozen reference (parity gates only).
+pub(crate) fn reference_pool_enabled() -> bool {
+    USE_REFERENCE.load(Ordering::Relaxed) || *ENV_REFERENCE
 }
 
 /// Whether a card has rules here but not in the frozen Python reference (its deck cards and
@@ -157,6 +168,8 @@ pub struct CardDef {
     pub activate_cost: i32,
     /// Total intrinsic voluntary moves available (0 means none, 255 unlimited).
     pub move_limit: u8,
+    /// Intrinsic move remains available on subsequent turns.
+    pub move_each_turn: bool,
     pub end_turn: Option<CardHook>,
     pub on_move_here: Option<PlayHook>,
     pub on_move: Option<PlayHook>,
@@ -174,6 +187,8 @@ pub struct CardDef {
     pub blocks_spawns: bool,
     pub locks_lane: bool,
     pub immune_destroy_move: bool,
+    /// Draw this card ahead of ordinary cards during the initial hand.
+    pub start_in_hand: bool,
     pub draw_turn: Option<u8>,
 }
 
@@ -198,12 +213,14 @@ impl CardDef {
             can_activate: None,
             activate_cost: 0,
             move_limit: 0,
+            move_each_turn: false,
             blocks_spawns: false,
             end_turn: None,
             blocks_reveal: false,
             prevents_destroy: false,
             locks_lane: false,
             immune_destroy_move: false,
+            start_in_hand: false,
             draw_turn: None,
             on_move_here: None,
             on_move: None,
@@ -329,6 +346,9 @@ static GROUPS: &[&[CardDef]] = &[
     meta_d::CARDS,
     meta_e1::CARDS,
     meta_e2::CARDS,
+    meta_f1::CARDS,
+    meta_f2::CARDS,
+    meta_f3::CARDS,
 ];
 
 /// Every registered card rule.

@@ -34,15 +34,20 @@ gate cli-compare env PYTHONPATH=$REF $PY $ROOT/parity/cli_compare.py
 gate cli-deckbuild env PYTHONPATH=$REF $PY $ROOT/parity/cli_deckbuild.py
 gate cli-snap env PYTHONPATH=$REF $PY $ROOT/parity/cli_snap.py
 files=$(ls $RUNS/*.jsonl $SNAPS/*.jsonl | grep -v '\.log\.jsonl$')
-# Cards with rules here but not in the frozen reference: Rust coverage minus Python coverage.
-beyond=$(PYTHONPATH=$REF $PY -c "
+# Cards and locations with rules here but not in the frozen reference: Rust minus Python coverage.
+beyond_for() { PYTHONPATH=$REF $PY -c "
 import json, subprocess
-rust = set(json.loads(subprocess.check_output(['$T/snapsim', 'coverage']))['cards'])
-py = set(json.loads(subprocess.check_output(['$PY', '$REF/advise.py', 'coverage']))['cards'])
-print('|'.join(sorted(rust - py)))")
+rust = set(json.loads(subprocess.check_output(['$T/snapsim', 'coverage']))['$1'])
+py = set(json.loads(subprocess.check_output(['$PY', '$REF/advise.py', 'coverage']))['$1'])
+print('|'.join(sorted(rust - py)) or '^$')"; }
+beyond=$(beyond_for cards); beyond_locations=$(beyond_for locations)
 compared=""; new_content=""
 for f in $files; do
-    if grep -qE "\"card_id\": ?\"($beyond)\"" "$f"; then new_content+=" $f"; else compared+=" $f"; fi
+    if grep -qE "\"card_id\": ?\"($beyond)\"|\"location_id\": ?\"($beyond_locations)\"" "$f"; then
+        new_content+=" $f"
+    else
+        compared+=" $f"
+    fi
 done
 echo "replay: $(echo $compared | wc -w | tr -d ' ') recordings compared; new content in:$new_content"
 gate replay $PY $ROOT/parity/replay_compare.py --python $PY --reference $REF --rust $T/snapsim-replaycheck $compared

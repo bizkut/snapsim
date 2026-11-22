@@ -29,12 +29,16 @@ def main():
         expected = invoke([sys.executable, str(REFERENCE / 'advise.py'), *args])
         actual = invoke([str(BINARY), *args, *([] if args[0] == 'coverage' else ['--plays-only'])])
         if args[0] == 'coverage':
-            # Rules added after the reference froze are new content: every reference card must
-            # still be listed, and nothing else may differ.
+            # Rules added after the reference froze are new content: every reference card and
+            # location must still be listed, and nothing else may differ.
             missing = sorted(set(expected['cards']) - set(actual['cards']))
             assert not missing, (args, 'reference cards no longer supported', missing)
+            missing = sorted(set(expected['locations']) - set(actual['locations']))
+            assert not missing, (args, 'reference locations no longer supported', missing)
             added = sorted(set(actual['cards']) - set(expected['cards']))
+            added_locations = sorted(set(actual['locations']) - set(expected['locations']))
             actual['cards'] = expected['cards']
+            actual['locations'] = expected['locations']
         if args[0] == 'compare':
             expected.pop('elapsed_seconds', None)
             actual.pop('elapsed_seconds', None)
@@ -42,7 +46,8 @@ def main():
                 for side in ('a', 'b'):
                     result['config'][side].pop('engine', None)
         assert expected == actual, (args, expected, actual)
-    print(f'CLI parity: {len(cases)} cases passed ({len(added)} cards beyond the reference)')
+    print(f'CLI parity: {len(cases)} cases passed ({len(added)} cards and '
+          f'{len(added_locations)} locations beyond the reference)')
 
 
 if __name__ == '__main__':

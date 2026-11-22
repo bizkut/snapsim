@@ -206,6 +206,19 @@ pub fn check_observations(
                 }) {
                     return Err("Nico Minoru's spell and pending next-card effect are not observable at the start of the turn".into());
                 }
+                // MaverickBehavior::AddBuffCardTriggerToPlayer (0x7ef54b8)
+                // creates a player-owned trigger; observations do not expose
+                // activation timing or whether that trigger remains pending.
+                if start.board.iter().any(|card| {
+                    card.revealed
+                        && card.id == "Maverick"
+                        && staged
+                            .plays
+                            .iter()
+                            .any(|play| play.card.owner == card.owner)
+                }) {
+                    return Err("Maverick's pending next-card effect is not observable at the start of the turn".into());
+                }
                 let mut best = None;
                 for seed in 0..seeds {
                     let diffs = super::simulate::simulate(

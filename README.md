@@ -13,7 +13,7 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
 * `compare --mode recruit` or `compare --deck-file FILE` compares advisors in paired seats. Options include `--hero-deck`, `--deck-prior`, `--games`, `--seed`, `--workers`, `--rollouts`, `--time-limit`, and the per-side `--a-rollouts`, `--a-playout`, `--a-prior` and corresponding `--b-*` flags.
 * `benchmark --mode recruit` or `benchmark --deck-file FILE` compares controllers. It accepts `--games`, `--seed`, `--rollouts`, and `--opponent`.
 * Plans include the client's player actions: playing a hand card, moving a movable card and activating an Activate ability. `--plays-only` (on `position`, `compare`, `benchmark` and `deckbuild`) restricts plans to plays, as the frozen reference did; the parity gates use it.
-* The game-log replay checker is the separate binary `snapsim-replaycheck FILE...` (`cargo build --release -p snapsim --bin snapsim-replaycheck`). It replays recorded turns and reports each as consistent, inconsistent or not checkable; use it to validate rule changes against real matches. A turn with a previously revealed Nico Minoru and a subsequent play by her owner is not checkable because her chosen spell and pending trigger are not recorded.
+* The game-log replay checker is the separate binary `snapsim-replaycheck FILE...` (`cargo build --release -p snapsim --bin snapsim-replaycheck`). It replays recorded turns and reports each as consistent, inconsistent or not checkable; use it to validate rule changes against real matches. A turn with a previously revealed Nico Minoru or Maverick and a subsequent play by their owner is not checkable because their pending trigger is not recorded; Nico's chosen spell is also hidden.
 
 ## Architecture
 
@@ -157,6 +157,8 @@ The Python simulator (`Marvel-snap-simulator`, branch `stronger-advice` in the `
 
 Registering new cards changes `cards::deck_eligible_ids()`, which Agent 13 draws from and position sampling uses. Gates therefore pin it to `parity/reference-pool.json`, the frozen reference's 84 deck cards: the parity binaries call `cards::use_reference_pool()` themselves, and the CLI, `snapsim-replaycheck` and the Python module do the same under `SNAPSIM_REFERENCE_POOL=1`. Export that variable for every Python-side gate script.
 
+The same pin restricts random location pools to `parity/reference-locations.json`, the reference's 84 locations, so locations added since do not change its draws. Gate scripts treat cards and locations beyond the reference as new content: coverage must still list every reference entry, and recordings containing new content are excluded from the Python replay comparison (the client replay gate still checks them).
+
 Two kinds of record are reported rather than compared:
 
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
@@ -185,7 +187,7 @@ Two kinds of record are reported rather than compared:
 | Deck builder | `SNAPSIM_PY_PATH=MODULE parity/deckbuild_compare.py`; again with `SNAPSIM_COMPLETE_ONLY=1` | 12 cancellation cut-offs and 1 complete run identical |
 | Command line | `SNAPSIM_BIN=snapsim parity/cli_compare.py`, `cli_deckbuild.py`, `cli_snap.py` | 7 + 1 + 2 cases |
 | Replay checker | `parity/replay_compare.py --python PY --reference REF --rust snapsim-replaycheck RECORDINGS` | 10 recordings byte-identical, one at a time and together |
-| Client rules on real matches | `snapsim-replaycheck RECORDINGS` without the reference variables | all 12 recordings: 46 consistent, 0 inconsistent, 9 not checkable turns |
+| Client rules on real matches | `snapsim-replaycheck RECORDINGS` without the reference variables | all 49 recordings (2026-11-22, 207 cards and 89 locations): 106 consistent, 0 inconsistent, 162 not checkable turns |
 
 The Python suite of the frozen checkout (360 tests) also passes against this module.
 

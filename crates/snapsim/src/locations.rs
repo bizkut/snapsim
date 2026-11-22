@@ -3,6 +3,7 @@
 use crate::game::Game;
 mod locations_b;
 mod locations_b_extra;
+mod locations_c;
 mod recruit_a;
 mod turns;
 
@@ -34,6 +35,7 @@ pub struct LocationDef {
     pub allows_play: Option<PlayPredicate>,
     pub allows_play_elsewhere: Option<PlayPredicate>,
     pub allows_addition: Option<PlayPredicate>,
+    pub grants_move_to: Option<PlayPredicate>,
     pub energy_bonus: Option<EnergyHook>,
     pub modify_cost: Option<CostHook>,
     pub minimum_turns: u8,
@@ -68,6 +70,7 @@ pub(crate) const fn location(
         allows_play: None,
         allows_play_elsewhere: None,
         allows_addition: None,
+        grants_move_to: None,
         energy_bonus: None,
         modify_cost: None,
         minimum_turns: 0,
@@ -166,6 +169,11 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_b_extra::WHITE_PALACE,
     locations_b_extra::ONSLAUGHTS_CITADEL,
     locations_b::WASHINGTON_DC,
+    locations_c::STAR_BRAND_CRATER,
+    locations_c::CROWN_CITY,
+    locations_c::NEW_YORK,
+    locations_c::PYRAMID_OF_RAMA_TUT,
+    locations_c::ASTEROID_M,
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {
