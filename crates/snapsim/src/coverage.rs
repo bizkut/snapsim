@@ -146,12 +146,14 @@ pub fn coverage(position: &Position) -> Value {
                     .iter()
                     .flat_map(|lane| lane.mine.iter().chain(&lane.theirs)),
             )
-            .any(|card| {
-                card.stat_updates.as_ref().is_some_and(|updates| {
+            .any(|card| match &card.augments {
+                Some(augments) if augments.complete && augments.items.is_empty() => false,
+                Some(augments) if !augments.items.is_empty() => true,
+                _ => card.stat_updates.as_ref().is_some_and(|updates| {
                     updates
                         .iter()
                         .any(|update| update.updater_augment_id.is_some())
-                })
+                }),
             })
         && (!position.hand.is_empty()
             || position.locations.iter().any(|lane| !lane.mine.is_empty()))
@@ -186,7 +188,7 @@ pub fn coverage(position: &Position) -> Value {
             .map(|c| (0, c))
             .chain(lane.theirs.iter().map(|c| (1, c)))
             .collect();
-        for (_, card) in &refs {
+        for (owner, card) in &refs {
             let id = card.id.as_str();
             card_ids.insert(id);
             if card.revealed {
@@ -195,18 +197,27 @@ pub fn coverage(position: &Position) -> Value {
                 {
                     extra_state.insert("Human Torch First Steps doubling use unknown".to_owned());
                 }
-                if id == "PowerStone" {
+                if id == "PowerStone"
+                    && (cards::reference_rules_enabled()
+                        || position.complete_past_actions(*owner).is_none())
+                {
                     extra_state
                         .insert("Power Stone distinct played-stone history unknown".to_owned());
                 }
                 if card.played_turn.is_none_or(|turn| turn < position.turn) {
-                    if id == "JuggernautHorseman" {
+                    if id == "JuggernautHorseman"
+                        && (cards::reference_rules_enabled() || card.objective().is_none())
+                    {
                         extra_state
                             .insert("Juggernaut Horseman objective completion unknown".to_owned());
                     }
-                    if id == "Nebula" {
+                    if id == "Nebula"
+                        && (cards::reference_rules_enabled() || card.nebula_active().is_none())
+                    {
                         extra_state.insert("Nebula pre-end trigger state unknown".to_owned());
-                    } else if id == "TheThingFirstSteps" {
+                    } else if id == "TheThingFirstSteps"
+                        && (cards::reference_rules_enabled() || card.thing_fill_used().is_none())
+                    {
                         extra_state
                             .insert("The Thing First Steps fill-trigger use unknown".to_owned());
                     }
@@ -255,10 +266,25 @@ pub fn coverage(position: &Position) -> Value {
         if let Some(id) = &lane.id {
             loc_ids.insert(id.as_str());
             if id == "TimeTheater" && position.turn < position.total_turns {
-                if !position.deck.is_empty() && position.hand.len() < 7 {
+                let spent = (!cards::reference_rules_enabled())
+                    .then(|| {
+                        lane.history_state
+                            .as_ref()?
+                            .time_theater_used
+                            .as_ref()?
+                            .complete()
+                    })
+                    .flatten();
+                if !position.deck.is_empty()
+                    && position.hand.len() < 7
+                    && spent.is_none_or(|flags| !flags[0])
+                {
                     extra_state.insert("Time Theater use unknown for seat 0".to_owned());
                 }
-                if position.opponent.deck > 0 && position.opponent.hand < 7 {
+                if position.opponent.deck > 0
+                    && position.opponent.hand < 7
+                    && spent.is_none_or(|flags| !flags[1])
+                {
                     extra_state.insert("Time Theater use unknown for seat 1".to_owned());
                 }
             }
@@ -269,6 +295,8 @@ pub fn coverage(position: &Position) -> Value {
                             turn < position.turn
                                 && lane.revealed_turn.is_none_or(|reveal| turn >= reveal)
                         })
+                        && (cards::reference_rules_enabled()
+                            || card.verified_base_power().is_none())
                     {
                         extra_state.insert(format!("Quantum Realm base unknown for {}", card.id));
                     }
@@ -276,6 +304,12 @@ pub fn coverage(position: &Position) -> Value {
             }
             if matches!(id.as_str(), "TheAbbey" | "Raft")
                 && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+                && (cards::reference_rules_enabled()
+                    || lane
+                        .history_state
+                        .as_ref()
+                        .and_then(|h| h.is_given)
+                        .is_none())
             {
                 extra_state.insert(format!("{id} consumed trigger state unknown"));
             }
@@ -285,8 +319,16 @@ pub fn coverage(position: &Position) -> Value {
                     "Lemuria" | "Sakaar" | "TinkerersWorkshop" | "ProjectPegasus"
                 ))
                 || (id == "OttosLab" && lane.ottos_lab_spent.is_none())
-                // These per-player trigger/action histories are not in live observations.
-                || matches!(id.as_str(), "Vormir" | "CollapsedMine")
+                || (id == "Vormir"
+                    && (cards::reference_rules_enabled()
+                        || !lane
+                            .history_state
+                            .as_ref()
+                            .and_then(|h| h.vormir_consumed.as_ref())
+                            .is_some_and(|v| v.local.is_some() && v.opponent.is_some())))
+                || (id == "CollapsedMine"
+                    && (cards::reference_rules_enabled()
+                        || (0..2).any(|seat| position.current_action_present(seat).is_none())))
             {
                 state.insert(id.as_str());
             }

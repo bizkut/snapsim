@@ -163,6 +163,7 @@ pub fn search_position(
                 None
             },
             ottos_lab_spent,
+            history_state: None,
         }
     });
     let player = &game.players[seat];

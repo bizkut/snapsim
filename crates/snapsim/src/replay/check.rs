@@ -197,6 +197,7 @@ pub fn check_observations(
                     && target.board.iter().any(|stone| {
                         stone.revealed
                             && stone.id == "PowerStone"
+                            && start.complete_past_actions(stone.owner).is_none()
                             && target.board.iter().any(|thanos| {
                                 thanos.revealed
                                     && thanos.owner == stone.owner
@@ -212,6 +213,12 @@ pub fn check_observations(
                         && start.location_turns[lane]
                             .as_i64()
                             .is_none_or(|revealed| revealed < turn)
+                        && start
+                            .location_history
+                            .get(lane)
+                            .and_then(Option::as_ref)
+                            .and_then(|history| history.is_given)
+                            .is_none()
                     {
                         return Err(format!("{id} consumed trigger state is not recorded"));
                     }
@@ -223,6 +230,14 @@ pub fn check_observations(
                             (0..2)
                                 .any(|seat| start.deck_counts[seat].as_u64().is_none_or(|n| n > 0)),
                         )
+                        && (crate::cards::reference_rules_enabled()
+                            || start
+                                .location_history
+                                .get(lane)
+                                .and_then(Option::as_ref)
+                                .and_then(|history| history.time_theater_used.as_ref())
+                                .and_then(|flags| flags.complete())
+                                != Some([true, true]))
                     {
                         return Err("Time Theater per-player draw use is not recorded".into());
                     }
@@ -255,20 +270,56 @@ pub fn check_observations(
                     .locations
                     .iter()
                     .zip(&start.location_turns)
-                    .any(|(id, revealed)| {
-                        id == "Vormir" && revealed.as_i64().is_none_or(|t| t < turn)
+                    .enumerate()
+                    .any(|(lane, (id, revealed))| {
+                        id == "Vormir"
+                            && revealed.as_i64().is_none_or(|t| t < turn)
+                            && (crate::cards::reference_rules_enabled()
+                                || start
+                                    .location_history
+                                    .get(lane)
+                                    .and_then(Option::as_ref)
+                                    .and_then(|history| history.vormir_consumed.as_ref())
+                                    .and_then(|flags| flags.complete())
+                                    .is_none())
                     })
                 {
                     return Err("Vormir's per-player trigger state is not recorded".into());
                 }
                 for card in &start.board {
                     if card.revealed && card.flipped.as_i64().is_none_or(|t| t < turn) {
-                        if card.id == "Nebula" {
+                        if card.id == "Nebula"
+                            && (crate::cards::reference_rules_enabled()
+                                || card
+                                    .reference
+                                    .as_ref()
+                                    .and_then(|r| r.nebula_active())
+                                    .is_none())
+                        {
                             return Err("Nebula pre-end trigger state is not recorded".into());
                         }
-                        if card.id == "TheThingFirstSteps" {
+                        if card.id == "TheThingFirstSteps"
+                            && (crate::cards::reference_rules_enabled()
+                                || card
+                                    .reference
+                                    .as_ref()
+                                    .and_then(|r| r.thing_fill_used())
+                                    .is_none())
+                        {
                             return Err(
                                 "The Thing First Steps fill-trigger use is not recorded".into()
+                            );
+                        }
+                        if !crate::cards::reference_rules_enabled()
+                            && card.id == "JuggernautHorseman"
+                            && card
+                                .reference
+                                .as_ref()
+                                .and_then(|r| r.objective())
+                                .is_none()
+                        {
+                            return Err(
+                                "Juggernaut Horseman objective state is not recorded".into()
                             );
                         }
                     }

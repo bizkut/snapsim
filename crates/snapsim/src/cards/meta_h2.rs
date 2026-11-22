@@ -67,6 +67,18 @@ struct Objective {
     completed: bool,
 }
 
+pub(crate) fn restore_objective(card: &mut crate::game::Card, progress: usize, completed: bool) {
+    if let Some(state) = card
+        .state
+        .as_deref_mut()
+        .and_then(|state| state.as_any_mut().downcast_mut::<Objective>())
+    {
+        state.progress = progress;
+        state.ready = false;
+        state.completed = completed;
+    }
+}
+
 fn objective_state() -> Box<dyn CardState> {
     Box::new(Objective::default())
 }

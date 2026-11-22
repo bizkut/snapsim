@@ -18,6 +18,7 @@ pub struct BoardCard {
     pub created_by_location: Value,
     /// Reader ledger is only public after the opponent's card is revealed.
     pub stat_updates: Value,
+    pub reference: Option<crate::position::CardRef>,
 }
 
 /// One valid observation with the visibility history known at that point.
@@ -35,12 +36,64 @@ pub struct Frame {
     pub recruit: bool,
     pub locations: Vec<Value>,
     pub location_turns: Vec<Value>,
+    pub observed_history: Option<crate::position::ObservedHistory>,
+    pub location_history: Vec<Option<crate::position::LocationHistoryState>>,
     pub totals: Vec<Value>,
     pub board: Vec<BoardCard>,
     pub hand: Vec<Value>,
     pub hand_counts: [Value; 2],
     pub deck_counts: [Value; 2],
     pub out_of_play: Vec<(Value, &'static str)>,
+}
+
+impl Frame {
+    pub(super) fn complete_past_actions(
+        &self,
+        seat: usize,
+    ) -> Option<Vec<&crate::position::HistoryAction>> {
+        let history = self.observed_history.as_ref()?;
+        let completeness = history.action_completeness.as_ref()?;
+        let turns = match seat {
+            0 => &completeness.local,
+            1 => &completeness.opponent,
+            _ => return None,
+        };
+        let turn = u8::try_from(self.turn).ok()?;
+        if (1..turn).any(|n| turns.get(&n.to_string()) != Some(&true)) {
+            return None;
+        }
+        let owner = if seat == 0 { "local" } else { "opponent" };
+        let mut actions = Vec::new();
+        let mut orders = std::collections::HashSet::new();
+        for action in history
+            .actions
+            .as_ref()?
+            .iter()
+            .filter(|a| a.owner == owner && a.turn < turn)
+        {
+            if action.turn == 0
+                || !action.resolved
+                || action.turn_resolved != Some(action.turn)
+                || !orders.insert((action.turn, action.resolution_order?))
+                || self
+                    .board
+                    .iter()
+                    .filter(|card| {
+                        card.owner == seat
+                            && card.revealed
+                            && card.entity.as_i64() == Some(action.card_entity_id)
+                            && card.id == action.card_id
+                    })
+                    .count()
+                    != 1
+            {
+                return None;
+            }
+            actions.push(action);
+        }
+        actions.sort_by_key(|action| (action.turn, action.resolution_order));
+        Some(actions)
+    }
 }
 
 fn array(value: &Value) -> &[Value] {
@@ -58,7 +111,7 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
-/// Split valid schema-one observations at the same match boundaries as SNAP.
+/// Split valid schema-one or schema-two observations at SNAP match boundaries.
 pub fn matches(
     observations: impl IntoIterator<Item = (usize, Value)>,
 ) -> Result<Vec<Vec<Frame>>, String> {
@@ -69,8 +122,8 @@ pub fn matches(
         if !truthy(&observation) || observation["status"] == "no-active-game" {
             continue;
         }
-        if observation["schema_version"] != 1 {
-            return Err(format!("line {line}: expected SNAP schema_version 1"));
+        if observation["schema_version"] != 1 && observation["schema_version"] != 2 {
+            return Err(format!("line {line}: expected SNAP schema_version 1 or 2"));
         }
         let game = &observation["game"];
         let Some(turn) = game["turn"].as_i64().filter(|turn| *turn != 0) else {
@@ -155,6 +208,17 @@ pub fn matches(
                     } else {
                         Value::Null
                     },
+                    reference: if observation["schema_version"] == 2 && revealed {
+                        serde_json::from_value(crate::snap::card_ref(
+                            card,
+                            true,
+                            [&local["entity_id"], &opponent["entity_id"]],
+                            true,
+                        ))
+                        .ok()
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -184,7 +248,28 @@ pub fn matches(
                 && truthy(&game["legal_actions"]),
             recruit: observation["source"]["league"] == "RankedRecruit",
             locations: array(&game["locations"]).iter().map(revealed_id).collect(),
+            observed_history: if observation["schema_version"] == 2 {
+                serde_json::from_value::<crate::position::ObservedHistory>(game["history"].clone())
+                    .ok()
+                    .filter(|history| {
+                        u8::try_from(turn).is_ok_and(|turn| {
+                            crate::snap::valid_history(history, game, [local, opponent], turn)
+                        })
+                    })
+            } else {
+                None
+            },
             location_turns: watch.update(&observation),
+            location_history: array(&game["locations"])
+                .iter()
+                .map(|location| {
+                    if observation["schema_version"] == 2 && !revealed_id(location).is_null() {
+                        serde_json::from_value(location["history_state"].clone()).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
             totals: array(&game["locations"])
                 .iter()
                 .map(|location| location["total_power"].clone())
@@ -764,8 +849,8 @@ mod tests {
     #[test]
     fn rejects_invalid_schema_and_zero_seeds() {
         assert_eq!(
-            matches(vec![(42, json!({"schema_version": 2}))]).unwrap_err(),
-            "line 42: expected SNAP schema_version 1"
+            matches(vec![(42, json!({"schema_version": 3}))]).unwrap_err(),
+            "line 42: expected SNAP schema_version 1 or 2"
         );
         assert_eq!(
             check_observations(Vec::<(usize, Value)>::new(), &[], 0).unwrap_err(),

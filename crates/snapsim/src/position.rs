@@ -40,6 +40,73 @@ pub struct ObservedStatUpdate {
     pub updater_league_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PowerModifier {
+    pub operation: String,
+    pub amount: i32,
+    pub source: Option<()>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PowerModifiers {
+    pub complete: bool,
+    pub items: Vec<PowerModifier>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedAbilityContext {
+    pub fill_trigger_used: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_end_active: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedAbility {
+    pub ability_def_id: String,
+    pub index: u32,
+    pub kind: Option<String>,
+    pub lifetime: Option<String>,
+    pub has_triggered_once: Option<bool>,
+    pub state: Option<ReviewedAbilityContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedObjective {
+    pub state: String,
+    pub progress: u32,
+    pub goal: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbilityState {
+    pub complete: bool,
+    pub abilities: Vec<ReviewedAbility>,
+    pub objective: Option<ObservedObjective>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedAugment {
+    pub index: u32,
+    pub id: String,
+    pub kind: Option<String>,
+    pub ability_indexes: Vec<u32>,
+    pub overrides: Option<()>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Augments {
+    pub complete: bool,
+    pub items: Vec<ObservedAugment>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CardRef {
     pub id: String,
@@ -79,7 +146,187 @@ pub struct CardRef {
     pub merged_to_entity_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stat_updates: Option<Vec<ObservedStatUpdate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_modifiers: Option<PowerModifiers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_base_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_state: Option<AbilityState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub augments: Option<Augments>,
 }
+
+impl CardRef {
+    pub(crate) fn thing_fill_used(&self) -> Option<bool> {
+        if self.id != "TheThingFirstSteps" {
+            return None;
+        }
+        let state = self.ability_state.as_ref()?;
+        if state.abilities.len() != 1 || state.objective.is_some() {
+            return None;
+        }
+        let mut matching = state.abilities.iter().filter(|ability| {
+            ability.ability_def_id == "TheThingFirstStepsEndOfTurnTrigger"
+                && ability.kind.as_deref() == Some("trigger")
+                && ability.lifetime.is_none()
+                && ability.has_triggered_once.is_none()
+        });
+        let ability = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        let context = ability.state.as_ref()?;
+        if context.pre_end_active.is_some() {
+            return None;
+        }
+        context.fill_trigger_used
+    }
+
+    pub(crate) fn nebula_active(&self) -> Option<bool> {
+        if self.id != "Nebula" {
+            return None;
+        }
+        let state = self.ability_state.as_ref()?;
+        if state.abilities.len() != 1 || state.objective.is_some() {
+            return None;
+        }
+        let ability = &state.abilities[0];
+        if ability.ability_def_id != "NebulaPreEndOfTurnTrigger"
+            || ability.kind.as_deref() != Some("trigger")
+            || ability.lifetime.is_some()
+            || ability.has_triggered_once.is_some()
+        {
+            return None;
+        }
+        let context = ability.state.as_ref()?;
+        if context.fill_trigger_used.is_some() {
+            return None;
+        }
+        (context.pre_end_active == Some(true)).then_some(true)
+    }
+
+    pub(crate) fn objective(&self) -> Option<(usize, bool)> {
+        if self.id != "JuggernautHorseman" {
+            return None;
+        }
+        let state = self.ability_state.as_ref()?;
+        if !state.abilities.is_empty() {
+            return None;
+        }
+        let objective = state.objective.as_ref()?;
+        if objective.goal != 6 || objective.progress > objective.goal {
+            return None;
+        }
+        match objective.state.as_str() {
+            "InProgress" if objective.progress < objective.goal => {
+                Some((objective.progress as usize, false))
+            }
+            "Completed" if objective.progress == objective.goal => {
+                Some((objective.progress as usize, true))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn verified_base_power(&self) -> Option<i32> {
+        let printed = CARD_DATA.get(&self.id)?.power;
+        if self
+            .effective_base_power
+            .is_some_and(|base| base != printed)
+        {
+            return None;
+        }
+        let modifiers = self.power_modifiers.as_ref()?;
+        let updates = self.stat_updates.as_ref()?;
+        if !modifiers.complete || modifiers.items.len() != updates.len() {
+            return None;
+        }
+        let mut power = printed;
+        for (modifier, update) in modifiers.items.iter().zip(updates) {
+            if update.stat != "Power"
+                || update.update != modifier.operation
+                || update.value != modifier.amount
+            {
+                return None;
+            }
+            power = match modifier.operation.as_str() {
+                "Add" => power.checked_add(modifier.amount)?,
+                "Multiply" => power.checked_mul(modifier.amount)?,
+                // A Set may be a base override or another modifier; the two ledgers
+                // do not identify which, so do not guess.
+                _ => return None,
+            };
+        }
+        (self.power == Some(power)).then_some(printed)
+    }
+}
+/// Reviewed location context. Missing values remain unknown, not false.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocationHistoryState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vormir_consumed: Option<SeatFlags>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_theater_used: Option<SeatFlags>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_given: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeatFlags {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opponent: Option<bool>,
+}
+
+impl SeatFlags {
+    pub(crate) fn complete(&self) -> Option<[bool; 2]> {
+        Some([self.local?, self.opponent?])
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryAction {
+    pub owner: String,
+    pub turn: u8,
+    pub kind: String,
+    pub location_slot: usize,
+    pub card_entity_id: i64,
+    pub card_id: String,
+    pub resolved: bool,
+    pub turn_resolved: Option<u8>,
+    pub resolution_order: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionCompleteness {
+    #[serde(default)]
+    pub local: HashMap<String, bool>,
+    #[serde(default)]
+    pub opponent: HashMap<String, bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnDrawHistory {
+    pub card_ids: Option<Vec<String>>,
+    pub complete: bool,
+    pub last_drawn_entity_id: Option<i64>,
+    pub last_drawn_copy_state: Option<()>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedHistory {
+    pub actions: Option<Vec<HistoryAction>>,
+    pub action_completeness: Option<ActionCompleteness>,
+    pub own_draws: Option<OwnDrawHistory>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LocationRef {
     pub id: Option<String>,
@@ -91,6 +338,8 @@ pub struct LocationRef {
     pub revealed_turn: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ottos_lab_spent: Option<[bool; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_state: Option<LocationHistoryState>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Opponent {
@@ -140,6 +389,151 @@ pub struct Position {
     pub graveyard: Option<Vec<CardRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banished: Option<Vec<CardRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<ObservedHistory>,
+}
+
+impl Position {
+    pub(crate) fn complete_past_actions(&self, seat: usize) -> Option<Vec<&HistoryAction>> {
+        let history = self.history.as_ref()?;
+        let complete = history.action_completeness.as_ref()?;
+        let turns = match seat {
+            0 => &complete.local,
+            1 => &complete.opponent,
+            _ => return None,
+        };
+        if (1..self.turn).any(|turn| turns.get(&turn.to_string()) != Some(&true)) {
+            return None;
+        }
+        let owner = if seat == 0 { "local" } else { "opponent" };
+        let mut actions = Vec::new();
+        let mut orders = HashSet::new();
+        for action in history
+            .actions
+            .as_ref()?
+            .iter()
+            .filter(|a| a.owner == owner && a.turn < self.turn)
+        {
+            if action.turn == 0
+                || action.card_entity_id < 0
+                || action.location_slot >= 3
+                || self.locations[action.location_slot].id.is_none()
+                || !matches!(action.kind.as_str(), "play" | "move" | "activate")
+                || !action.resolved
+                || action.turn_resolved != Some(action.turn)
+            {
+                return None;
+            }
+            let order = action.resolution_order?;
+            if !orders.insert((action.turn, order)) {
+                return None;
+            }
+            let refs = self
+                .locations
+                .iter()
+                .flat_map(|lane| {
+                    if seat == 0 {
+                        lane.mine.iter()
+                    } else {
+                        lane.theirs.iter()
+                    }
+                })
+                .chain(if seat == 0 {
+                    self.hand.iter()
+                } else {
+                    [].iter()
+                })
+                .chain(if seat == 0 {
+                    self.graveyard.iter().flatten()
+                } else {
+                    self.opponent.graveyard.iter().flatten()
+                })
+                .chain(if seat == 0 {
+                    self.banished.iter().flatten()
+                } else {
+                    self.opponent.banished.iter().flatten()
+                });
+            if refs
+                .filter(|card| {
+                    card.entity_id == Some(action.card_entity_id) && card.id == action.card_id
+                })
+                .count()
+                != 1
+            {
+                return None;
+            }
+            actions.push(action);
+        }
+        actions.sort_by_key(|action| (action.turn, action.resolution_order));
+        Some(actions)
+    }
+
+    pub(crate) fn current_action_present(&self, seat: usize) -> Option<bool> {
+        let history = self.history.as_ref()?;
+        let complete = history.action_completeness.as_ref()?;
+        let turns = match seat {
+            0 => &complete.local,
+            1 => &complete.opponent,
+            _ => return None,
+        };
+        if turns.get(&self.turn.to_string()) != Some(&true) {
+            return None;
+        }
+        let owner = if seat == 0 { "local" } else { "opponent" };
+        let mut present = false;
+        for action in history
+            .actions
+            .as_ref()?
+            .iter()
+            .filter(|a| a.owner == owner && a.turn == self.turn)
+        {
+            if action.card_entity_id < 0
+                || action.location_slot >= 3
+                || self.locations[action.location_slot].id.is_none()
+                || !matches!(action.kind.as_str(), "play" | "move" | "activate")
+                // Unresolved entries may be undone or predicted; they do not prove a committed action.
+                || !action.resolved
+            {
+                return None;
+            }
+            let refs = self
+                .locations
+                .iter()
+                .flat_map(|lane| {
+                    if seat == 0 {
+                        lane.mine.iter()
+                    } else {
+                        lane.theirs.iter()
+                    }
+                })
+                .chain(if seat == 0 {
+                    self.hand.iter()
+                } else {
+                    [].iter()
+                })
+                .chain(if seat == 0 {
+                    self.graveyard.iter().flatten()
+                } else {
+                    self.opponent.graveyard.iter().flatten()
+                })
+                .chain(if seat == 0 {
+                    self.banished.iter().flatten()
+                } else {
+                    self.opponent.banished.iter().flatten()
+                });
+            if refs
+                .filter(|card| {
+                    card.entity_id == Some(action.card_entity_id) && card.id == action.card_id
+                })
+                .count()
+                != 1
+            {
+                return None;
+            }
+            present = true;
+        }
+        Some(present)
+    }
 }
 
 static CARD_DATA: LazyLock<HashMap<String, data::CardData>> = LazyLock::new(|| {
@@ -298,7 +692,31 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
     })
 }
 
-fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u8) {
+pub(crate) fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u8) {
+    if !cards::reference_rules_enabled() {
+        if let Some(base) = reference.verified_base_power() {
+            card.base_power_override = Some(base);
+        }
+        if let Some(used) = reference.thing_fill_used()
+            && let Some(state) = card
+                .state
+                .as_deref_mut()
+                .and_then(|state| state.as_any_mut().downcast_mut::<bool>())
+        {
+            *state = used;
+        }
+        if reference.nebula_active() == Some(true)
+            && let Some(state) = card
+                .state
+                .as_deref_mut()
+                .and_then(|state| state.as_any_mut().downcast_mut::<Option<u8>>())
+        {
+            *state = Some(turn);
+        }
+        if let Some((progress, completed)) = reference.objective() {
+            cards::restore_objective(card, progress, completed);
+        }
+    }
     card.activated = reference.activated.unwrap_or(false);
     card.created = reference.created.unwrap_or(false);
     card.latest_resolution_order = reference.latest_resolution_order.unwrap_or(0);
@@ -556,6 +974,28 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             state: src
                 .ottos_lab_spent
                 .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>)
+                .or_else(|| {
+                    if cards::reference_rules_enabled() {
+                        return None;
+                    }
+                    let history = src.history_state.as_ref()?;
+                    match src.id.as_deref()? {
+                        "Vormir" => history
+                            .vormir_consumed
+                            .as_ref()?
+                            .complete()
+                            .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
+                        "TimeTheater" => history
+                            .time_theater_used
+                            .as_ref()?
+                            .complete()
+                            .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
+                        "TheAbbey" | "Raft" => history
+                            .is_given
+                            .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
+                        _ => None,
+                    }
+                })
                 .or_else(|| def.initial_state.map(|init| init())),
         }
     });
@@ -739,6 +1179,20 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             .merged_to_entity_id
             .filter(|&entity| entity != 0)
             .and_then(|entity| entities.get(&entity).copied());
+    }
+    if !cards::reference_rules_enabled() {
+        for seat in 0..2 {
+            if position.current_action_present(seat) == Some(true) {
+                game.players[seat].non_play_action_turn = Some(position.turn);
+            }
+            if let Some(actions) = position.complete_past_actions(seat) {
+                for action in actions.into_iter().filter(|action| action.kind == "play") {
+                    if let Some(&card) = entities.get(&action.card_entity_id) {
+                        game.players[seat].play_history.push((action.turn, card));
+                    }
+                }
+            }
+        }
     }
     // Use observed resolution order; use the historic deterministic approximation
     // only for cards whose order is unavailable.
@@ -1007,4 +1461,258 @@ pub fn state_json(game: &Game<'_>) -> Value {
         "locations": game.lanes.iter().map(|l| json!({"id": l.observed_id.as_deref().unwrap_or(l.def.id), "revealed": l.revealed, "revealed_turn": l.revealed_turn, "spent": l.state.as_deref().and_then(|s| s.as_any().downcast_ref::<[bool;2]>()), "cards": l.cards.iter().map(|&id| card(id)).collect::<Vec<_>>() })).collect::<Vec<_>>(),
         "pending_reveals": game.delayed_reveals.iter().map(|p| p.iter().map(|&id| json!([game.cards[id].def.id, game.cards[id].lane])).collect::<Vec<_>>()).collect::<Vec<_>>(),
         "played": game.played.iter().map(|p| p.iter().map(|&(id, lane)| json!([game.cards[id].def.id, lane])).collect::<Vec<_>>()).collect::<Vec<_>>() })
+}
+
+#[cfg(test)]
+mod observed_history_tests {
+    use super::*;
+
+    fn base() -> Position {
+        serde_json::from_value(json!({
+            "turn":3,"total_turns":6,"energy":3,"hand":[],"deck":[],
+            "opponent":{"hand":0,"deck":0},
+            "locations":[
+                {"id":"Vormir","mine":[],"theirs":[]},
+                {"id":"TheAbbey","mine":[],"theirs":[]},
+                {"id":"CollapsedMine","mine":[],"theirs":[]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn complete_location_state_and_empty_actions_are_restored() {
+        let mut position = base();
+        let before = crate::coverage::coverage(&position)["state"].to_string();
+        assert!(before.contains("Vormir"));
+        assert!(before.contains("TheAbbey"));
+        assert!(before.contains("CollapsedMine"));
+        position.locations[0].history_state = serde_json::from_value(json!({
+            "vormir_consumed":{"local":true,"opponent":false}
+        }))
+        .unwrap();
+        position.locations[1].history_state =
+            serde_json::from_value(json!({"is_given":true})).unwrap();
+        position.history = serde_json::from_value(json!({
+            "actions":[], "action_completeness":{"local":{"3":true},"opponent":{"3":true}}
+        }))
+        .unwrap();
+        let after = crate::coverage::coverage(&position)["state"].to_string();
+        assert!(!after.contains("Vormir"));
+        assert!(!after.contains("TheAbbey"));
+        assert!(!after.contains("CollapsedMine"));
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert_eq!(
+            game.lanes[0]
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<[bool; 2]>(),
+            Some(&[true, false])
+        );
+        assert_eq!(
+            game.lanes[1]
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<bool>(),
+            Some(&true)
+        );
+        position.locations[0]
+            .history_state
+            .as_mut()
+            .unwrap()
+            .vormir_consumed
+            .as_mut()
+            .unwrap()
+            .opponent = None;
+        position
+            .history
+            .as_mut()
+            .unwrap()
+            .action_completeness
+            .as_mut()
+            .unwrap()
+            .opponent
+            .insert("3".into(), false);
+        let incomplete = crate::coverage::coverage(&position)["state"].to_string();
+        assert!(incomplete.contains("Vormir"));
+        assert!(incomplete.contains("CollapsedMine"));
+    }
+
+    #[test]
+    fn reviewed_thing_state_requires_the_exact_trigger() {
+        let mut card: CardRef = serde_json::from_value(json!({
+            "id":"TheThingFirstSteps","ability_state":{"complete":false,"abilities":[{
+                "ability_def_id":"TheThingFirstStepsEndOfTurnTrigger","index":0,"kind":"trigger",
+                "lifetime":null,"has_triggered_once":null,"state":{"fill_trigger_used":true}
+            }],"objective":null}
+        }))
+        .unwrap();
+        assert_eq!(card.thing_fill_used(), Some(true));
+        let mut runtime = make_card(&card.id, 0).unwrap();
+        apply_card_reference(&mut runtime, &card, 3);
+        assert_eq!(
+            runtime
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<bool>(),
+            Some(&true)
+        );
+        card.ability_state.as_mut().unwrap().abilities[0].ability_def_id = "other".into();
+        assert_eq!(card.thing_fill_used(), None);
+    }
+
+    #[test]
+    fn nebula_presence_and_objective_states_are_not_guessed() {
+        let mut nebula: CardRef = serde_json::from_value(json!({
+            "id":"Nebula","ability_state":{"complete":false,"abilities":[{
+                "ability_def_id":"NebulaPreEndOfTurnTrigger","index":0,"kind":"trigger",
+                "lifetime":null,"has_triggered_once":null,"state":{"pre_end_active":true}
+            }],"objective":null}
+        }))
+        .unwrap();
+        assert_eq!(nebula.nebula_active(), Some(true));
+        let mut runtime = make_card("Nebula", 0).unwrap();
+        apply_card_reference(&mut runtime, &nebula, 3);
+        assert_eq!(
+            runtime
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Option<u8>>(),
+            Some(&Some(3))
+        );
+        nebula.ability_state.as_mut().unwrap().abilities.clear();
+        assert_eq!(nebula.nebula_active(), None);
+        let mut card: CardRef = serde_json::from_value(json!({
+            "id":"JuggernautHorseman","ability_state":{"complete":false,"abilities":[],
+                "objective":{"state":"Completed","progress":6,"goal":6}}
+        }))
+        .unwrap();
+        assert_eq!(card.objective(), Some((6, true)));
+        card.ability_state
+            .as_mut()
+            .unwrap()
+            .objective
+            .as_mut()
+            .unwrap()
+            .state = "GoalReached".into();
+        assert_eq!(card.objective(), None);
+    }
+
+    #[test]
+    fn historical_actions_require_complete_turns_and_matching_entities() {
+        let mut position = base();
+        position.locations[0].mine.push(CardRef {
+            id: "PowerStone".into(),
+            entity_id: Some(42),
+            revealed: true,
+            played_turn: Some(1),
+            ..Default::default()
+        });
+        position.history = serde_json::from_value(json!({
+            "actions":[{"owner":"local","turn":1,"kind":"play","location_slot":0,
+                "card_entity_id":42,"card_id":"PowerStone","resolved":true,
+                "turn_resolved":1,"resolution_order":2}],
+            "action_completeness":{"local":{"1":true,"2":true},"opponent":{}}
+        }))
+        .unwrap();
+        assert_eq!(position.complete_past_actions(0).unwrap().len(), 1);
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert_eq!(game.players[0].play_history.len(), 1);
+        position
+            .history
+            .as_mut()
+            .unwrap()
+            .action_completeness
+            .as_mut()
+            .unwrap()
+            .local
+            .insert("2".into(), false);
+        assert!(position.complete_past_actions(0).is_none());
+        position
+            .history
+            .as_mut()
+            .unwrap()
+            .action_completeness
+            .as_mut()
+            .unwrap()
+            .local
+            .insert("2".into(), true);
+        position.history.as_mut().unwrap().actions.as_mut().unwrap()[0].card_id = "Hulk".into();
+        assert!(position.complete_past_actions(0).is_none());
+    }
+
+    #[test]
+    fn unresolved_actions_cannot_prove_a_non_skip() {
+        let mut position = base();
+        position.locations[0].mine.push(CardRef {
+            id: "Hawkeye".into(),
+            entity_id: Some(42),
+            ..Default::default()
+        });
+        position.history = serde_json::from_value(json!({
+            "actions":[{"owner":"local","turn":3,"kind":"move","location_slot":0,
+                "card_entity_id":42,"card_id":"Hawkeye","resolved":false,
+                "turn_resolved":null,"resolution_order":null}],
+            "action_completeness":{"local":{"3":true},"opponent":{"3":true}}
+        }))
+        .unwrap();
+        assert_eq!(position.current_action_present(0), None);
+        assert!(
+            crate::coverage::coverage(&position)["state"]
+                .to_string()
+                .contains("CollapsedMine")
+        );
+    }
+
+    #[test]
+    fn quantum_base_requires_matching_complete_modifier_ledger() {
+        let printed = CARD_DATA["Hawkeye"].power;
+        let mut card: CardRef = serde_json::from_value(json!({
+            "id":"Hawkeye","power":printed + 2,
+            "power_modifiers":{"complete":true,"items":[{"operation":"Add","amount":2,"source":null}]},
+            "stat_updates":[{"stat":"Power","update":"Add","value":2}]
+        })).unwrap();
+        assert_eq!(card.verified_base_power(), Some(printed));
+        card.power = Some(printed + 1);
+        assert_eq!(card.verified_base_power(), None);
+        card.power = Some(printed + 2);
+        card.power_modifiers.as_mut().unwrap().complete = false;
+        assert_eq!(card.verified_base_power(), None);
+        card.power_modifiers.as_mut().unwrap().complete = true;
+        card.power_modifiers.as_mut().unwrap().items[0].operation = "Set".into();
+        assert_eq!(card.verified_base_power(), None);
+    }
+
+    #[test]
+    fn complete_empty_augments_clear_only_the_attachment_reason() {
+        let mut position = base();
+        let mut card: CardRef = serde_json::from_value(json!({
+            "id":"Hawkeye","stat_updates":[{"stat":"Power","update":"Add","value":2,
+                "updater_augment_id":"FullLocationPowerAugment"}]
+        }))
+        .unwrap();
+        position.hand.push(card.clone());
+        assert!(
+            crate::coverage::coverage(&position)["state"]
+                .to_string()
+                .contains("Card augment")
+        );
+        card.augments = serde_json::from_value(json!({"complete":true,"items":[]})).unwrap();
+        position.hand[0] = card;
+        assert!(
+            !crate::coverage::coverage(&position)["state"]
+                .to_string()
+                .contains("Card augment")
+        );
+    }
 }

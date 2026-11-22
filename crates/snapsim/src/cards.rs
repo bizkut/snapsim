@@ -28,6 +28,7 @@ mod recruit_b;
 pub(crate) mod reference_rules;
 mod representative;
 mod sword_master;
+pub(crate) use meta_h2::restore_objective;
 pub(crate) use recruit_a::angel_replace;
 
 /// Tokens a deck may not contain: the reference's `ownable = False` cards.

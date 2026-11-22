@@ -222,6 +222,28 @@ pub(super) fn simulate(
                     .lab_spent
                     .contains(&(i, start.location_turns[i].clone(), seat))
             })) as Box<dyn crate::game::CardState>)
+        } else if !crate::cards::reference_rules_enabled() {
+            start
+                .location_history
+                .get(i)
+                .and_then(Option::as_ref)
+                .and_then(|history| match id {
+                    Some("Vormir") => history
+                        .vormir_consumed
+                        .as_ref()?
+                        .complete()
+                        .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
+                    Some("TimeTheater") => history
+                        .time_theater_used
+                        .as_ref()?
+                        .complete()
+                        .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
+                    Some("TheAbbey" | "Raft") => history
+                        .is_given
+                        .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
+                    _ => None,
+                })
+                .or_else(|| def.initial_state.map(|init| init()))
         } else {
             def.initial_state.map(|init| init())
         };
@@ -360,6 +382,9 @@ pub(super) fn simulate(
     for card in board {
         let id = card.id.as_str().ok_or("missing card_id")?;
         let index = push(&mut game, id, card.owner, &card.cost, &Value::Null)?;
+        if let Some(reference) = &card.reference {
+            position::apply_card_reference(&mut game.cards[index], reference, start.turn as u8);
+        }
         let first = frames
             .iter()
             .find_map(|frame| {
@@ -393,6 +418,20 @@ pub(super) fn simulate(
         game.cards[index].turn_played = flipped.unwrap_or(0) as u8;
         game.lanes[card.lane].cards.push(index);
         cards.push((card.entity.clone(), index));
+    }
+    if !crate::cards::reference_rules_enabled() {
+        for seat in 0..2 {
+            if let Some(actions) = start.complete_past_actions(seat) {
+                for action in actions.into_iter().filter(|action| action.kind == "play") {
+                    if let Some((_, index)) = cards
+                        .iter()
+                        .find(|(entity, _)| entity.as_i64() == Some(action.card_entity_id))
+                    {
+                        game.players[seat].play_history.push((action.turn, *index));
+                    }
+                }
+            }
+        }
     }
     for &(_, index) in &cards {
         if matches!(game.cards[index].def.id, "Hawkeye" | "JessicaJones")
