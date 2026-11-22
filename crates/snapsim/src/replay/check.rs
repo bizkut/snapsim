@@ -192,6 +192,20 @@ pub fn check_observations(
                     .any(|(id, reveal)| id == "Lemuria" && reveal.as_i64() == Some(turn));
                 let staged = staging(start, &used_samples, target, frames, delays)?;
                 checked = Some((staged.plays.clone(), delays));
+                // Spell01NicoMinoruBehaviorDef::AddNextCardTriggerToPlayer
+                // (0x7f46cbc) installs a PostCardResolved trigger. The recorded
+                // Nico identity does not expose the chosen spell or whether its
+                // next-card trigger is still pending at this planning frame.
+                if start.board.iter().any(|card| {
+                    card.revealed
+                        && card.id == "NicoMinoru"
+                        && staged
+                            .plays
+                            .iter()
+                            .any(|play| play.card.owner == card.owner)
+                }) {
+                    return Err("Nico Minoru's spell and pending next-card effect are not observable at the start of the turn".into());
+                }
                 let mut best = None;
                 for seed in 0..seeds {
                     let diffs = super::simulate::simulate(

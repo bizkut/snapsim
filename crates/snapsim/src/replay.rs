@@ -546,6 +546,42 @@ mod tests {
     }
 
     #[test]
+    fn nico_hidden_next_card_spell_is_not_reported_as_rule_failure() {
+        let mut start = observation(2, "nico", false);
+        start["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 35, "owner_entity_id": 2, "card_id": "NicoMinoru",
+            "revealed": true, "power": 2, "turn_revealed": 1
+        }]);
+        start["game"]["locations"][1]["location_id"] = json!("Proscenium");
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "card_id": "Forge",
+            "revealed": true, "power": 4, "turn_revealed": 2
+        }]);
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][2]["location_id"] = json!("Ruins");
+        next["game"]["locations"][1]["cards"][0]["card_id"] = json!("Demon");
+        next["game"]["locations"][1]["cards"][0]["power"] = json!(6);
+        let rows = check_observations(
+            vec![(1, start), (2, submitted), (3, revealed), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("Nico Minoru's spell"));
+    }
+
+    #[test]
     fn rejects_invalid_schema_and_zero_seeds() {
         assert_eq!(
             matches(vec![(42, json!({"schema_version": 2}))]).unwrap_err(),

@@ -149,15 +149,22 @@ fn mirror_dimension(game: &mut Game<'_>, lane: usize) {
     }
 }
 fn zenn_la(game: &mut Game<'_>, lane: usize) {
+    if crate::cards::reference_rules_enabled() {
+        crate::cards::reference_rules::zenn_la(game, lane);
+        return;
+    }
+    // ZennLaBehavior::RecruitThreeCostCard (0x7d9bcec) takes the first matching
+    // deck card; its predicate (0x7d9c414) compares DefCost, not modified cost.
     for seat in 0..2 {
         let slot = game.players[seat]
             .deck
             .iter()
-            .position(|&id| game.card_cost(id) == 3);
+            .position(|&id| game.printed_cost(id) == 3);
         if let Some(slot) = slot {
             let id = game.players[seat].deck[slot];
-            if game.add_card(id, lane, seat, false) {
+            if game.can_add(id, lane, seat) {
                 game.players[seat].deck.remove(slot);
+                game.add_card(id, lane, seat, true);
             }
         }
     }
@@ -294,6 +301,60 @@ mod tests {
     use crate::game::Game;
     use crate::position::UNKNOWN_LOCATION;
     use crate::random::PythonRandom;
+
+    #[test]
+    fn zenn_la_reveals_first_printed_three_cost_card() {
+        let deck: Vec<String> = [
+            "Hawkeye",
+            "Wolfsbane",
+            "Bishop",
+            "Nightcrawler",
+            "AntMan",
+            "Angela",
+            "JessicaJones",
+            "KaZar",
+            "IronMan",
+            "BlueMarvel",
+            "Ultron",
+            "SquirrelGirl",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let locations: Vec<String> = ["ZennLa", "Ruins", "Xandar"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut rng = PythonRandom::seed(1);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        game.players[0].deck.clear();
+        game.players[1].deck.clear();
+        game.lanes[0].def = crate::locations::get("ZennLa").unwrap();
+        game.lanes[0].revealed = true;
+        game.turn = 2;
+        let hawkeye = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Hawkeye", 0).unwrap());
+        game.add_card(hawkeye, 0, 0, false);
+        let nightcrawler = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Nightcrawler", 0).unwrap());
+        game.cards[nightcrawler].cost = 3;
+        let wolfsbane = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Wolfsbane", 0).unwrap());
+        game.cards[wolfsbane].cost = 2;
+        let bishop = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Bishop", 0).unwrap());
+        game.players[0].deck = vec![nightcrawler, wolfsbane, bishop];
+
+        super::zenn_la(&mut game, 0);
+
+        assert_eq!(game.players[0].deck, vec![nightcrawler, bishop]);
+        assert!(game.cards[wolfsbane].revealed);
+        assert_eq!(game.cards[wolfsbane].power(), 4);
+    }
 
     #[test]
     fn mirror_dimension_copies_a_location_without_rules() {

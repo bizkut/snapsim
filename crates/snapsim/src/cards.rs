@@ -18,7 +18,7 @@ mod meta_e1;
 mod meta_e2;
 mod recruit_a;
 mod recruit_b;
-mod reference_rules;
+pub(crate) mod reference_rules;
 mod representative;
 mod sword_master;
 pub(crate) use recruit_a::angel_replace;
@@ -100,6 +100,10 @@ static ENV_REFERENCE_RULES: LazyLock<bool> =
 /// Python module.
 pub fn use_reference_rules() {
     USE_REFERENCE_RULES.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn reference_rules_enabled() -> bool {
+    USE_REFERENCE_RULES.load(Ordering::Relaxed) || *ENV_REFERENCE_RULES
 }
 
 /// Cards a deck may contain and random-card effects draw from: every registered non-token
@@ -333,7 +337,7 @@ pub fn registry() -> impl Iterator<Item = &'static CardDef> {
 }
 
 pub fn get(id: &str) -> Option<&'static CardDef> {
-    if (USE_REFERENCE_RULES.load(Ordering::Relaxed) || *ENV_REFERENCE_RULES)
+    if reference_rules_enabled()
         && let Some(entry) = reference_rules::CARDS.iter().find(|entry| entry.id == id)
     {
         return Some(entry);

@@ -13,7 +13,7 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
 * `compare --mode recruit` or `compare --deck-file FILE` compares advisors in paired seats. Options include `--hero-deck`, `--deck-prior`, `--games`, `--seed`, `--workers`, `--rollouts`, `--time-limit`, and the per-side `--a-rollouts`, `--a-playout`, `--a-prior` and corresponding `--b-*` flags.
 * `benchmark --mode recruit` or `benchmark --deck-file FILE` compares controllers. It accepts `--games`, `--seed`, `--rollouts`, and `--opponent`.
 * Plans include the client's player actions: playing a hand card, moving a movable card and activating an Activate ability. `--plays-only` (on `position`, `compare`, `benchmark` and `deckbuild`) restricts plans to plays, as the frozen reference did; the parity gates use it.
-* The game-log replay checker is the separate binary `snapsim-replaycheck FILE...` (`cargo build --release -p snapsim --bin snapsim-replaycheck`). It replays recorded turns and reports each as consistent, inconsistent or not checkable; use it to validate rule changes against real matches.
+* The game-log replay checker is the separate binary `snapsim-replaycheck FILE...` (`cargo build --release -p snapsim --bin snapsim-replaycheck`). It replays recorded turns and reports each as consistent, inconsistent or not checkable; use it to validate rule changes against real matches. A turn with a previously revealed Nico Minoru and a subsequent play by her owner is not checkable because her chosen spell and pending trigger are not recorded.
 
 ## Architecture
 
@@ -163,6 +163,7 @@ Two kinds of record are reported rather than compared:
 * Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of an engine change is listed with its exact first-divergence path and values in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. A changed card keeps the reference's version in `cards/reference_rules.rs`, which the gates switch to with `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`; live play never does. The `replay-client` gate then checks the client rules, these changes included, against every real recording. The changes:
   * Horde grows every owned Zombie Horde (`ZombieHordeAbilityDef::GrowZombieHorde`), not just the first; it changes one spread game. A new Horde is placed before it grows, so the growth triggers in play.
   * Wolfsbane counts every other card its owner has at its location, face-down ones included (`WolfsbaneBehavior::GetTargets` over `Location::GetAllCards`); the reference counted revealed cards only. Reference rules: `cards/reference_rules.rs`.
+  * Zenn-La recruits the first card in deck order with printed cost 3 and reveals it (`ZennLaBehavior::RecruitThreeCostCard`, predicate `0x7d9c414`); the reference checks effective cost and skips On Reveal. Reference rules: `cards/reference_rules.rs`.
   * A card whose text was removed no longer reacts to events.
   * Start-of-turn, game-start, draw and Empower events also reach on-event hooks of cards in hand and deck.
   * `Game::top_card` is the literal top card (`Deck::GetTopCard`), not the next card `draw` would take.

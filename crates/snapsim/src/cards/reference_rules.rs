@@ -28,3 +28,19 @@ fn wolfsbane(g: &mut Game, id: usize) {
         .count();
     g.add_power(id, 2 * count as i32, g.cards[id].owner);
 }
+
+/// The frozen Zenn-La rule uses effective cost and does not trigger On Reveal.
+pub(crate) fn zenn_la(game: &mut Game<'_>, lane: usize) {
+    for seat in 0..2 {
+        let slot = game.players[seat]
+            .deck
+            .iter()
+            .position(|&id| game.card_cost(id) == 3);
+        if let Some(slot) = slot {
+            let id = game.players[seat].deck[slot];
+            if game.add_card(id, lane, seat, false) {
+                game.players[seat].deck.remove(slot);
+            }
+        }
+    }
+}
