@@ -259,6 +259,28 @@ impl CardRef {
         }
         (self.power == Some(power)).then_some(printed)
     }
+
+    /// Both client power ledgers must be complete and agree entry for entry.
+    pub(crate) fn has_complete_power_modifier_history(&self) -> bool {
+        let Some(modifiers) = &self.power_modifiers else {
+            return false;
+        };
+        let Some(updates) = &self.stat_updates else {
+            return false;
+        };
+        modifiers.complete
+            && modifiers.items.len() == updates.len()
+            && modifiers
+                .items
+                .iter()
+                .zip(updates)
+                .all(|(modifier, update)| {
+                    update.stat == "Power"
+                        && update.update == modifier.operation
+                        && update.value == modifier.amount
+                        && matches!(update.update.as_str(), "Add" | "Multiply" | "Set")
+                })
+    }
 }
 /// Reviewed location context. Missing values remain unknown, not false.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -990,7 +1012,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                             .as_ref()?
                             .complete()
                             .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
-                        "TheAbbey" | "Raft" => history
+                        "TheAbbey" | "Raft" | "WhiteHotRoom" => history
                             .is_given
                             .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
                         _ => None,
@@ -1185,6 +1207,36 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         for seat in 0..2 {
             if position.current_action_present(seat) == Some(true) {
                 game.players[seat].non_play_action_turn = Some(position.turn);
+            }
+            // Action completeness is per turn, so a complete recent turn remains
+            // useful even if an earlier turn was not observed. These record
+            // staged player moves only, not forced moves.
+            if let Some(history) = position.history.as_ref()
+                && let (Some(actions), Some(completeness)) =
+                    (&history.actions, &history.action_completeness)
+            {
+                let (owner, turns) = if seat == 0 {
+                    ("local", &completeness.local)
+                } else {
+                    ("opponent", &completeness.opponent)
+                };
+                for action in actions.iter().filter(|action| {
+                    action.owner == owner
+                        && action.turn > 0
+                        && action.turn < position.turn
+                        && turns.get(&action.turn.to_string()) == Some(&true)
+                        && action.resolved
+                        && action.turn_resolved == Some(action.turn)
+                }) {
+                    let target = match action.kind.as_str() {
+                        "play" => &mut game.players[seat].observed_play_turns,
+                        "move" => &mut game.players[seat].observed_move_turns,
+                        _ => continue,
+                    };
+                    if !target.contains(&action.turn) {
+                        target.push(action.turn);
+                    }
+                }
             }
             if let Some(actions) = position.complete_past_actions(seat) {
                 for action in actions.into_iter().filter(|action| action.kind == "play") {
@@ -1629,6 +1681,8 @@ mod observed_history_tests {
         let mut rng = PythonRandom::seed(1);
         let game = build_game(&position, &mut rng).unwrap();
         assert_eq!(game.players[0].play_history.len(), 1);
+        assert!(game.has_played_on_turn(0, 1));
+        assert!(!game.has_moved_on_turn(0, 1));
         position
             .history
             .as_mut()
@@ -1639,6 +1693,8 @@ mod observed_history_tests {
             .local
             .insert("2".into(), false);
         assert!(position.complete_past_actions(0).is_none());
+        let game = build_game(&position, &mut rng).unwrap();
+        assert!(game.has_played_on_turn(0, 1));
         position
             .history
             .as_mut()
@@ -1684,14 +1740,17 @@ mod observed_history_tests {
             "stat_updates":[{"stat":"Power","update":"Add","value":2}]
         })).unwrap();
         assert_eq!(card.verified_base_power(), Some(printed));
+        assert!(card.has_complete_power_modifier_history());
         card.power = Some(printed + 1);
         assert_eq!(card.verified_base_power(), None);
         card.power = Some(printed + 2);
         card.power_modifiers.as_mut().unwrap().complete = false;
         assert_eq!(card.verified_base_power(), None);
+        assert!(!card.has_complete_power_modifier_history());
         card.power_modifiers.as_mut().unwrap().complete = true;
         card.power_modifiers.as_mut().unwrap().items[0].operation = "Set".into();
         assert_eq!(card.verified_base_power(), None);
+        assert!(!card.has_complete_power_modifier_history());
     }
 
     #[test]

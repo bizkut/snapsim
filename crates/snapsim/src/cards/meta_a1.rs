@@ -19,6 +19,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     },
     CardDef {
         end_turn: Some(fantastic),
+        end_turn_trigger: true,
         ..CardDef::vanilla("MrFantasticFirstSteps")
     },
     CardDef {
@@ -35,6 +36,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     },
     CardDef {
         end_turn: Some(adam_warlock),
+        end_turn_trigger: true,
         ..CardDef::vanilla("AdamWarlock")
     },
     CardDef {

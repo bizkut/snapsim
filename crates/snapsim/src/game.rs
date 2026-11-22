@@ -202,11 +202,36 @@ impl Card {
                 || self.ability_def().late_ongoing.is_some()
                 || self.ability_def().ongoing_ability
                 || self.ability_def().cost_guard.is_some()
+                || self.ability_def().destroy_guard.is_some()
+                || self.ability_def().blocks_expensive_plays
                 || self.ability_def().blocks_spawns
                 || self.ability_def().blocks_reveal
                 || self.ability_def().prevents_destroy
                 || self.ability_def().locks_lane)
     }
+    /// GorrBehavior::GetPowerChange (0x7eb883c), predicate 0x7eb8d4c.
+    /// Current attached ability kinds are watches, movement, and preparation;
+    /// none is a ThisCardResolvedTrigger.
+    pub fn has_resolve_trigger(&self) -> bool {
+        !self.abilities_removed && self.ability_def().reveal.is_some()
+    }
+
+    /// FantasticarBehavior::GetTargetCard (0x7ea7514), predicate 0x7ea7c8c.
+    pub fn has_end_turn_trigger(&self) -> bool {
+        !self.abilities_removed
+            && (self.ability_def().end_turn.is_some() || self.ability_def().end_turn_trigger)
+    }
+
+    /// Card::HasNoText (0x7cb3768) uses the effective client behavior
+    /// definition, not its printed description or currently suppressed abilities.
+    pub fn has_no_text(&self) -> Option<bool> {
+        if self.abilities_removed {
+            Some(true)
+        } else {
+            cards::no_text::has_no_text(self.ability_def().id)
+        }
+    }
+
     pub fn can_reduce_power(&self) -> bool {
         !self.revealed || !self.ability_def().immune_destroy_move
     }
@@ -304,6 +329,8 @@ pub struct Player {
     pub move_grants: Vec<MoveGrant>,
     staged_actions: Vec<StagedAction>,
     pub scheduled_energy: Vec<(u8, i32)>,
+    /// Persistent increase to energy refreshed on each subsequent turn.
+    pub permanent_energy: i32,
     pub movable_cards_played: Vec<usize>,
     /// Drawn cards, preserving the turn and draw order.
     pub draws: Vec<(u8, usize)>,
@@ -311,6 +338,9 @@ pub struct Player {
     pub play_history: Vec<(u8, usize)>,
     /// Snapshot of all staged plays, including those not yet resolved.
     pub staged_history: Vec<StagedPlay>,
+    /// Observed turns containing plays or moves, including cards no longer visible.
+    pub observed_play_turns: Vec<u8>,
+    pub observed_move_turns: Vec<u8>,
     /// Turn of a player-staged move or activation, even if resolution fails.
     pub non_play_action_turn: Option<u8>,
     /// Last turn on which a voluntary move was staged from each lane.
@@ -408,6 +438,10 @@ pub enum Event {
         seat: usize,
     },
     LocationRevealed {
+        lane: usize,
+    },
+    /// PostLocationMorphedTrigger, after a location replacement resolves.
+    LocationMorphed {
         lane: usize,
     },
     EnergyChanged {
@@ -709,7 +743,11 @@ impl<'a> Game<'a> {
         }
         if matches!(
             event,
-            Event::GameStart | Event::TurnStart | Event::Empower { .. } | Event::CardDrawn { .. }
+            Event::GameStart
+                | Event::TurnStart
+                | Event::TurnEnd
+                | Event::Empower { .. }
+                | Event::CardDrawn { .. }
         ) {
             let observers: Vec<_> = self
                 .players
@@ -796,6 +834,24 @@ impl<'a> Game<'a> {
         self.players[seat].pending_effects = survivors;
     }
 
+    /// Player::HasCardStagedForPlay (0x7de9de0), including observed history.
+    pub fn has_played_on_turn(&self, seat: usize, turn: u8) -> bool {
+        self.players[seat].observed_play_turns.contains(&turn)
+            || self.players[seat]
+                .staged_history
+                .iter()
+                .any(|play| play.turn == turn)
+    }
+
+    /// MilesMoralesBehavior::ReduceCost (0x7ef8abc), including forced moves.
+    pub fn has_moved_on_turn(&self, seat: usize, turn: u8) -> bool {
+        self.players[seat].observed_move_turns.contains(&turn)
+            || self
+                .cards
+                .iter()
+                .any(|card| card.owner == seat && card.move_turns.contains(&turn))
+    }
+
     pub fn set_total_turns(&mut self, turns: u8) {
         // Game::ModifyTotalNumTurns @ 0x7db19c0 clamps the new total to
         // the current turn, so removing Limbo cannot cancel an ongoing turn 7.
@@ -821,6 +877,12 @@ impl<'a> Game<'a> {
             });
         }
     }
+    /// Player::AddPermanentEnergy (0x7ca0900) schedules a persistent maximum
+    /// increase from the next turn for post-resolve and end-turn effects.
+    pub fn add_permanent_energy(&mut self, seat: usize, amount: i32) {
+        self.players[seat].permanent_energy += amount;
+    }
+
     pub fn schedule_energy(&mut self, seat: usize, turn: u8, amount: i32) {
         self.players[seat].scheduled_energy.push((turn, amount));
     }
@@ -1741,6 +1803,20 @@ impl<'a> Game<'a> {
         cost.max(0)
     }
 
+    /// QuakeBehavior::ShuffleLocations (0x7f1da74): move the other two
+    /// location objects and their occupants, without rewriting slot history.
+    pub fn swap_other_locations(&mut self, source: usize) {
+        let a = (source + 1) % 3;
+        let b = (source + 2) % 3;
+        self.lanes.swap(a, b);
+        for lane in [a, b] {
+            for &card in &self.lanes[lane].cards {
+                self.cards[card].lane = Some(lane);
+            }
+        }
+        self.ongoing();
+    }
+
     /// Replace and immediately reveal a location without moving its cards.
     pub fn replace_location(&mut self, lane: usize, id: &str) {
         let def = locations::get(id).expect("unregistered replacement location");
@@ -1778,6 +1854,7 @@ impl<'a> Game<'a> {
             self.set_energy(seat, energy);
         }
         self.ongoing();
+        self.emit(Event::LocationMorphed { lane });
     }
 
     pub fn has_space(&self, lane: usize, seat: usize, queued: usize) -> bool {
@@ -1838,9 +1915,28 @@ impl<'a> Game<'a> {
         {
             return false;
         }
+        // GooseBehavior::PreventExpensiveCards (0x7eb7988).
+        if self.card_cost(card) >= 4
+            && self.lanes[lane].cards.iter().any(|&source| {
+                self.cards[source].revealed
+                    && self.ongoing_active(source)
+                    && self.cards[source].ability_def().blocks_expensive_plays
+            })
+        {
+            return false;
+        }
         for (source, location) in self.lanes.iter().enumerate() {
             if !location.revealed {
                 continue;
+            }
+            // ParkerIndustriesBehavior (0x7d7177c) limits staged plays
+            // globally, not just at the source location.
+            if location
+                .def
+                .allows_play_globally_with_count
+                .is_some_and(|test| !test(self, source, seat, queued_total))
+            {
+                return false;
             }
             let predicate = if source == lane {
                 location.def.allows_play
@@ -2171,7 +2267,9 @@ impl<'a> Game<'a> {
                                     to: lane,
                                 });
                             }
-                            self.finish_move(card, from, lane);
+                            if self.cards[card].lane == Some(lane) {
+                                self.finish_move(card, from, lane);
+                            }
                         }
                     }
                     Action::Activate { card } => {
@@ -2226,6 +2324,9 @@ impl<'a> Game<'a> {
                 from: source,
                 to: destination,
             });
+        }
+        if self.cards[card].lane != Some(source) {
+            return false;
         }
         self.lanes[source].cards.retain(|&id| id != card);
         self.cards[card].last_lane = Some(source);
@@ -2498,9 +2599,21 @@ impl<'a> Game<'a> {
         self.ongoing();
         true
     }
-    pub fn discard_card(&mut self, seat: usize, card: usize) {
+    /// FalconBehavior::ReturnOneCostCards (0x7ea603c) moves a board card
+    /// back to its owner's hand, retaining its permanent modifications.
+    pub fn return_board_card_to_hand(&mut self, card: usize) -> bool {
+        let seat = self.cards[card].owner;
+        if self.players[seat].hand.len() >= 7 || !self.take_from_board(card) {
+            return false;
+        }
+        self.add_hand(seat, card, false)
+    }
+
+    /// Return whether the discard succeeded, including cards whose discard
+    /// trigger subsequently returns them to hand.
+    pub fn discard_card(&mut self, seat: usize, card: usize) -> bool {
         if self.thanos_stone_active(card, "SoulStone") {
-            return;
+            return false;
         }
         let slot = self.players[seat]
             .hand
@@ -2514,6 +2627,7 @@ impl<'a> Game<'a> {
             self.players[seat].discard.push(card);
         }
         self.emit(Event::CardDiscarded { card, seat });
+        true
     }
     /// Game::BanishCard (0x7dac084) moves the card to its owner's banished zone.
     pub fn banish_card(&mut self, card: usize) -> bool {
@@ -2595,6 +2709,22 @@ impl<'a> Game<'a> {
         }) {
             return false;
         }
+        // CaieraBehavior::ProtectCardsByCost (0x7e79584).
+        if self
+            .lanes
+            .iter()
+            .flat_map(|location| &location.cards)
+            .any(|&source| {
+                self.cards[source].revealed
+                    && self.ongoing_active(source)
+                    && self.cards[source]
+                        .ability_def()
+                        .destroy_guard
+                        .is_some_and(|guard| !guard(self, source, card))
+            })
+        {
+            return false;
+        }
         self.lanes[lane].cards.retain(|&id| id != card);
         self.cards[card].last_lane = Some(lane);
         self.players[self.cards[card].owner]
@@ -2605,6 +2735,7 @@ impl<'a> Game<'a> {
         }
         self.cards[card].lane = None;
         if self.cards[card].revealed
+            && !self.cards[card].abilities_removed
             && let Some(hook) = self.cards[card].ability_def().on_destroy
         {
             hook(self, card);
@@ -2635,6 +2766,13 @@ impl<'a> Game<'a> {
         if self.players[seat].hand.len() >= 7 {
             return;
         }
+        // WidowsBiteBehavior::StopCardDraw (0x7cf2bd8).
+        if self.players[seat].hand.iter().any(|&card| {
+            !self.cards[card].abilities_removed
+                && self.cards[card].ability_def().blocks_draw_in_hand
+        }) {
+            return;
+        }
         for lane in 0..3 {
             if self.lanes[lane].revealed
                 && let Some(hook) = self.lanes[lane].def.before_draw
@@ -2660,7 +2798,8 @@ impl<'a> Game<'a> {
         self.played_on_reveal = [false; 2];
         self.delays_reveals = false;
         for seat in 0..2 {
-            self.set_energy(seat, i32::from(self.turn));
+            let permanent_energy = self.players[seat].permanent_energy;
+            self.set_energy(seat, i32::from(self.turn) + permanent_energy);
             let bonus: i32 = self.players[seat]
                 .scheduled_energy
                 .iter()
@@ -2728,7 +2867,7 @@ impl<'a> Game<'a> {
         self.is_wait_for_staging = true;
     }
     pub fn powers(&self) -> [[i32; 2]; 3] {
-        std::array::from_fn(|lane| {
+        let base: [[i32; 2]; 3] = std::array::from_fn(|lane| {
             std::array::from_fn(|seat| {
                 (self.lanes[lane]
                     .cards
@@ -2739,7 +2878,22 @@ impl<'a> Game<'a> {
                     + self.lanes[lane].bonus[seat])
                     * self.lanes[lane].multiplier[seat]
             })
-        })
+        });
+        // NexusBehavior::AddPowerToOtherLocations (0x7d8b0b4): each
+        // contribution uses the unmodified lane total, not other Nexus bonuses.
+        let mut result = base;
+        for (source, location) in self.lanes.iter().enumerate() {
+            if location.revealed && location.def.contributes_to_other_lanes {
+                for (destination, totals) in result.iter_mut().enumerate() {
+                    if source != destination {
+                        for seat in 0..2 {
+                            totals[seat] += base[source][seat];
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
     pub fn winner(&self) -> i32 {
         let powers = self.powers();
@@ -2973,6 +3127,9 @@ impl<'a> Game<'a> {
             }
         }
         self.emit(Event::BeforeCardRevealed { card: id });
+        if self.cards[id].lane.is_none() {
+            return;
+        }
         if self.cards[id].turn_played > 0 {
             self.trigger_player_effects(
                 self.cards[id].owner,
@@ -3566,6 +3723,14 @@ impl<'a> Game<'a> {
             }
         }
         self.emit(Event::AfterTurnEnd);
+        // SandcastleBehavior (0x7d7e0fc) and TVA behavior (0x7d8f724)
+        // end the match after this turn's effects, without shortening an
+        // already-started turn.
+        if self.lanes.iter().any(|lane| {
+            lane.revealed && lane.def.maximum_turns != 0 && self.turn >= lane.def.maximum_turns
+        }) {
+            self.set_total_turns(self.turn);
+        }
     }
 
     fn resolve_started_turn<P>(
@@ -3743,6 +3908,207 @@ mod staging_tests {
         game.cards[card].revealed = true;
         game.lanes[lane].cards.push(card);
         card
+    }
+
+    #[test]
+    fn swapping_locations_moves_occupants_but_not_slot_history() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.lanes[1].def = locations::get("Xandar").unwrap();
+        let card = place(&mut game, "Wasp", 0, 1);
+        game.played[0].push((card, 1));
+        game.swap_other_locations(0);
+        assert_eq!(game.lanes[2].def.id, "Xandar");
+        assert_eq!(game.cards[card].lane, Some(2));
+        assert_eq!(game.lanes[2].cards, [card]);
+        assert_eq!(game.played[0], [(card, 1)]);
+    }
+
+    #[test]
+    fn permanent_energy_refreshes_on_next_turn_and_survives_fork() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.turn = 4;
+        game.players[0].energy = 2;
+        game.add_permanent_energy(0, 3);
+        assert_eq!(game.players[0].energy, 2);
+        let mut fork_rng = game.fork_rng();
+        let mut fork = game.fork(fork_rng.as_mut());
+        fork.turn = 5;
+        fork.start_turn();
+        assert_eq!(fork.players[0].energy, 8);
+        assert_eq!(fork.players[1].energy, 5);
+    }
+
+    #[test]
+    fn has_no_text_uses_effective_definition_and_removed_text() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        let card = game.create_card("Wasp", 0);
+        assert_eq!(game.cards[card].has_no_text(), Some(true));
+        game.cards[card].override_ability = cards::get("Hawkeye");
+        assert_eq!(game.cards[card].has_no_text(), Some(false));
+        game.cards[card].abilities_removed = true;
+        assert_eq!(game.cards[card].has_no_text(), Some(true));
+    }
+
+    #[test]
+    fn discard_reports_immunity_and_success() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        let stone = place(&mut game, "SoulStone", 0, 0);
+        let thanos = game.create_card("Thanos", 0);
+        game.players[0].hand.push(thanos);
+        assert!(!game.discard_card(0, thanos));
+        assert!(game.players[0].hand.contains(&thanos));
+        game.cards[stone].abilities_removed = true;
+        assert!(game.discard_card(0, thanos));
+        assert!(!game.players[0].hand.contains(&thanos));
+    }
+
+    #[test]
+    fn end_turn_trigger_uses_effective_text_and_removal_state() {
+        static EVENT_TRIGGER: CardDef = CardDef {
+            end_turn_trigger: true,
+            ..CardDef::vanilla("EventTriggerTest")
+        };
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        let card = game.create_card("Wasp", 0);
+        assert!(!game.cards[card].has_end_turn_trigger());
+        game.cards[card].override_ability = Some(&EVENT_TRIGGER);
+        assert!(game.cards[card].has_end_turn_trigger());
+        game.cards[card].abilities_removed = true;
+        assert!(!game.cards[card].has_end_turn_trigger());
+    }
+
+    #[test]
+    fn global_play_predicate_applies_across_lanes() {
+        fn only_first(_: &Game<'_>, _: usize, _: usize, queued: usize) -> bool {
+            queued == 0
+        }
+        static GLOBAL: LocationDef = LocationDef {
+            allows_play_globally_with_count: Some(only_first),
+            ..locations::location("GlobalTest", 0, 0, 1, false)
+        };
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.lanes[0].def = &GLOBAL;
+        let card = game.create_card("Wasp", 0);
+        assert!(game.can_play_with_count(card, 2, 0, 6, 0, 0));
+        assert!(!game.can_play_with_count(card, 2, 0, 6, 0, 1));
+        game.lanes[0].revealed = false;
+        assert!(game.can_play_with_count(card, 2, 0, 6, 0, 1));
+    }
+
+    #[test]
+    fn lane_play_and_global_destruction_guards_follow_effective_ongoing() {
+        fn protect(game: &Game<'_>, source: usize, target: usize) -> bool {
+            game.cards[source].owner != game.cards[target].owner
+        }
+        static GOOSE: CardDef = CardDef {
+            blocks_expensive_plays: true,
+            ..CardDef::vanilla("GooseTest")
+        };
+        static PROTECT: CardDef = CardDef {
+            destroy_guard: Some(protect),
+            ..CardDef::vanilla("ProtectTest")
+        };
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        let goose = place(&mut game, "Wasp", 0, 0);
+        game.cards[goose].override_ability = Some(&GOOSE);
+        let hulk = game.create_card("Hulk", 1);
+        assert!(!game.can_play(hulk, 0, 1, 6, 0));
+        assert!(game.can_play(hulk, 1, 1, 6, 0));
+        game.cards[goose].abilities_removed = true;
+        assert!(game.can_play(hulk, 0, 1, 6, 0));
+        game.cards[goose].abilities_removed = false;
+        game.cards[goose].override_ability = Some(&PROTECT);
+        let ally = place(&mut game, "Cyclops", 0, 1);
+        assert!(!game.destroy_card(ally));
+        game.cards[goose].abilities_removed = true;
+        assert!(game.destroy_card(ally));
+    }
+
+    #[test]
+    fn hand_draw_blocker_stops_draw_until_removed() {
+        static BITE: CardDef = CardDef {
+            blocks_draw_in_hand: true,
+            ..CardDef::vanilla("BiteTest")
+        };
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.players[0].hand.clear();
+        game.players[0].deck.clear();
+        let bite = game.create_card("Wasp", 0);
+        let drawn = game.create_card("Hulk", 0);
+        game.cards[bite].override_ability = Some(&BITE);
+        game.players[0].hand.push(bite);
+        game.players[0].deck.push(drawn);
+        game.draw(0);
+        assert_eq!(game.players[0].deck, [drawn]);
+        game.cards[bite].abilities_removed = true;
+        game.draw(0);
+        assert_eq!(game.players[0].hand, [bite, drawn]);
+    }
+
+    #[test]
+    fn previous_action_queries_include_observed_and_card_history() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.players[0].observed_play_turns.push(2);
+        game.players[0].observed_move_turns.push(2);
+        assert!(game.has_played_on_turn(0, 2));
+        assert!(game.has_moved_on_turn(0, 2));
+        assert!(!game.has_played_on_turn(1, 2));
+        let card = place(&mut game, "Wasp", 0, 0);
+        game.turn = 3;
+        assert!(game.move_card(card, 1));
+        assert!(game.take_from_board(card));
+        assert!(game.has_moved_on_turn(0, 3));
+    }
+
+    #[test]
+    fn return_to_hand_respects_capacity_and_preserves_power() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        let card = place(&mut game, "Wasp", 0, 1);
+        game.cards[card].permanent = 9;
+        game.players[0].hand = vec![card; 7];
+        assert!(!game.return_board_card_to_hand(card));
+        assert_eq!(game.cards[card].lane, Some(1));
+        game.players[0].hand.clear();
+        assert!(game.return_board_card_to_hand(card));
+        assert_eq!(game.cards[card].permanent, 9);
+        assert!(!game.cards[card].revealed);
+        assert_eq!(game.players[0].hand, [card]);
+    }
+
+    #[test]
+    fn location_scoring_uses_base_power_and_turn_cap_applies_at_end() {
+        static NEXUS: LocationDef = LocationDef {
+            contributes_to_other_lanes: true,
+            ..locations::location("TestNexus", 0, 0, 1, false)
+        };
+        static END: LocationDef = LocationDef {
+            maximum_turns: 4,
+            ..locations::location("TestEnd", 0, 0, 1, false)
+        };
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.lanes[0].def = &NEXUS;
+        game.lanes[1].def = &NEXUS;
+        game.lanes[2].def = &END;
+        game.lanes[0].bonus = [2, 1];
+        game.lanes[1].bonus = [3, 4];
+        assert_eq!(game.powers(), [[5, 5], [5, 5], [5, 5]]);
+        game.turn = 3;
+        game.end_turn_effects();
+        assert_eq!(game.total_turns, 6);
+        game.turn = 4;
+        game.end_turn_effects();
+        assert_eq!(game.total_turns, 4);
     }
 
     fn check_pre_end_order(expected: i32) {

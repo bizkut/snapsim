@@ -9,6 +9,7 @@ mod locations_d2;
 mod locations_d3;
 mod locations_e;
 mod locations_f;
+mod locations_g;
 mod recruit_a;
 mod turns;
 
@@ -18,6 +19,7 @@ pub type LocationHook = fn(&mut Game<'_>, usize);
 pub type CardHook = fn(&mut Game<'_>, usize, usize);
 pub type MoveHook = fn(&mut Game<'_>, usize, usize, usize);
 pub type PlayPredicate = fn(&Game<'_>, usize, usize, usize, usize) -> bool;
+pub type GlobalCountPlayPredicate = fn(&Game<'_>, usize, usize, usize) -> bool;
 pub type EnergyHook = fn(&Game<'_>, usize, usize) -> i32;
 pub type CostHook = fn(&Game<'_>, usize, usize, i32) -> i32;
 pub type DrawHook = fn(&mut Game<'_>, usize, usize) -> Option<usize>;
@@ -46,6 +48,7 @@ pub struct LocationDef {
     pub on_event: Option<fn(&mut Game<'_>, usize, crate::game::Event)>,
     pub allows_play: Option<PlayPredicate>,
     pub allows_play_with_count: Option<fn(&Game<'_>, usize, usize) -> bool>,
+    pub allows_play_globally_with_count: Option<GlobalCountPlayPredicate>,
     pub allows_play_elsewhere: Option<PlayPredicate>,
     pub allows_addition: Option<PlayPredicate>,
     pub allows_move_from: Option<PlayPredicate>,
@@ -54,6 +57,8 @@ pub struct LocationDef {
     pub energy_bonus: Option<EnergyHook>,
     pub modify_cost: Option<CostHook>,
     pub minimum_turns: u8,
+    pub maximum_turns: u8,
+    pub contributes_to_other_lanes: bool,
     pub initial_state: Option<fn() -> Box<dyn crate::game::CardState>>,
 }
 
@@ -88,6 +93,7 @@ pub(crate) const fn location(
         on_event: None,
         allows_play: None,
         allows_play_with_count: None,
+        allows_play_globally_with_count: None,
         allows_play_elsewhere: None,
         allows_addition: None,
         allows_move_from: None,
@@ -96,6 +102,8 @@ pub(crate) const fn location(
         energy_bonus: None,
         modify_cost: None,
         minimum_turns: 0,
+        maximum_turns: 0,
+        contributes_to_other_lanes: false,
         initial_state: None,
     }
 }
@@ -235,6 +243,26 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_f::UTOPIA,
     locations_f::CAMP_LEHIGH,
     locations_f::ATTILAN,
+    locations_g::CAMELOT,
+    locations_g::WARRIOR_FALLS,
+    locations_g::RICKETY_BRIDGE,
+    locations_g::SANDCASTLE,
+    locations_g::TVA,
+    locations_g::THE_NEXUS,
+    locations_g::VALHALLA,
+    locations_g::SUPERFLOW,
+    locations_g::EMPIRE_STATE_UNIVERSITY,
+    locations_g::CLUBHOUSE,
+    locations_g::ESSEXS_LAB,
+    locations_g::FEAST,
+    locations_g::ALTAR_OF_DEATH,
+    locations_g::SMITHSONIAN_MUSEUM,
+    locations_g::PARKER_INDUSTRIES,
+    locations_g::FRACTURED_FRONTIER,
+    locations_g::VALLEY_OF_THE_HAND,
+    locations_g::SAKAAR_GRAND_PRIX,
+    locations_g::WHITE_HOT_ROOM,
+    locations_g::WEAPON_X_FACILITY,
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {

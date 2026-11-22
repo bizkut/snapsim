@@ -153,7 +153,7 @@ fn installed_effect_possible(position: &Position, id: &str) -> bool {
         let Some(turn) = action.turn_resolved else {
             return true;
         };
-        if id == "Wave" {
+        if matches!(id, "Wave" | "Psylocke") {
             return turn.saturating_add(1) >= position.turn;
         }
         let seat = if action.owner == "local" { 0 } else { 1 };
@@ -231,6 +231,86 @@ fn installed_effect_possible(position: &Position, id: &str) -> bool {
             .any(|card| card.id == id)
 }
 
+// These registered effects can morph locations. The observation currently has
+// no location-change event history or previous location identity.
+fn location_change_evidence(position: &Position) -> bool {
+    let changes = |id: &str| {
+        matches!(
+            id,
+            "Magik" | "ScarletWitch" | "RealityStone" | "NicoMinoru" | "OmniversalPresence"
+        )
+    };
+    position.locations.iter().any(|lane| {
+        lane.mine
+            .iter()
+            .chain(&lane.theirs)
+            .any(|card| card.revealed && changes(&card.id))
+            || lane
+                .id
+                .as_deref()
+                .is_some_and(|id| matches!(id, "WorldForge" | "LosDiablos"))
+    }) || position
+        .graveyard
+        .iter()
+        .flatten()
+        .chain(position.banished.iter().flatten())
+        .chain(position.opponent.graveyard.iter().flatten())
+        .chain(position.opponent.banished.iter().flatten())
+        .any(|card| changes(&card.id))
+        || position.opponent.seen.iter().any(|id| changes(id))
+        || position
+            .history
+            .as_ref()
+            .and_then(|history| history.actions.as_ref())
+            .is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action.resolved && changes(&action.card_id))
+            })
+}
+
+fn text_change_evidence(position: &Position) -> bool {
+    let changes = |id: &str| {
+        matches!(
+            id,
+            "Enchantress"
+                | "Echo"
+                | "DeafeningChord"
+                | "IronLad"
+                | "NicoMinoru"
+                | "SymbioteSpiderMan"
+                | "TaoMandala"
+                | "AncientOne"
+                | "AstralProjection"
+                | "TechnoOrganicVirus"
+                | "Magus"
+        )
+    };
+    position.locations.iter().any(|lane| {
+        lane.mine
+            .iter()
+            .chain(&lane.theirs)
+            .any(|card| card.revealed && changes(&card.id))
+    }) || position
+        .graveyard
+        .iter()
+        .flatten()
+        .chain(position.banished.iter().flatten())
+        .chain(position.opponent.graveyard.iter().flatten())
+        .chain(position.opponent.banished.iter().flatten())
+        .any(|card| changes(&card.id))
+        || position.opponent.seen.iter().any(|id| changes(id))
+        || position
+            .history
+            .as_ref()
+            .and_then(|history| history.actions.as_ref())
+            .is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action.resolved && changes(&action.card_id))
+            })
+}
+
 pub fn coverage(position: &Position) -> Value {
     let mut card_ids: BTreeSet<&str> = position
         .hand
@@ -252,6 +332,12 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    if !cards::reference_rules_enabled() && position.turn > 1 && location_change_evidence(position)
+    {
+        extra_state.insert(
+            "a location may have been replaced (pending location grants unknown)".to_owned(),
+        );
+    }
     // Stones may originate from Thanos even when Thanos himself is not visible.
     // The opponent's post-shuffle deck composition is not exported.
     let stone = |id: &str| {
@@ -306,11 +392,215 @@ pub fn coverage(position: &Position) -> Value {
         extra_state
             .insert("Infinity Stone owner's post-shuffle deck composition unknown".to_owned());
     }
+    // ThorBehavior::AddMjolnir (0x7cdcc10) changes deck
+    // composition, which is not exported for the opponent.
     if !cards::reference_rules_enabled() {
-        for id in ["Wave", "Stick"] {
+        let own_thor = position.locations.iter().any(|lane| {
+            lane.mine
+                .iter()
+                .any(|card| card.id == "Thor" && card.revealed)
+        }) || position
+            .graveyard
+            .iter()
+            .flatten()
+            .any(|card| card.id == "Thor")
+            || position
+                .banished
+                .iter()
+                .flatten()
+                .any(|card| card.id == "Thor")
+            || position
+                .history
+                .as_ref()
+                .and_then(|history| history.actions.as_ref())
+                .is_some_and(|actions| {
+                    actions.iter().any(|action| {
+                        action.owner == "local"
+                            && action.card_id == "Thor"
+                            && action.kind == "play"
+                            && action.resolved
+                    })
+                });
+        let opposing_thor = position.locations.iter().any(|lane| {
+            lane.theirs
+                .iter()
+                .any(|card| card.id == "Thor" && card.revealed)
+        }) || position.opponent.seen.iter().any(|id| id == "Thor");
+        if (own_thor && position.deck_count != Some(position.deck.len())) || opposing_thor {
+            extra_state.insert("Thor Mjolnir post-shuffle deck composition unknown".to_owned());
+        }
+        let widow_seen = position.locations.iter().any(|lane| {
+            lane.mine
+                .iter()
+                .any(|card| card.id == "BlackWidow" && card.revealed)
+        }) || position
+            .graveyard
+            .iter()
+            .flatten()
+            .any(|card| card.id == "BlackWidow")
+            || position
+                .banished
+                .iter()
+                .flatten()
+                .any(|card| card.id == "BlackWidow")
+            || position
+                .history
+                .as_ref()
+                .and_then(|history| history.actions.as_ref())
+                .is_some_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| action.owner == "local" && action.card_id == "BlackWidow")
+                });
+        if position.opponent.hand > 0 && widow_seen {
+            extra_state.insert("Black Widow opponent WidowsBite hand fate unknown".to_owned());
+        }
+    }
+    // Darkhawk counts cards, not identities: a reported own deck count is
+    // sufficient even when the deck composition is sampled.
+    if !cards::reference_rules_enabled()
+        && position.deck_count.is_none()
+        && (position
+            .opponent
+            .seen
+            .iter()
+            .chain(&position.opponent.known)
+            .chain(position.opponent.deck_list.iter().flatten())
+            .chain(position.opponent.pool.iter().flatten())
+            .any(|id| id == "Darkhawk")
+            || position
+                .locations
+                .iter()
+                .any(|lane| lane.theirs.iter().any(|card| card.id == "Darkhawk")))
+    {
+        extra_state.insert("Darkhawk opponent deck count unknown".to_owned());
+    }
+    if !cards::reference_rules_enabled() {
+        let own_cobra_in_hand = position.hand.iter().any(|card| card.id == "Cobra");
+        let unknown_target = |cards: &[position::CardRef]| {
+            cards
+                .iter()
+                .any(|card| card.revealed && card.created.is_none())
+        };
+        if position.locations.iter().any(|lane| {
+            ((own_cobra_in_hand
+                || lane
+                    .mine
+                    .iter()
+                    .any(|card| card.id == "Cobra" && card.revealed))
+                && unknown_target(&lane.theirs))
+                || (lane
+                    .theirs
+                    .iter()
+                    .any(|card| card.id == "Cobra" && card.revealed)
+                    && unknown_target(&lane.mine))
+        }) {
+            extra_state.insert("Cobra target created provenance unknown".to_owned());
+        }
+    }
+    if !cards::reference_rules_enabled() {
+        let own = position.hand.iter().any(|card| card.id == "Diamondback")
+            || position.deck.iter().any(|id| id == "Diamondback");
+        let opponent = position
+            .opponent
+            .known
+            .iter()
+            .chain(&position.opponent.seen)
+            .chain(position.opponent.deck_list.iter().flatten())
+            .chain(position.opponent.pool.iter().flatten())
+            .any(|id| id == "Diamondback");
+        let unknown =
+            |card: &position::CardRef| card.revealed && !card.has_complete_power_modifier_history();
+        if position.locations.iter().any(|lane| {
+            (own && lane.theirs.iter().any(unknown)) || (opponent && lane.mine.iter().any(unknown))
+        }) {
+            extra_state.insert("Diamondback target power modifier history incomplete".to_owned());
+        }
+    }
+    if !cards::reference_rules_enabled() {
+        let own = position.hand.iter().any(|card| card.id == "Patriot")
+            || position.deck.iter().any(|id| id == "Patriot")
+            || position
+                .locations
+                .iter()
+                .any(|lane| lane.mine.iter().any(|card| card.id == "Patriot"));
+        if own && text_change_evidence(position) {
+            extra_state.insert("card text overrides not exported".to_owned());
+        }
+        let opponent = position
+            .opponent
+            .known
+            .iter()
+            .chain(&position.opponent.seen)
+            .chain(position.opponent.deck_list.iter().flatten())
+            .chain(position.opponent.pool.iter().flatten())
+            .any(|id| id == "Patriot")
+            || position
+                .locations
+                .iter()
+                .any(|lane| lane.theirs.iter().any(|card| card.id == "Patriot"));
+        let unknown = |card: &position::CardRef| {
+            card.revealed && cards::no_text::has_no_text(&card.id).is_none()
+        };
+        if position.locations.iter().any(|lane| {
+            (own && lane.mine.iter().any(unknown)) || (opponent && lane.theirs.iter().any(unknown))
+        }) {
+            extra_state.insert("Patriot target client behavior definition unknown".to_owned());
+        }
+    }
+    if !cards::reference_rules_enabled() {
+        for id in ["Wave", "Stick", "Psylocke"] {
             if installed_effect_possible(position, id) {
                 extra_state.insert(format!("{id} effect may be active"));
             }
+        }
+    }
+    if !cards::reference_rules_enabled() && position.turn > 1 {
+        let own_infinaut = position.hand.iter().any(|card| card.id == "Infinaut")
+            || position.deck.iter().any(|id| id == "Infinaut");
+        let opposing_infinaut = position
+            .opponent
+            .known
+            .iter()
+            .chain(&position.opponent.seen)
+            .chain(position.opponent.deck_list.iter().flatten())
+            .chain(position.opponent.pool.iter().flatten())
+            .any(|id| id == "Infinaut");
+        for (seat, relevant) in [(0, own_infinaut), (1, opposing_infinaut)] {
+            let complete = position.history.as_ref().is_some_and(|history| {
+                history.actions.is_some()
+                    && history
+                        .action_completeness
+                        .as_ref()
+                        .is_some_and(|completeness| {
+                            let turns = if seat == 0 {
+                                &completeness.local
+                            } else {
+                                &completeness.opponent
+                            };
+                            turns.get(&(position.turn - 1).to_string()) == Some(&true)
+                        })
+            });
+            if relevant && !complete {
+                extra_state.insert(format!(
+                    "Infinaut seat {seat} previous-turn staged play history unknown"
+                ));
+            }
+        }
+        let miles = position.hand.iter().any(|card| card.id == "MilesMorales")
+            || position.deck.iter().any(|id| id == "MilesMorales")
+            || position
+                .opponent
+                .known
+                .iter()
+                .chain(&position.opponent.seen)
+                .chain(position.opponent.deck_list.iter().flatten())
+                .chain(position.opponent.pool.iter().flatten())
+                .any(|id| id == "MilesMorales");
+        if miles {
+            extra_state.insert(
+                "Miles Morales previous-turn forced movement history not exported".to_owned(),
+            );
         }
     }
     // A ledger entry proves augments are in use, but it does not enumerate
@@ -444,6 +734,59 @@ pub fn coverage(position: &Position) -> Value {
         }
         if let Some(id) = &lane.id {
             loc_ids.insert(id.as_str());
+            // A previous location morph may leave queued grants; public evidence of
+            // morphing effects is gated separately above.
+            if matches!(id.as_str(), "Feast" | "AltarOfDeath")
+                && position.turn > 1
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+                && !cards::reference_rules_enabled()
+            {
+                extra_state.insert(format!(
+                    "{id} prior-turn pending player energy grants not exported"
+                ));
+            }
+            if id == "FracturedFrontier" && !cards::reference_rules_enabled() {
+                if lane.revealed_turn.is_none() {
+                    extra_state.insert("Fractured Frontier reveal turn unknown".to_owned());
+                }
+                if lane.revealed_turn.is_none_or(|turn| turn == position.turn) {
+                    extra_state.insert(
+                        "Fractured Frontier draw-completed turn and bottom hand order not exported"
+                            .to_owned(),
+                    );
+                }
+            }
+            if !cards::reference_rules_enabled()
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+                && (id == "WhiteHotRoom" || id == "SakaarGrandPrix" && position.turn > 4)
+            {
+                extra_state.insert(format!(
+                    "{id} prior permanent max energy grants not exported"
+                ));
+            }
+            if id == "WhiteHotRoom"
+                && !cards::reference_rules_enabled()
+                && lane
+                    .history_state
+                    .as_ref()
+                    .and_then(|state| state.is_given)
+                    .is_none()
+            {
+                extra_state.insert("White Hot Room IsGiven trigger state unknown".to_owned());
+            }
+            if id == "ValleyOfTheHand" && position.turn <= 5 && !cards::reference_rules_enabled() {
+                extra_state.insert(
+                    "Valley of the Hand complete destroyed-card graveyard state not exported"
+                        .to_owned(),
+                );
+            }
+            if id == "Clubhouse"
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+                && !cards::reference_rules_enabled()
+            {
+                extra_state
+                    .insert("Clubhouse per-player fill trigger state not exported".to_owned());
+            }
             if id == "TimeTheater" && position.turn < position.total_turns {
                 let spent = (!cards::reference_rules_enabled())
                     .then(|| {
@@ -534,4 +877,70 @@ pub fn coverage(position: &Position) -> Value {
         .chain(extra_state)
         .collect();
     json!({"cards":unknown_cards,"locations":unknown_locations,"state":state,"deck":deck,"opponent":opponent,"face_down":if delayed || face_down == 0 {None} else {Some(face_down)}})
+}
+
+#[cfg(test)]
+mod location_change_tests {
+    use super::*;
+
+    #[test]
+    fn public_morphing_card_on_either_side_marks_possible_grants() {
+        for seat in 0..2 {
+            let mut position = Position {
+                turn: 3,
+                ..Position::default()
+            };
+            let card = position::CardRef {
+                id: "ScarletWitch".to_owned(),
+                revealed: true,
+                ..position::CardRef::default()
+            };
+            if seat == 0 {
+                position.locations[0].mine.push(card);
+            } else {
+                position.locations[0].theirs.push(card);
+            }
+            assert!(location_change_evidence(&position));
+            assert!(
+                coverage(&position)["state"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| {
+                        value
+                            == "a location may have been replaced (pending location grants unknown)"
+                    })
+            );
+        }
+    }
+    #[test]
+    fn patriot_with_public_text_changer_declines_unexported_overrides() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "Patriot".into(),
+            ..Default::default()
+        });
+        assert!(
+            !coverage(&position)["state"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "card text overrides not exported")
+        );
+        position.locations[0].theirs.push(position::CardRef {
+            id: "Enchantress".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        assert!(
+            coverage(&position)["state"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "card text overrides not exported")
+        );
+    }
 }

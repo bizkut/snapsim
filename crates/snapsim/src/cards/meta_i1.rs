@@ -13,6 +13,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     },
     CardDef {
         end_turn: Some(attuma),
+        end_turn_trigger: true,
         ..CardDef::vanilla("Attuma")
     },
     CardDef {

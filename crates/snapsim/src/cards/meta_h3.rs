@@ -21,6 +21,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     CardDef {
         initial_state: Some(|| Box::new(false)),
         end_turn: Some(thing),
+        end_turn_trigger: true,
         ..CardDef::vanilla("TheThingFirstSteps")
     },
     CardDef {

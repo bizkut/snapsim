@@ -30,6 +30,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     },
     CardDef {
         end_turn: Some(hellcow),
+        end_turn_trigger: true,
         ..CardDef::vanilla("HellcowFracturedFrontier")
     },
     CardDef {

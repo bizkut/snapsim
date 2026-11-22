@@ -28,6 +28,11 @@ mod meta_i1;
 mod meta_i2;
 mod meta_j1;
 mod meta_j2;
+mod meta_k1;
+mod meta_k2;
+mod meta_k3;
+mod meta_k4;
+pub(crate) mod no_text;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
@@ -71,6 +76,10 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_h2::TOKENS,
     meta_h3::TOKENS,
     meta_i1::TOKENS,
+    meta_k1::TOKENS,
+    meta_k2::TOKENS,
+    meta_k4::TOKENS,
+    meta_k3::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -189,6 +198,8 @@ pub struct CardDef {
     pub grants_move_from: Option<fn(&Game<'_>, usize, usize) -> bool>,
     pub pre_end_turn: Option<CardHook>,
     pub end_turn: Option<CardHook>,
+    /// An End-of-Turn trigger implemented through the event hook.
+    pub end_turn_trigger: bool,
     pub on_move_here: Option<PlayHook>,
     pub on_move: Option<PlayHook>,
     pub on_destroy: Option<CardHook>,
@@ -201,6 +212,12 @@ pub struct CardDef {
     pub clear_reveal_state: Option<fn(&mut crate::game::Card)>,
     pub blocks_reveal: bool,
     pub prevents_destroy: bool,
+    /// Source-specific ongoing protection for a destruction target.
+    pub destroy_guard: Option<fn(&Game<'_>, usize, usize) -> bool>,
+    /// Ongoing lane prohibition on playing cards with current cost at least four.
+    pub blocks_expensive_plays: bool,
+    /// Ongoing draw prohibition while this card remains in hand.
+    pub blocks_draw_in_hand: bool,
     /// Ongoing prohibition on additions not caused by plays or moves.
     pub blocks_spawns: bool,
     pub locks_lane: bool,
@@ -236,8 +253,12 @@ impl CardDef {
             pre_end_turn: None,
             blocks_spawns: false,
             end_turn: None,
+            end_turn_trigger: false,
             blocks_reveal: false,
             prevents_destroy: false,
+            destroy_guard: None,
+            blocks_expensive_plays: false,
+            blocks_draw_in_hand: false,
             locks_lane: false,
             immune_destroy_move: false,
             start_in_hand: false,
@@ -377,6 +398,10 @@ static GROUPS: &[&[CardDef]] = &[
     meta_i2::CARDS,
     meta_j1::CARDS,
     meta_j2::CARDS,
+    meta_k3::CARDS,
+    meta_k2::CARDS,
+    meta_k1::CARDS,
+    meta_k4::CARDS,
     kahhori::CARDS,
 ];
 

@@ -31,6 +31,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     },
     CardDef {
         end_turn: Some(hydra_bob),
+        end_turn_trigger: true,
         ..CardDef::vanilla("HydraBob")
     },
     CardDef::vanilla("NicoMinoru"),

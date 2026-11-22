@@ -10,6 +10,7 @@ pub(crate) static CARDS: &[CardDef] = &[
     CardDef {
         initial_state: Some(torch_state),
         end_turn: Some(torch),
+        end_turn_trigger: true,
         ..CardDef::vanilla("HumanTorchFirstSteps")
     },
     CardDef {

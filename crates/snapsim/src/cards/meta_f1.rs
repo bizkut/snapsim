@@ -14,10 +14,12 @@ pub(crate) static CARDS: &[CardDef] = &[
     },
     CardDef {
         end_turn: Some(isca),
+        end_turn_trigger: true,
         ..CardDef::vanilla("Isca")
     },
     CardDef {
         end_turn: Some(drax),
+        end_turn_trigger: true,
         ..CardDef::vanilla("DraxAvatarOfLife")
     },
     CardDef {

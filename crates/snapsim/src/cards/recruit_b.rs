@@ -89,6 +89,7 @@ pub const ZOMBIE_GIANT_MAN: CardDef = CardDef {
 };
 pub const ZOMBIE_BLADE: CardDef = CardDef {
     end_turn: Some(zombie_blade),
+    end_turn_trigger: true,
     ..CardDef::vanilla("ZombieBlade")
 };
 
