@@ -93,9 +93,8 @@ fn captain_marvel(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     let score = |game: &Game<'_>| {
-        game.powers()
-            .iter()
-            .filter(|power| power[owner] > power[1 - owner])
+        (0..3)
+            .filter(|&lane| game.lane_winner(lane) == Some(owner))
             .count()
     };
     let mut best_win: Option<(usize, usize)> = None;
@@ -743,10 +742,14 @@ mod tests {
 
     #[test]
     fn iron_lad_copies_completed_objective_with_fresh_progress() {
-        let p = position(
+        let mut p = position(
             json!([{"id":"IronLad"}, {"id":"PolarisHorseman"}]),
             json!([{"id":"Hulk"}]),
         );
+        // End-turn behavior must not depend on sampled hidden locations.
+        for lane in &mut p.locations {
+            lane.id = Some("Ruins".into());
+        }
         let mut rng = PythonRandom::seed(26);
         let mut game = build_game(&p, &mut rng).unwrap();
         let lad = game.lanes[0].cards[0];

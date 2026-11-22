@@ -126,7 +126,12 @@ fn ultron_reality(game: &mut Game<'_>, card: usize) {
         game.cards.pop();
         return;
     }
-    let targets = ultrons(game, owner);
+    let targets: Vec<_> = game
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.cards.iter().copied())
+        .filter(|&id| game.cards[id].owner == owner && game.cards[id].def.id == "InfinityUltron")
+        .collect();
     if !targets.is_empty() {
         let target = targets[game.rng.borrow_mut().randbelow(targets.len())];
         game.set_power(drone, game.cards[target].power(), owner);
@@ -193,7 +198,7 @@ fn ultron_time(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    if game.players[owner].hand.is_empty() || !game.has_space(lane, owner, 0) {
+    if game.players[owner].hand.is_empty() {
         return;
     }
     let index = game
@@ -308,6 +313,38 @@ mod tests {
         g.cards[id].revealed = true;
         g.lanes[lane].cards.push(id);
         id
+    }
+    #[test]
+    fn reality_stone_copies_unrevealed_ultron_power() {
+        let mut rng = PythonRandom::seed(4);
+        let mut g = game(&mut rng);
+        let stone = place(&mut g, "UltronRealityStone", 0, 0);
+        let ultron = place(&mut g, "InfinityUltron", 0, 1);
+        g.cards[ultron].revealed = false;
+        ultron_reality(&mut g, stone);
+        let drone = g.lanes[0]
+            .cards
+            .iter()
+            .copied()
+            .find(|&id| g.cards[id].def.id == "Drone")
+            .unwrap();
+        assert_eq!(g.cards[drone].power(), g.cards[ultron].power());
+    }
+    #[test]
+    fn time_stone_rolls_before_full_lane_rejects() {
+        let mut rng = PythonRandom::seed(7);
+        let mut g = game(&mut rng);
+        let stone = place(&mut g, "UltronTimeStone", 0, 0);
+        for _ in 0..3 {
+            place(&mut g, "Wasp", 0, 0);
+        }
+        let mut expected = g.rng.borrow().clone_rng();
+        expected.randbelow(g.players[0].hand.len());
+        ultron_time(&mut g, stone);
+        assert_eq!(
+            g.rng.borrow_mut().randbelow(1_000_000),
+            expected.randbelow(1_000_000)
+        );
     }
     #[test]
     fn infinity_ultron_creates_two_distinct_stones() {

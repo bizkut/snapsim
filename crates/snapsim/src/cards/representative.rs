@@ -2,11 +2,11 @@ use super::CardDef;
 use crate::game::Game;
 
 pub const HAWKEYE: CardDef = CardDef {
-    reveal: Some(watch),
+    reveal: Some(hawkeye_watch),
     ..CardDef::vanilla("Hawkeye")
 };
 pub const JESSICA_JONES: CardDef = CardDef {
-    reveal: Some(watch),
+    reveal: Some(jessica_watch),
     ..CardDef::vanilla("JessicaJones")
 };
 pub const MEDUSA: CardDef = CardDef {
@@ -66,10 +66,13 @@ pub const COSMO: CardDef = CardDef {
     ..CardDef::vanilla("Cosmo")
 };
 
-fn watch(g: &mut Game, id: usize) {
+fn hawkeye_watch(g: &mut Game, id: usize) {
     let lane = g.cards[id].lane.unwrap();
-    let hawkeye = g.cards[id].ability_def().id == "Hawkeye";
-    g.cards[id].attach_watch(id, g.turn + 1, lane, hawkeye, if hawkeye { 4 } else { 5 });
+    g.cards[id].attach_watch(id, g.turn + 1, lane, true, 4);
+}
+fn jessica_watch(g: &mut Game, id: usize) {
+    let lane = g.cards[id].lane.unwrap();
+    g.cards[id].attach_watch(id, g.turn + 1, lane, false, 5);
 }
 fn medusa(g: &mut Game, id: usize) {
     if g.cards[id].lane == Some(1) {

@@ -119,6 +119,32 @@ pub fn check_observations(
                         "no settled next-turn or completed final frame"
                     }
                 })?;
+                if !crate::cards::reference_rules_enabled() && turn > 1 {
+                    match &start.previous_turn_locations {
+                        None => {
+                            return Err("previous-turn location identities are not recorded".into());
+                        }
+                        Some(previous)
+                            if previous
+                                .ids
+                                .iter()
+                                .flatten()
+                                .any(|id| matches!(id.as_str(), "Feast" | "AltarOfDeath")) =>
+                        {
+                            return Err("Feast/Altar of Death prior-turn pending energy grants are not recorded".into());
+                        }
+                        Some(previous)
+                            if !previous.complete
+                                && start
+                                    .locations
+                                    .iter()
+                                    .any(|id| id == "Feast" || id == "AltarOfDeath") =>
+                        {
+                            return Err("previous-turn location identities are incomplete".into());
+                        }
+                        _ => {}
+                    }
+                }
                 used_samples.retain(|f| f.line >= start.line);
                 let mut missing_cards = BTreeSet::new();
                 let mut missing_locations = BTreeSet::new();

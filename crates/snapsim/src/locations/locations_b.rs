@@ -188,15 +188,13 @@ fn murderworld(game: &mut Game<'_>, lane: usize) {
     }
 }
 fn rocket_pad(game: &mut Game<'_>, lane: usize) {
-    if game.turn == 4 {
-        let powers = game.powers()[lane];
-        if powers[0] != powers[1] {
-            let winner = usize::from(powers[1] > powers[0]);
-            for index in 0..game.lanes[lane].cards.len() {
-                let id = game.lanes[lane].cards[index];
-                if game.cards[id].owner == winner {
-                    game.add_power(id, 1, winner);
-                }
+    if game.turn == 4
+        && let Some(winner) = game.lane_winner(lane)
+    {
+        for index in 0..game.lanes[lane].cards.len() {
+            let id = game.lanes[lane].cards[index];
+            if game.cards[id].owner == winner {
+                game.add_power(id, 1, winner);
             }
         }
     }

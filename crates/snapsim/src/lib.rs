@@ -7,6 +7,7 @@ pub mod coverage;
 pub mod data;
 pub mod deckbuild;
 pub mod deckcodes;
+mod engine_ext;
 pub mod game;
 pub mod locations;
 pub mod policy;

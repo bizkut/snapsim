@@ -194,8 +194,7 @@ fn iron_discount(game: &mut Game<'_>, effect: &mut PendingEffect, _: Option<usiz
     // ReduceCardCost (0x7ecfd94) checks next turn's winner, even if the target left hand.
     let seat = game.cards[effect.source].owner;
     let lane = effect.lane.unwrap();
-    let power = game.powers()[lane];
-    if power[seat] > power[1 - seat] {
+    if game.lane_winner(lane) == Some(seat) {
         let target = *effect.state.as_any().downcast_ref::<usize>().unwrap();
         game.add_cost(target, -3, seat);
     }

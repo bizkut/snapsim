@@ -310,6 +310,32 @@ fn text_change_evidence(position: &Position) -> bool {
                     .any(|action| action.resolved && changes(&action.card_id))
             })
 }
+// Persistent effects survive their source and may only be evidenced by history.
+fn resolved_source_possible(position: &Position, id: &str) -> bool {
+    position
+        .locations
+        .iter()
+        .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+        .any(|card| card.id == id && card.revealed)
+        || position
+            .graveyard
+            .iter()
+            .flatten()
+            .chain(position.banished.iter().flatten())
+            .chain(position.opponent.graveyard.iter().flatten())
+            .chain(position.opponent.banished.iter().flatten())
+            .any(|card| card.id == id)
+        || position.opponent.seen.iter().any(|seen| seen == id)
+        || position
+            .history
+            .as_ref()
+            .and_then(|history| history.actions.as_ref())
+            .is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action.card_id == id && action.kind == "play" && action.resolved)
+            })
+}
 
 pub fn coverage(position: &Position) -> Value {
     let mut card_ids: BTreeSet<&str> = position
@@ -317,6 +343,13 @@ pub fn coverage(position: &Position) -> Value {
         .iter()
         .map(|c| c.id.as_str())
         .chain(position.deck.iter().map(String::as_str))
+        .chain(
+            position
+                .locations
+                .iter()
+                .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+                .map(|card| card.id.as_str()),
+        )
         .chain(position.opponent.seen.iter().map(String::as_str))
         .chain(position.opponent.known.iter().map(String::as_str))
         .chain(
@@ -332,11 +365,544 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    // TheGrandDesignBehavior::DiscountSelf 0x7d1800c counts historic
+    // played cards by creation provenance, absent from game.history.
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && (position.hand.iter().any(|card| card.id == "TheGrandDesign")
+            || position.deck.iter().any(|id| id == "TheGrandDesign")
+            || position
+                .opponent
+                .known
+                .iter()
+                .chain(&position.opponent.seen)
+                .chain(position.opponent.deck_list.iter().flatten())
+                .chain(position.opponent.pool.iter().flatten())
+                .any(|id| id == "TheGrandDesign"))
+    {
+        extra_state.insert("The Grand Design created-card play history not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && ["GhostRider", "Firelord", "FenrisWolf"]
+            .iter()
+            .any(|id| card_ids.contains(id))
+    {
+        // GhostRider 0x7eb3e70, Firelord 0x7ea9c7c and FenrisWolf
+        // 0x7ea8928 select from discarded/destroyed zone inventories.
+        extra_state.insert(
+            "complete discarded and destroyed card zone inventories not exported".to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled() {
+        if position.turn > 1
+            && ["Khonshu", "KhonshuWaxing", "KhonshuFull"]
+                .iter()
+                .any(|id| card_ids.contains(id))
+        {
+            extra_state
+                .insert("Khonshu complete discarded-card zone inventory not exported".to_owned());
+        }
+        // Client Location::CanCardChangeOwner (0x7ddc3b4) consults
+        // CanChangeCardOwnerHere; its active modifier state is not observed.
+        for id in [
+            "Viper",
+            "Annihilus",
+            "GreenGoblin",
+            "Hobgoblin",
+            "AcidArrow",
+        ] {
+            if card_ids.contains(id) {
+                extra_state.insert(format!(
+                    "{id} CanChangeCardOwnerHere restriction state not exported"
+                ));
+            }
+        }
+        for id in ["Electro", "Wiccan", "Arishem"] {
+            if position.turn > 1 && resolved_source_possible(position, id) {
+                extra_state.insert(format!("{id} prior permanent energy update not exported"));
+            }
+        }
+        if position.turn > 1 && card_ids.contains("HydraStomper") {
+            extra_state
+                .insert("Hydra Stomper player movement count history not exported".to_owned());
+        }
+        if position.turn > 1 && card_ids.contains("Stryfe") {
+            extra_state.insert("Stryfe play-time On Reveal history not exported".to_owned());
+        }
+        if position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.revealed && card.id == "Batroc")
+        {
+            extra_state
+                .insert("Batroc current-turn consumed trigger state not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "Arana") {
+            extra_state.insert("Arana pending next-card move trigger not exported".to_owned());
+        }
+        if resolved_source_possible(position, "Miek") {
+            extra_state.insert("Miek attached movement grant not exported".to_owned());
+        }
+        if card_ids.contains("AuntMay") {
+            extra_state
+                .insert("Aunt May current-turn resolved movement history not exported".to_owned());
+        }
+        if resolved_source_possible(position, "Mysterio") {
+            extra_state.insert("Mysterio linked illusion entity not exported".to_owned());
+        }
+        if resolved_source_possible(position, "Redwing") {
+            extra_state.insert("Redwing consumed movement trigger not exported".to_owned());
+        }
+        if resolved_source_possible(position, "Sparky") {
+            extra_state
+                .insert("Sparky last moved entity and previous zone not exported".to_owned());
+        }
+        if card_ids.contains("ArchangelHorseman") && position.turn > 1 {
+            extra_state.insert("Archangel Horseman objective state not restored".to_owned());
+        }
+        for (id, name) in [("Cloak", "Cloak"), ("Hellion", "Hellion")] {
+            // Cloak 0x7e81254 and Hellion 0x7ec0a74 install player-owned grants.
+            if position.turn > 1 && resolved_source_possible(position, id) {
+                extra_state.insert(format!("{name} prior player movement grant not exported"));
+            }
+        }
+        if resolved_source_possible(position, "Quinjet")
+            && position.hand.iter().any(|card| card.created.is_none())
+        {
+            // QuinjetBehavior::NewRecruitsCostOneLess 0x7f1e884.
+            extra_state.insert("Quinjet hand card creation provenance not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "CorvusGlaive") {
+            // CorvusGlaiveBehavior::DiscardCards 0x7e83c18.
+            extra_state
+                .insert("Corvus Glaive prior permanent energy grant not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "FallenOne") {
+            // FallenOneBehavior::SetMaxEnergy 0x7ea68d4.
+            extra_state.insert("Fallen One prior permanent energy set not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "Havok") {
+            // HavokBehavior 0x7ebaf68 permanently reduces maximum energy.
+            extra_state.insert("Havok prior permanent energy reductions not exported".to_owned());
+        }
+        if resolved_source_possible(position, "SpiderManNoir") {
+            // SpiderManNoirBehavior::SetTopCardPowerAndCheckForMove 0x7f4d494.
+            extra_state.insert(
+                "Spider-Man Noir affected deck card identity and power not exported".to_owned(),
+            );
+        }
+        if position.turn <= 6 && resolved_source_possible(position, "BaronMordo") {
+            // BaronMordoBehavior::AddCostSetAbilityToPlayer 0x7e6eaac.
+            extra_state.insert("Baron Mordo affected deck card identity not exported".to_owned());
+        }
+        if resolved_source_possible(position, "ToxieDoxie") && position.turn > 1 {
+            // ToxieDoxieBehavior::BuffCardsAndLockOut 0x7ce066c.
+            extra_state.insert("Toxie Doxie locked hand card identities not exported".to_owned());
+        }
+        if resolved_source_possible(position, "BlackSwan") && position.turn > 1 {
+            extra_state.insert("Black Swan player-owned hand cost effect not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "Malekith") {
+            extra_state.insert(
+                "Malekith hidden target and game-end reveal attachment not exported".to_owned(),
+            );
+        }
+        if position.turn > 1 && resolved_source_possible(position, "Lockjaw") {
+            extra_state.insert("Lockjaw pending next-resolved-play swap not exported".to_owned());
+        }
+        if [
+            "SummoningRitual01Dormammu",
+            "SummoningRitual02Dormammu",
+            "SummoningRitual03Dormammu",
+        ]
+        .iter()
+        .any(|id| card_ids.contains(id))
+            || position.turn > 1 && resolved_source_possible(position, "Dormammu")
+        {
+            extra_state
+                .insert("Dormammu ritual source entity and merged state not exported".to_owned());
+        }
+        if position.turn > 1
+            && ["GrappleArrow", "BasicArrow", "KateBishop"]
+                .iter()
+                .any(|id| resolved_source_possible(position, id))
+        {
+            extra_state.insert(
+                "Kate Bishop pending arrow effects or hidden opponent arrows not exported"
+                    .to_owned(),
+            );
+        }
+        if card_ids.contains("Agamotto") && position.turn > 1 {
+            // AgamottoBehavior::AddSpells 0x7e5ff44.
+            extra_state.insert("Agamotto shuffled spell deck composition not exported".to_owned());
+        }
+        if position.turn > 1 && card_ids.contains("GalactusFirstSteps") {
+            // GalactusFirstStepsBehavior::ChooseHerald 0x7eaebcc.
+            extra_state.insert(
+                "Galactus First Steps herald entity and trigger state not exported".to_owned(),
+            );
+        }
+        if position.turn > 1 && card_ids.contains("Stryfe") {
+            // StryfeBehavior::CalculateObjectiveProgress 0x7cca080.
+            extra_state.insert("Stryfe objective progress and completion not restored".to_owned());
+        }
+        if position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.id == "Hercules" && card.revealed)
+        {
+            // HerculesBehavior::MoveAfterMove 0x7ec3380.
+            extra_state.insert("Hercules current-turn trigger consumption not exported".to_owned());
+        }
+        if position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| {
+                card.id == "Quicksand"
+                    && card.revealed
+                    && card.played_turn.is_none_or(|turn| turn < position.turn)
+            })
+        {
+            // QuicksandBehavior 0x7f1dfa8 stores whether its trigger was used.
+            extra_state.insert("Quicksand prior trigger consumption not exported".to_owned());
+        }
+        let own_loki = position.hand.iter().any(|card| card.id == "Loki")
+            || position.deck.iter().any(|id| id == "Loki");
+        let opponent_loki = position
+            .opponent
+            .known
+            .iter()
+            .chain(&position.opponent.seen)
+            .chain(position.opponent.deck_list.iter().flatten())
+            .chain(position.opponent.pool.iter().flatten())
+            .any(|id| id == "Loki");
+        if (own_loki && position.opponent.deck_list.is_none()) || opponent_loki {
+            extra_state.insert("Loki target starting deck identities not exported".to_owned());
+        }
+        if resolved_source_possible(position, "Loki") {
+            extra_state
+                .insert("Loki replaced deck composition and card costs not exported".to_owned());
+        }
+        let victoria = resolved_source_possible(position, "VictoriaHand")
+            || position.hand.iter().any(|card| card.id == "VictoriaHand")
+            || position.deck.iter().any(|id| id == "VictoriaHand");
+        if victoria && position.turn > 1 {
+            extra_state.insert("Victoria Hand created card creation zone not exported".to_owned());
+        }
+        if card_ids.contains("MaryJane") {
+            // MaryJaneBehavior::BoostCards 0x7ef4a34 inspects all moved entities.
+            for seat in 0..2 {
+                if position.current_action_present(seat) != Some(false) {
+                    extra_state.insert(format!(
+                        "Mary Jane seat {seat} current-turn moved card history unknown"
+                    ));
+                }
+            }
+        }
+    }
     if !cards::reference_rules_enabled() && position.turn > 1 && location_change_evidence(position)
     {
         extra_state.insert(
             "a location may have been replaced (pending location grants unknown)".to_owned(),
         );
+    }
+    if !cards::reference_rules_enabled() && position.turn > 1 {
+        let previous = position.previous_turn_locations.as_ref();
+        let grant_location = |id: &str| matches!(id, "Feast" | "AltarOfDeath");
+        let previously_present = previous
+            .is_some_and(|history| history.ids.iter().flatten().any(|id| grant_location(id)));
+        let visible = position
+            .locations
+            .iter()
+            .any(|lane| lane.id.as_deref().is_some_and(grant_location));
+        if previously_present
+            || previous.is_none()
+            || (visible && previous.is_some_and(|h| !h.complete))
+        {
+            extra_state.insert(
+                "Feast/AltarOfDeath prior-turn pending player energy grants unknown".to_owned(),
+            );
+        }
+    }
+    // These client abilities query historical events, not the mutable zones:
+    // Morbius 0x7f01d3c, Colonel America 0x7e82934,
+    // Archangel Horseman 0x7e697a0, and Death 0x7e89764.
+    if !cards::reference_rules_enabled() && position.turn > 1 {
+        let relevant = |id: &str| {
+            card_ids.contains(id)
+                || position.locations.iter().any(|lane| {
+                    lane.mine
+                        .iter()
+                        .chain(&lane.theirs)
+                        .any(|card| card.id == id)
+                })
+        };
+        if ["Morbius", "ColonelAmerica", "WildChild"]
+            .iter()
+            .any(|id| relevant(id))
+        {
+            extra_state.insert("complete discard event history not exported".to_owned());
+        }
+        if ["ArchangelHorseman", "Death", "WildChild"]
+            .iter()
+            .any(|id| relevant(id))
+        {
+            extra_state.insert("complete destruction event history not exported".to_owned());
+        }
+    }
+    // AgentVenomBehavior::SetPowerOfDeck 0x7e61d30 changes individual
+    // deck-card power, which the observation's deck ID list does not retain.
+    if !cards::reference_rules_enabled()
+        && (position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.id == "AgentVenom" && card.revealed)
+            || position
+                .graveyard
+                .iter()
+                .flatten()
+                .chain(position.banished.iter().flatten())
+                .chain(position.opponent.graveyard.iter().flatten())
+                .chain(position.opponent.banished.iter().flatten())
+                .any(|card| card.id == "AgentVenom")
+            || position.opponent.seen.iter().any(|id| id == "AgentVenom")
+            || position
+                .history
+                .as_ref()
+                .and_then(|history| history.actions.as_ref())
+                .is_some_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| action.card_id == "AgentVenom" && action.resolved)
+                }))
+    {
+        extra_state.insert("Agent Venom deck card power modifications not exported".to_owned());
+    }
+    // HydroManBehavior::SetTopCardCost 0x7ec93cc mutates both hidden deck tops.
+    if !cards::reference_rules_enabled()
+        && (position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.id == "HydroMan" && card.revealed)
+            || position
+                .graveyard
+                .iter()
+                .flatten()
+                .chain(position.banished.iter().flatten())
+                .chain(position.opponent.graveyard.iter().flatten())
+                .chain(position.opponent.banished.iter().flatten())
+                .any(|card| card.id == "HydroMan")
+            || position.opponent.seen.iter().any(|id| id == "HydroMan")
+            || position
+                .history
+                .as_ref()
+                .and_then(|history| history.actions.as_ref())
+                .is_some_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| action.card_id == "HydroMan" && action.resolved)
+                }))
+    {
+        extra_state.insert("Hydro-Man modified deck top identity and cost not exported".to_owned());
+    }
+    // MrNegativeBehavior::SwapPowerAndCost 0x7f04ce0 mutates hidden deck cards.
+    if !cards::reference_rules_enabled()
+        && (position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.id == "MrNegative" && card.revealed)
+            || position
+                .graveyard
+                .iter()
+                .flatten()
+                .chain(position.banished.iter().flatten())
+                .chain(position.opponent.graveyard.iter().flatten())
+                .chain(position.opponent.banished.iter().flatten())
+                .any(|card| card.id == "MrNegative")
+            || position.opponent.seen.iter().any(|id| id == "MrNegative")
+            || position
+                .history
+                .as_ref()
+                .and_then(|history| history.actions.as_ref())
+                .is_some_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| action.card_id == "MrNegative" && action.resolved)
+                }))
+    {
+        extra_state
+            .insert("Mr Negative deck card cost and power modifications not exported".to_owned());
+    }
+    // MonstroOctopusBehavior::ReduceCost 0x7efec0c reads the ordered deck top.
+    if !cards::reference_rules_enabled() && position.turn > 1 && card_ids.contains("MonstroOctopus")
+    {
+        extra_state.insert("Monstro Octopus deck top identity and cost not exported".to_owned());
+    }
+    // GhostSpiderBehavior::MoveCard 0x7eb473c uses the player's last play,
+    // including one whose card has since left the board.
+    if !cards::reference_rules_enabled() && position.turn > 1 {
+        for (seat, relevant) in [
+            (
+                0,
+                position.hand.iter().any(|card| card.id == "GhostSpider")
+                    || position.deck.iter().any(|id| id == "GhostSpider"),
+            ),
+            (
+                1,
+                position
+                    .opponent
+                    .known
+                    .iter()
+                    .chain(&position.opponent.seen)
+                    .chain(position.opponent.deck_list.iter().flatten())
+                    .chain(position.opponent.pool.iter().flatten())
+                    .any(|id| id == "GhostSpider"),
+            ),
+        ] {
+            if relevant
+                && (position.complete_past_actions(seat).is_none()
+                    || position.current_action_present(seat) != Some(false))
+            {
+                extra_state.insert(format!(
+                    "Ghost Spider seat {seat} last played card history unknown"
+                ));
+            }
+        }
+        // AeroBehavior 0x7e5fb48 reads the opposing player's last play.
+        let own_aero = position.hand.iter().any(|card| card.id == "Aero")
+            || position.deck.iter().any(|id| id == "Aero");
+        let enemy_aero = position
+            .opponent
+            .known
+            .iter()
+            .chain(&position.opponent.seen)
+            .chain(position.opponent.deck_list.iter().flatten())
+            .chain(position.opponent.pool.iter().flatten())
+            .any(|id| id == "Aero");
+        for (target, relevant) in [(1, own_aero), (0, enemy_aero)] {
+            if relevant
+                && (position.complete_past_actions(target).is_none()
+                    || position.current_action_present(target) != Some(false))
+            {
+                extra_state.insert(format!(
+                    "Aero seat {target} last played card history unknown"
+                ));
+            }
+        }
+    }
+    // ThenaBehavior::BuffSelf 0x7cdaa4c counts committed current-turn
+    // staged plays; unresolved or absent history cannot be restored.
+    if !cards::reference_rules_enabled() {
+        for (seat, relevant) in [
+            (
+                0,
+                position.hand.iter().any(|card| card.id == "Thena")
+                    || position.deck.iter().any(|id| id == "Thena")
+                    || position
+                        .locations
+                        .iter()
+                        .any(|lane| lane.mine.iter().any(|card| card.id == "Thena")),
+            ),
+            (
+                1,
+                position
+                    .opponent
+                    .known
+                    .iter()
+                    .chain(&position.opponent.seen)
+                    .chain(position.opponent.deck_list.iter().flatten())
+                    .chain(position.opponent.pool.iter().flatten())
+                    .any(|id| id == "Thena")
+                    || position
+                        .locations
+                        .iter()
+                        .any(|lane| lane.theirs.iter().any(|card| card.id == "Thena")),
+            ),
+        ] {
+            if relevant && position.current_action_present(seat) != Some(false) {
+                extra_state.insert(format!(
+                    "Thena seat {seat} current-turn staged play history unknown"
+                ));
+            }
+        }
+    }
+    // SubterraneaBehavior::AddRocks 0x7d84dbc shuffles generated cards into
+    // both decks. The opponent's resulting hidden deck composition is not exported.
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && (position.locations.iter().any(|lane| {
+            lane.id.as_deref() == Some("Subterranea")
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+        }) || position
+            .previous_turn_locations
+            .as_ref()
+            .is_some_and(|history| history.ids.iter().flatten().any(|id| id == "Subterranea")))
+    {
+        extra_state
+            .insert("Subterranea shuffled opponent deck composition not exported".to_owned());
+    }
+    // LechuguillaBehavior::ShuffleRocks 0x7d618d0 can change either
+    // hidden deck after a resolved play, including cards that left the board.
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && position.locations.iter().any(|lane| {
+            lane.id.as_deref() == Some("Lechuguilla")
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+        })
+    {
+        extra_state.insert("Lechuguilla shuffled deck composition not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && position.locations.iter().any(|lane| {
+            lane.id.as_deref() == Some("VibraniumMines")
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+        })
+    {
+        extra_state.insert("Vibranium Mines shuffled deck composition not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && resolved_source_possible(position, "Djinn")
+    {
+        extra_state.insert("Djinn pending next-turn energy grant not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.locations.iter().any(|lane| {
+            lane.id.as_deref() == Some("Panoptichron")
+                && lane
+                    .mine
+                    .iter()
+                    .chain(&lane.theirs)
+                    .any(|card| card.revealed && card.created.is_none())
+        })
+    {
+        extra_state.insert("Panoptichron card creation provenance not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && position.locations.iter().any(|lane| {
+            lane.id.as_deref() == Some("BlackVortex")
+                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+        })
+    {
+        // BlackVortexBehavior 0x7d407d4 uses per-player consumed flags.
+        extra_state.insert("Black Vortex per-player transformation flags not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position
+            .locations
+            .iter()
+            .any(|lane| lane.id.as_deref() == Some("SacredTimeline"))
+    {
+        extra_state.insert("Sacred Timeline starting hand identity not exported".to_owned());
     }
     // Stones may originate from Thanos even when Thanos himself is not visible.
     // The opponent's post-shuffle deck composition is not exported.
@@ -661,6 +1227,47 @@ pub fn coverage(position: &Position) -> Value {
             let id = card.id.as_str();
             card_ids.insert(id);
             if card.revealed {
+                if !cards::reference_rules_enabled() {
+                    if id == "Merlin" && card.played_turn.is_none_or(|turn| turn < position.turn) {
+                        // MerlinBehavior::AddSpell 0x7ef7c94 remembers its last random index.
+                        extra_state
+                            .insert("Merlin previous random spell index not exported".to_owned());
+                    }
+                    if id == "FrankieRaye"
+                        && card.played_turn.is_none_or(|turn| turn < position.turn)
+                    {
+                        // FrankieRayeBehavior 0x7eaba94 consumes a one-time trigger.
+                        extra_state.insert(
+                            "Frankie Raye prior trigger consumption not exported".to_owned(),
+                        );
+                    }
+                    if id == "HopeSummers" && position.current_action_present(*owner) != Some(false)
+                    {
+                        // HopeSummersBehavior 0x7ec5cb4 queues next-turn energy.
+                        extra_state.insert(
+                            "Hope Summers current-turn queued energy grants unknown".to_owned(),
+                        );
+                    }
+                }
+                // NegasonicTeenageWarheadBehavior::DestroyCard 0x7f0b1cc
+                // consumes the once-only trigger before attempting destruction.
+                if id == "NegasonicTeenageWarhead"
+                    && card.played_turn.is_none_or(|turn| turn < position.turn)
+                    && card.negasonic_consumed().is_none()
+                    && !cards::reference_rules_enabled()
+                {
+                    extra_state.insert(
+                        "Negasonic Teenage Warhead trigger consumption not exported".to_owned(),
+                    );
+                }
+                if id == "BlackKnight"
+                    && card.played_turn.is_none_or(|turn| turn < position.turn)
+                    && card.black_knight_consumed().is_none()
+                    && !cards::reference_rules_enabled()
+                {
+                    // BlackKnightBehavior::AddEbonyBlade 0x7e72ce0.
+                    extra_state.insert("Black Knight trigger consumption not exported".to_owned());
+                }
                 if id == "HumanTorchFirstSteps"
                     && card.played_turn.is_none_or(|turn| turn < position.turn)
                 {
@@ -734,16 +1341,40 @@ pub fn coverage(position: &Position) -> Value {
         }
         if let Some(id) = &lane.id {
             loc_ids.insert(id.as_str());
-            // A previous location morph may leave queued grants; public evidence of
-            // morphing effects is gated separately above.
-            if matches!(id.as_str(), "Feast" | "AltarOfDeath")
-                && position.turn > 1
-                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+            if id == "Ego" && !cards::reference_rules_enabled() {
+                extra_state.insert("Ego autonomous staging not modeled".to_owned());
+            }
+            if id == "MountVesuvius" && !cards::reference_rules_enabled() && position.turn >= 5 {
+                extra_state.insert("Mount Vesuvius retreat prohibition not modeled".to_owned());
+            }
+            if id == "Flooding" && lane.revealed_turn.is_none() && !cards::reference_rules_enabled()
+            {
+                extra_state.insert("Flooding reveal turn unknown".to_owned());
+            }
+            if id == "HotelInferno"
+                && lane.revealed_turn.is_none()
                 && !cards::reference_rules_enabled()
             {
-                extra_state.insert(format!(
-                    "{id} prior-turn pending player energy grants not exported"
-                ));
+                extra_state.insert("Hotel Inferno reveal turn unknown".to_owned());
+            }
+            if id == "AstralPlane"
+                && lane.revealed_turn.is_none()
+                && !cards::reference_rules_enabled()
+            {
+                extra_state.insert("Astral Plane reveal turn unknown".to_owned());
+            }
+            if id == "CastleZemo" && !cards::reference_rules_enabled() {
+                extra_state.insert("Castle Zemo per-player betrayed state not exported".to_owned());
+            }
+            if id == "Krakoa" && !cards::reference_rules_enabled() {
+                extra_state.insert(
+                    "Krakoa prior consumption and affected top-deck power unknown".to_owned(),
+                );
+            }
+            if id == "AuntMays" && !cards::reference_rules_enabled() {
+                extra_state.insert(
+                    "Aunt May's per-player movement trigger consumption unknown".to_owned(),
+                );
             }
             if id == "FracturedFrontier" && !cards::reference_rules_enabled() {
                 if lane.revealed_turn.is_none() {
@@ -882,6 +1513,89 @@ pub fn coverage(position: &Position) -> Value {
 #[cfg(test)]
 mod location_change_tests {
     use super::*;
+    #[test]
+    fn unrestored_ritual_and_arrow_effects_are_gated() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.hand.push(crate::position::CardRef {
+            id: "SummoningRitual01Dormammu".into(),
+            ..Default::default()
+        });
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Dormammu ritual source")
+        );
+        position.turn = 3;
+        position.opponent.seen.push("KateBishop".into());
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("hidden opponent arrows")
+        );
+    }
+
+    #[test]
+    fn prior_energy_updates_and_owner_restriction_fail_closed() {
+        let mut position = Position {
+            turn: 4,
+            ..Position::default()
+        };
+        position.opponent.seen.push("Electro".into());
+        position.hand.push(crate::position::CardRef {
+            id: "Viper".into(),
+            ..Default::default()
+        });
+        let state = coverage(&position)["state"].to_string();
+        assert!(state.contains("Electro prior permanent energy update not exported"));
+        assert!(state.contains("Viper CanChangeCardOwnerHere restriction state not exported"));
+        position.opponent.seen.clear();
+        position.locations[0].id = Some("WhiteHotRoom".into());
+        position.locations[0].revealed_turn = Some(2);
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("WhiteHotRoom prior permanent max energy grants not exported")
+        );
+    }
+
+    #[test]
+    fn previous_locations_gate_replaced_energy_grants() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        let gated =
+            |p: &Position| {
+                coverage(p)["state"].as_array().unwrap().iter().any(|v| {
+                    v == "Feast/AltarOfDeath prior-turn pending player energy grants unknown"
+                })
+            };
+        assert!(gated(&position));
+        position.turn = 1;
+        assert!(!gated(&position));
+        position.turn = 3;
+        for replacement in ["Westview", "MirrorDimension"] {
+            position.locations[0].id = Some(replacement.into());
+            for old in ["Feast", "AltarOfDeath"] {
+                position.previous_turn_locations = Some(position::PreviousTurnLocations {
+                    complete: true,
+                    ids: [vec![old.into()], vec![], vec![]],
+                });
+                assert!(gated(&position));
+            }
+        }
+        position.previous_turn_locations = Some(position::PreviousTurnLocations {
+            complete: true,
+            ids: [vec!["Ruins".into()], vec![], vec![]],
+        });
+        position.locations[0].id = Some("Feast".into());
+        assert!(!gated(&position));
+        position.previous_turn_locations.as_mut().unwrap().complete = false;
+        assert!(gated(&position));
+    }
 
     #[test]
     fn public_morphing_card_on_either_side_marks_possible_grants() {

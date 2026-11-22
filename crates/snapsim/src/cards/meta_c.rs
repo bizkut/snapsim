@@ -544,9 +544,11 @@ mod tests {
             source: skill,
             card: Some(target),
             lane: None,
+            destination: None,
             start_turn: game.turn,
             end_turn: game.turn,
             remaining: 1,
+            unlimited: false,
             on_move: Some(power),
         });
         game.stage_action(

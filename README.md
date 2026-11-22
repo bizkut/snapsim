@@ -27,6 +27,11 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
 
 `snapsim` uses arena indices for cards and board lanes. `Game` owns the turn flow, player zones, priority, event dispatch and Ongoing recomputation; `policy` contains the heuristic, spread and margin planners. The game borrows a `GameRng`, so hooks can use `game.rng.borrow_mut()` and consume the same stream as the Python reference. `PythonRandom` implements CPython's integer seeding and sampling; its fixtures come from CPython 3.12.16. `data` exposes typed copies of the reference catalogs.
 
+The Rust card catalog supplements `data/cards.json` with client-only definitions from
+`data/client_cards.json`; website entries take precedence. Regenerate the supplement with
+`python3 parity/generate_client_cards.py /path/to/59.15.1/rules/carddefs.json`.
+This does not modify the frozen Python reference catalog.
+
 `cards::registry()` (one descriptor slice per card-group module, listed in `cards::GROUPS`) and `locations::REGISTRY` contain rule descriptors. Card modules provide callbacks; see `cards/sword_master.rs` for a random effect and `cards/representative.rs` for reveal, ongoing, play and end-turn examples. Location modules provide callbacks; see `locations/turns.rs` for an end-turn rule. Each descriptor can provide initial per-instance state, and hooks can access the game's RNG. `Event` also exposes turn, reveal, play, addition, movement, destruction, discard, location reveal, energy and turn-count events. Hooks must preserve the Python event and RNG call order.
 Cube accounting is opt-in. `snapsim compare --stakes` compares two stake policies
 using equal `--rollouts` per seat for both play and visible-position win estimates.
@@ -118,6 +123,29 @@ The generator includes approximate positions, preserves watcher state across rec
 | graveyard and banished cards | both players' zones; a graveyard card's death lane stays unknown |
 
 Stat updates are history, not deltas: the client's power and cost getters already report totals, and the client does not label which rows come from Ongoing effects. A row is removed only when it matches a contribution the engine recomputes from the same named active card or revealed location (same stat, operation, value and source). Rows from faction, augment or league updaters, and rows whose provenance is missing or ambiguous, stay historical. The reader does not report the order of different cards drawn on the same turn or where a graveyard card died.
+
+Optional per-player `default_energy` and `max_energy` fields are forwarded when
+present; the default is separate from the persistent maximum and current energy.
+The reader does not guarantee either field. Public graveyard cards retain
+`zone_position` order when every entry has a position. During simulation, the
+combined discard/destroy graveyard preserves insertion order and removes cards
+when they leave; restored discarded-vs-destroyed provenance may still be unknown.
+
+For coverage of pending energy from a replaced Feast or Altar of Death,
+`position_from_snap` accepts `previous_turn_locations` either in `options` or
+in `observation.game` (options take precedence), for example
+`{"complete":true,"ids":[["Feast","Westview"],[],["Ruins"]]}`. `ids` has
+exactly three arrays in lane order, listing every identity that lane held at any
+point during the previous turn; an empty array denotes no revealed identity.
+Set `complete` only when the entire previous turn is known, including
+locations replaced before the current observation. This is external
+history, not a field currently guaranteed by the reader. When it is absent,
+coverage fails closed from turn 2; known prior Feast or Altar of Death also
+fails closed because the pending player energy grants are not exported.
+The same `previous_turn_locations` object is accepted in `advise` options,
+including through `snapsim_py.advise`, and overrides the position field.
+Missing evidence yields a coverage reason: approximate mode continues with an
+approximate result, while exact mode declines.
 
 ## Position materialization parity
 
@@ -213,6 +241,43 @@ Two kinds of record are reported rather than compared:
   * Plans may move and activate cards; the parity gates plan with plays only.
 
 `parity/gates.sh` runs every gate in order and stops at the first failure (inputs: the recorder outputs listed in its header).
+
+The gate reads oracle files from `${SNAPSIM_ORACLES:-$HOME/.cache/snapsim-oracles}`.
+To regenerate the historical six-run corpus (the recording directory has grown since
+the original run), execute from this repository:
+
+```sh
+ROOT="$PWD"
+O="${SNAPSIM_ORACLES:-$HOME/.cache/snapsim-oracles}"
+RUNS=$SNAPSIM_RUNS
+SNAPS=$SNAPSIM_SNAPSHOTS
+FIXTURES=$SNAPSIM_FIXTURES
+PY=$SNAPSIM_PYTHON
+export PYTHONPATH=$SNAPSIM_REFERENCE
+export SNAPSIM_REFERENCE_POOL=1
+mkdir -p "$O/snapsim-full" "$O/snapsim-api" "$O/reference-runs"
+for f in "$RUNS"/20261118*.jsonl "$RUNS"/20261119*.jsonl \
+         "$RUNS"/20261118*.deck.json "$RUNS"/20261119*.deck.json; do
+  [ ! -e "$f" ] || ln -sf "$f" "$O/reference-runs/$(basename "$f")"
+done
+cd "$(mktemp -d)"
+for policy in spread margin; do
+  "$PY" "$ROOT/parity/record.py" "$ROOT/parity/corpus-full-$policy.json" \
+    --games 1000 --seed 20261201 > "$O/snapsim-full/$policy.jsonl"
+done
+"$PY" "$ROOT/parity/position_record.py" --games 1 --seeds 20 \
+  --recordings "$O/reference-runs" > "$O/snapsim-api/position.jsonl"
+"$PY" "$ROOT/parity/record_advisor.py" "$O/snapsim-api/advisor.jsonl" \
+  --runs "$O/reference-runs"
+"$PY" "$ROOT/parity/validation_record.py" "$O/snapsim-validation.jsonl" \
+  --corpus "$O/snapsim-api/position.jsonl" --corpus "$O/snapsim-api/advisor.jsonl" \
+  --runs "$O/reference-runs"
+"$PY" "$ROOT/parity/snap_record.py" "$O/reference-runs"/*.jsonl "$SNAPS"/*.jsonl \
+  "$FIXTURES/match-1.jsonl" "$FIXTURES/match-2.jsonl" > "$O/snapsim-snap-oracle.jsonl"
+```
+
+The advisor corpus has 898 records, of which the gate compares 834 and identifies
+64 as new content. The SNAP corpus has 1,047 frames (190 positions, 857 errors).
 
 | Gate | Command (oracle → Rust check) | Result on the integrated build |
 |---|---|---|

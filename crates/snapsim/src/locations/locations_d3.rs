@@ -93,11 +93,10 @@ fn hala(game: &mut Game<'_>, lane: usize) {
     if game.turn != 4 {
         return;
     }
-    let power = game.powers()[lane];
-    if power[0] == power[1] {
+    let Some(winner) = game.lane_winner(lane) else {
         return;
-    }
-    let loser = usize::from(power[1] < power[0]);
+    };
+    let loser = 1 - winner;
     let victims: Vec<_> = game.lanes[lane]
         .cards
         .iter()

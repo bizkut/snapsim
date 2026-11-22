@@ -128,14 +128,7 @@ pub const LOS_DIABLOS: LocationDef = LocationDef {
 };
 
 fn leader(game: &Game<'_>, lane: usize) -> Option<usize> {
-    let [a, b] = game.powers()[lane];
-    if a > b {
-        Some(0)
-    } else if b > a {
-        Some(1)
-    } else {
-        None
-    }
+    game.lane_winner(lane)
 }
 fn draw_slot(game: &mut Game<'_>, seat: usize, slot: Option<usize>) {
     if game.players[seat].hand.len() < 7
@@ -319,8 +312,13 @@ fn dream(game: &Game<'_>, _: usize, _: usize, cost: i32) -> i32 {
 fn elysium(_: &Game<'_>, _: usize, _: usize, cost: i32) -> i32 {
     cost - 1
 }
+// FloodingBehavior::MorphToFlooded (0x7d53b14) waits until after the reveal
+// turn; the frozen reference morphs immediately.
 fn flooding(game: &mut Game<'_>, lane: usize) {
-    game.replace_location(lane, "Flooded");
+    if crate::cards::reference_rules_enabled() || game.lanes[lane].revealed_turn != Some(game.turn)
+    {
+        game.replace_location(lane, "Flooded");
+    }
 }
 fn los_diablos(game: &mut Game<'_>, _: usize) {
     if game.turn == 3 {

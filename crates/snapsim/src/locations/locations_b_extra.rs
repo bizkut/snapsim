@@ -114,9 +114,9 @@ fn deadlands(game: &mut Game<'_>, lane: usize) {
 }
 fn survivors_camp(game: &mut Game<'_>, lane: usize) {
     if game.turn == 4 {
-        let p = game.powers()[lane];
+        let winner = game.lane_winner(lane);
         for seat in 0..2 {
-            if p[seat] > p[1 - seat] {
+            if winner == Some(seat) {
                 game.draw(seat);
             } else {
                 game.horde(lane, seat, 2);

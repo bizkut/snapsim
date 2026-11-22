@@ -10,6 +10,7 @@ mod locations_d3;
 mod locations_e;
 mod locations_f;
 mod locations_g;
+mod locations_h;
 mod recruit_a;
 mod turns;
 
@@ -263,6 +264,41 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_g::SAKAAR_GRAND_PRIX,
     locations_g::WHITE_HOT_ROOM,
     locations_g::WEAPON_X_FACILITY,
+    locations_h::SOKOVIA,
+    locations_h::THE_HUB,
+    locations_h::GREAT_PORTAL,
+    locations_h::MILANO,
+    locations_h::SUBTERRANEA,
+    locations_h::WEIRDWORLD,
+    locations_h::LECHUGUILLA,
+    locations_h::LUKES_BAR,
+    locations_h::UTNAPISHTIMS_ARK,
+    locations_h::SPACE_THRONE,
+    locations_h::DEEP_SPACE,
+    locations_h::STARLIGHT_CITADEL,
+    locations_h::PANOPTICHRON,
+    locations_h::GREAT_WEB,
+    locations_h::BAR_WITH_NO_NAME,
+    locations_h::CANCUN,
+    locations_h::NOOR_DIMENSION,
+    locations_h::PIZZA_PLACE,
+    locations_h::TACO_TRUCK,
+    locations_h::DESTROYED_MANSION,
+    locations_h::VIBRANIUM_MINES,
+    locations_h::GAMMA_LAB,
+    locations_h::BLACK_VORTEX,
+    locations_h::ASGARD_BESIEGED,
+    locations_h::HOTEL_INFERNO,
+    locations_h::KRAKOA,
+    locations_h::THE_PEAK,
+    locations_h::TRISKELION,
+    locations_h::TARNAX,
+    locations_h::CELESTIAL_BURIAL_GROUND,
+    locations_h::AUNT_MAYS,
+    locations_h::SACRED_TIMELINE,
+    locations_h::ASTRAL_PLANE,
+    locations_h::CASTLE_ZEMO,
+    locations_h::KVCH,
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {

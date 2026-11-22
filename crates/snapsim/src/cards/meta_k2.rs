@@ -235,8 +235,7 @@ fn mad_thinker(game: &mut Game<'_>, card: usize) {
 // CrossbonesBehavior::CanPlay 0x7e852c4 compares the lane winner
 // to the playing card's owner; ties are not wins.
 fn crossbones(game: &Game<'_>, _card: usize, lane: usize, owner: usize) -> bool {
-    let power = game.powers()[lane];
-    power[owner] > power[1 - owner]
+    game.lane_winner(lane) == Some(owner)
 }
 
 // OzymandiasBehavior::BuffRocks 0x7f139a4 iterates revealed allied Rocks.
@@ -633,6 +632,20 @@ mod tests {
         assert!(crossbones(&g, source, 0, 0));
         place(&mut g, "Hulk", 1, 0);
         assert!(!crossbones(&g, source, 0, 0));
+    }
+    #[test]
+    fn crossbones_obeys_bar_with_no_name_winner() {
+        static BAR: crate::locations::LocationDef =
+            crate::locations::location("BarWithNoName", 0, 0, 1, false);
+        let mut rng = PythonRandom::seed(1);
+        let mut g = setup(&mut rng);
+        let source = g.create_card("Crossbones", 0);
+        place(&mut g, "Hulk", 0, 0);
+        assert!(crossbones(&g, source, 0, 0));
+        g.lanes[0].def = &BAR;
+        g.lanes[0].revealed = true;
+        assert!(!crossbones(&g, source, 0, 0));
+        assert!(crossbones(&g, source, 0, 1));
     }
     #[test]
     fn ozymandias_only_buffs_revealed_allied_rocks() {

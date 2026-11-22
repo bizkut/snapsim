@@ -108,11 +108,10 @@ fn weapon_x_facility(game: &mut Game<'_>, _: usize) {
 
 // AddPermanentEnergyToWinner 0x7d7b074 grants the winner +1 after turn 4.
 fn sakaar_grand_prix(game: &mut Game<'_>, lane: usize) {
-    if game.turn == 4 {
-        let powers = game.powers()[lane];
-        if powers[0] != powers[1] {
-            game.add_permanent_energy(usize::from(powers[1] > powers[0]), 1);
-        }
+    if game.turn == 4
+        && let Some(winner) = game.lane_winner(lane)
+    {
+        game.add_permanent_energy(winner, 1);
     }
 }
 

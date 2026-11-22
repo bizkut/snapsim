@@ -492,10 +492,14 @@ mod tests {
 
     #[test]
     fn energy_and_highest_buff_require_targets_as_in_client() {
-        let p = position(
+        let mut p = position(
             json!([{"id":"VibroShockGauntlets"}, {"id":"Hulk"}]),
             json!([]),
         );
+        // Turn advancement must not depend on sampled hidden locations.
+        for (lane, id) in p.locations.iter_mut().zip(["Ruins", "Wakanda", "KamarTaj"]) {
+            lane.id = Some(id.into());
+        }
         let mut rng = PythonRandom::seed(5);
         let mut game = build_game(&p, &mut rng).unwrap();
         let ids = game.lanes[0].cards.clone();
@@ -556,14 +560,22 @@ mod tests {
 
     #[test]
     fn once_and_future_moves_lowest_and_adds_energy() {
-        let p = position(
+        let mut p = position(
             json!([{"id":"OnceAndFuture"}, {"id":"AntMan"}, {"id":"Hulk"}]),
             json!([]),
         );
+        // Keep random hidden-location effects out of this energy-specific test.
+        for (lane, id) in p.locations.iter_mut().zip(["Ruins", "Wakanda", "KamarTaj"]) {
+            lane.id = Some(id.into());
+        }
         let mut rng = PythonRandom::seed(10);
         let mut game = build_game(&p, &mut rng).unwrap();
         let ids = game.lanes[0].cards.clone();
+        assert_eq!(game.players[0].energy, 3);
+        assert_eq!(game.cards[ids[1]].def.id, "AntMan");
+        assert!(game.cards[ids[1]].power() < game.cards[ids[2]].power());
         once_and_future(&mut game, ids[0]);
+        assert_eq!(game.players[0].energy, 3);
         assert!(game.players[0].deck.contains(&ids[1]));
         assert_eq!(game.cards[ids[2]].lane, Some(0));
         game.turn += 1;
@@ -592,7 +604,11 @@ mod tests {
 
     #[test]
     fn queen_generates_zero_cost_skill_without_repeating_previous() {
-        let p = position(json!([{"id":"ScarletWitchQueenOfChaos"}]), json!([]));
+        let mut p = position(json!([{"id":"ScarletWitchQueenOfChaos"}]), json!([]));
+        // Do not couple turn-dependent behavior to the hidden-location pool.
+        for lane in &mut p.locations {
+            lane.id = Some("Ruins".into());
+        }
         let mut rng = PythonRandom::seed(12);
         let mut game = build_game(&p, &mut rng).unwrap();
         let source = game.lanes[0].cards[0];

@@ -388,9 +388,11 @@ fn lane_move_grant_is_turn_scoped_and_shared() {
         source,
         card: None,
         lane: Some(0),
+        destination: None,
         start_turn: 2,
         end_turn: 2,
         remaining: 1,
+        unlimited: false,
         on_move: Some(buff),
     });
     assert!(!game.can_player_move(ally, 1, 0));

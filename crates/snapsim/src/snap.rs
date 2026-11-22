@@ -162,16 +162,24 @@ pub(crate) fn card_ref(card: &Value, board: bool, seats: [&Value; 2], v2: bool) 
         if let Ok(ability) = serde_json::from_value::<AbilityState>(card["ability_state"].clone())
             && ability.abilities.len() <= 512
             && ability.abilities.iter().all(|entry| {
-                ((card["card_id"] == "TheThingFirstSteps"
+                (((card["card_id"] == "TheThingFirstSteps"
                     && entry.ability_def_id == "TheThingFirstStepsEndOfTurnTrigger")
                     || (card["card_id"] == "Nebula"
                         && entry.ability_def_id == "NebulaPreEndOfTurnTrigger"))
                     && entry.kind.as_deref() == Some("trigger")
                     && entry.lifetime.is_none()
-                    && entry.has_triggered_once.is_none()
+                    && entry.has_triggered_once.is_none())
+                    || (((card["card_id"] == "NegasonicTeenageWarhead"
+                        && entry.ability_def_id
+                            == "NegasonicTeenageWarheadPostCardResolvedTrigger")
+                        || (card["card_id"] == "BlackKnight"
+                            && entry.ability_def_id == "BlackKnightPostCardDiscardedTrigger"))
+                        && entry.kind.as_deref() == Some("trigger")
+                        && entry.lifetime.as_deref() == Some("OneTime")
+                        && entry.state.is_none())
             })
             && ability.objective.as_ref().is_none_or(|objective| {
-                card["card_id"] == "JuggernautHorseman"
+                (card["card_id"] == "JuggernautHorseman" || card["card_id"] == "ArchangelHorseman")
                     && matches!(
                         objective.state.as_str(),
                         "None"
@@ -688,15 +696,34 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         options["mode"].clone()
     };
     let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    if let Some(maximum) = local.get("max_energy").and_then(Value::as_i64) {
+        position["max_energy"] = json!(maximum);
+    }
+    for (name, player) in [("max_energy", opponent), ("default_energy", opponent)] {
+        if let Some(value) = player.get(name).and_then(Value::as_i64) {
+            position["opponent"][name] = json!(value);
+        }
+    }
+    if let Some(value) = local.get("default_energy").and_then(Value::as_i64) {
+        position["default_energy"] = json!(value);
+    }
     if !known.is_empty() {
         position["opponent"]["known"] = json!(known);
     }
     for (owner, source) in [(0, zones), (1, opponent_zones)] {
         for name in ["graveyard", "banished"] {
-            let public: Vec<_> = array(&source[name]["cards"])
+            let mut public: Vec<_> = array(&source[name]["cards"])
                 .iter()
                 .filter(|card| card["card_id"].as_str().is_some_and(|id| !id.is_empty()))
                 .collect();
+            // Graveyard::GetDestroyedAndDiscardedCards 0x7dd80e8 traverses
+            // zone insertion order, not a destroyed-then-discarded grouping.
+            if public
+                .iter()
+                .all(|card| card["zone_position"].as_i64().is_some())
+            {
+                public.sort_by_key(|card| card["zone_position"].as_i64().unwrap());
+            }
             // Legacy recordings already carried local graveyard cards but lacked the
             // extended reader schema; keep their position JSON unchanged.
             if (version == Some(2) && !public.is_empty())
@@ -733,6 +760,16 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     {
         position["history"] = json!(history);
     }
+    // An explicit option overrides the observation; malformed evidence remains
+    // absent, so coverage cannot mistake it for a complete history.
+    if let Some(raw) = options
+        .get("previous_turn_locations")
+        .or_else(|| game.get("previous_turn_locations"))
+        && let Ok(previous) =
+            serde_json::from_value::<crate::position::PreviousTurnLocations>(raw.clone())
+    {
+        position["previous_turn_locations"] = json!(previous);
+    }
     Ok(position)
 }
 
@@ -753,6 +790,62 @@ mod tests {
             {"card_id":"Hulk","owner_entity_id":20,"revealed":true},
             {"card_id":"AntMan","owner_entity_id":20,"revealed":false}
         ]}]}})
+    }
+
+    #[test]
+    fn public_graveyard_keeps_client_zone_order() {
+        let mut observation = prior_observation();
+        observation["schema_version"] = json!(2);
+        observation["game"]["players"][1]["zones"]["graveyard"]["cards"] = json!([
+            {"card_id":"Hulk","zone_position":2},
+            {"card_id":"Wasp","zone_position":0},
+            {"card_id":"Cyclops","zone_position":1}
+        ]);
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        let ids: Vec<_> = position["opponent"]["graveyard"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|card| card["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["Wasp", "Cyclops", "Hulk"]);
+    }
+
+    #[test]
+    fn observed_energy_baselines_are_forwarded_for_both_players() {
+        let mut observation = prior_observation();
+        observation["game"]["players"][0]["max_energy"] = json!(5);
+        observation["game"]["players"][0]["default_energy"] = json!(3);
+        observation["game"]["players"][1]["max_energy"] = json!(4);
+        observation["game"]["players"][1]["default_energy"] = json!(2);
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        assert_eq!(position["max_energy"], 5);
+        assert_eq!(position["default_energy"], 3);
+        assert_eq!(position["opponent"]["max_energy"], 4);
+        assert_eq!(position["opponent"]["default_energy"], 2);
+    }
+
+    #[test]
+    fn previous_locations_accept_observation_and_override_option() {
+        let mut observation = prior_observation();
+        let previous = json!({"complete":true,"ids":[["Feast","Westview"],[],[]]});
+        observation["game"]["previous_turn_locations"] = previous.clone();
+        assert_eq!(
+            position_from_snap(&observation, &json!({})).unwrap()["previous_turn_locations"],
+            previous
+        );
+        let option = json!({"complete":false,"ids":[["AltarOfDeath"],[],[]]});
+        assert_eq!(
+            position_from_snap(&observation, &json!({"previous_turn_locations":option})).unwrap()["previous_turn_locations"],
+            option
+        );
+        let malformed = json!({"previous_turn_locations":{"complete":true,"ids":["Ruins"]}});
+        assert!(
+            position_from_snap(&observation, &malformed)
+                .unwrap()
+                .get("previous_turn_locations")
+                .is_none()
+        );
     }
 
     #[test]

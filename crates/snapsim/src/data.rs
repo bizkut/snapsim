@@ -26,8 +26,19 @@ pub struct LocationData {
 }
 
 pub fn cards() -> Vec<CardData> {
-    serde_json::from_str(include_str!("../../../data/cards.json"))
-        .expect("invalid bundled card data")
+    let mut cards: Vec<CardData> = serde_json::from_str(include_str!("../../../data/cards.json"))
+        .expect("invalid bundled card data");
+    let supplement: Vec<CardData> =
+        serde_json::from_str(include_str!("../../../data/client_cards.json"))
+            .expect("invalid bundled client card data");
+    let existing: std::collections::HashSet<_> =
+        cards.iter().map(|card| card.carddefid.clone()).collect();
+    cards.extend(
+        supplement
+            .into_iter()
+            .filter(|card| !existing.contains(&card.carddefid)),
+    );
+    cards
 }
 
 pub fn locations() -> Vec<LocationData> {

@@ -229,9 +229,11 @@ fn web_sling(game: &mut Game<'_>, card: usize) {
         source: card,
         card: None,
         lane: Some(lane),
+        destination: None,
         start_turn: turn,
         end_turn: turn,
         remaining: 1,
+        unlimited: false,
         on_move: Some(web_sling_moved),
     });
 }
@@ -407,10 +409,14 @@ mod tests {
 
     #[test]
     fn web_sling_grants_one_move_only_next_turn() {
-        let p = position(
+        let mut p = position(
             json!([{"id":"WebSling"},{"id":"Hawkeye"},{"id":"Hulk"}]),
             json!([]),
         );
+        // Turn-dependent movement must not depend on hidden-location sampling.
+        for lane in &mut p.locations {
+            lane.id = Some("Ruins".into());
+        }
         let mut rng = PythonRandom::seed(8);
         let mut game = build_game(&p, &mut rng).unwrap();
         let skill = game.lanes[0].cards[0];

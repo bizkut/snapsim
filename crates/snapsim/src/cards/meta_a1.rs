@@ -95,9 +95,8 @@ fn adam_warlock(game: &mut Game<'_>, card: usize) {
         return;
     }
     let owner = game.cards[card].owner;
-    let powers = game.powers()[lane];
     // AdamWarlockBehavior::DrawIfWinning (0x7e5f75c): a tie is not a win.
-    if powers[owner] > powers[1 - owner] {
+    if game.lane_winner(lane) == Some(owner) {
         game.draw(owner);
     } else {
         gain_power(game, card, 1, owner);

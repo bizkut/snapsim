@@ -251,6 +251,7 @@ pub(super) fn simulate(
             def,
             observed_id: None,
             revealed: id.is_some(),
+            destroyed: false,
             revealed_turn,
             cards: Vec::new(),
             bonus: [0; 2],
@@ -289,6 +290,7 @@ pub(super) fn simulate(
         stakes: None,
         next_resolution_order: 1,
         is_wait_for_staging: true,
+        is_start_turn: false,
         total_turns: start.total_turns.as_u64().unwrap_or(6) as u8,
         reveal_priority: None,
         played: Default::default(),
@@ -302,6 +304,8 @@ pub(super) fn simulate(
         ending_reveals: false,
         delayed_reveals: Default::default(),
         deferred_added_reveals: Vec::new(),
+        post_resolve_plays: Vec::new(),
+        end_turn_lane_order: None,
         current_location,
         location_reveal_order: [order[0], order[1], order[2]],
         destroyed: Some(Vec::new()),
@@ -694,6 +698,58 @@ pub(super) fn simulate(
             }
         }
         game.turn = target.turn as u8;
+        // SakaarTutorialBehavior::PlayCard 0x7d7b5bc selects the highest
+        // power card in the opponent's hand. A newly visible non-staged card
+        // proves that choice was in the hand after the next draw.
+        if !crate::cards::reference_rules_enabled() && target.turn <= 3 {
+            let lane = (target.turn - 1) as usize;
+            if start.locations[lane].is_null() && target.locations[lane] == "SakaarTutorial" {
+                let candidates: Vec<_> = target
+                    .board
+                    .iter()
+                    .filter(|card| {
+                        card.owner == 1
+                            && card.lane == lane
+                            && card.revealed
+                            && entity(start, &card.entity).is_none()
+                            && !staged
+                                .plays
+                                .iter()
+                                .any(|play| play.card.entity == card.entity)
+                            && card
+                                .id
+                                .as_str()
+                                .is_some_and(|id| crate::cards::get(id).is_some())
+                    })
+                    .collect();
+                if let [observed] = candidates.as_slice() {
+                    let id = observed.id.as_str().unwrap();
+                    let selected = make(id, 1, &Value::Null, &Value::Null)?;
+                    let ceiling = selected.power();
+                    let mut available = game.players[1].hand.clone();
+                    if let Some(slot) = game.next_draw_slot(1) {
+                        available.push(game.players[1].deck[slot]);
+                    }
+                    if let Some(&slot) = available.first() {
+                        game.cards[slot] = selected;
+                        for &other in available.iter().skip(1) {
+                            if game.cards[other].power() > ceiling {
+                                let replacement = others.iter().find(|candidate| {
+                                    !available.iter().any(|&index| {
+                                        game.cards[index].def.id == candidate.as_str()
+                                    }) && position::make_card(candidate, 1)
+                                        .is_ok_and(|card| card.power() <= ceiling)
+                                });
+                                if let Some(replacement) = replacement {
+                                    game.cards[other] =
+                                        make(replacement, 1, &Value::Null, &Value::Null)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         game.played = Default::default();
         game.start_turn();
     }

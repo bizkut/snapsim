@@ -157,6 +157,36 @@ pub struct CardRef {
 }
 
 impl CardRef {
+    fn one_time_consumed(&self, card_id: &str, ability_id: &str) -> Option<bool> {
+        if self.id != card_id {
+            return None;
+        }
+        let state = self.ability_state.as_ref()?;
+        if !state.complete || state.objective.is_some() || state.abilities.len() != 1 {
+            return None;
+        }
+        let ability = &state.abilities[0];
+        if ability.ability_def_id != ability_id
+            || ability.kind.as_deref() != Some("trigger")
+            || ability.lifetime.as_deref() != Some("OneTime")
+            || ability.state.is_some()
+        {
+            return None;
+        }
+        ability.has_triggered_once
+    }
+
+    pub(crate) fn negasonic_consumed(&self) -> Option<bool> {
+        self.one_time_consumed(
+            "NegasonicTeenageWarhead",
+            "NegasonicTeenageWarheadPostCardResolvedTrigger",
+        )
+    }
+
+    pub(crate) fn black_knight_consumed(&self) -> Option<bool> {
+        self.one_time_consumed("BlackKnight", "BlackKnightPostCardDiscardedTrigger")
+    }
+
     pub(crate) fn thing_fill_used(&self) -> Option<bool> {
         if self.id != "TheThingFirstSteps" {
             return None;
@@ -224,6 +254,25 @@ impl CardRef {
             "Completed" if objective.progress == objective.goal => {
                 Some((objective.progress as usize, true))
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn archangel_objective(&self) -> Option<(usize, bool)> {
+        if self.id != "ArchangelHorseman" {
+            return None;
+        }
+        let state = self.ability_state.as_ref()?;
+        if !state.abilities.is_empty() {
+            return None;
+        }
+        let objective = state.objective.as_ref()?;
+        if objective.goal != 4 || objective.progress > objective.goal {
+            return None;
+        }
+        match objective.state.as_str() {
+            "InProgress" if objective.progress < 4 => Some((objective.progress as usize, false)),
+            "Completed" if objective.progress == 4 => Some((4, true)),
             _ => None,
         }
     }
@@ -369,6 +418,10 @@ pub struct Opponent {
     pub deck: usize,
     #[serde(default)]
     pub energy: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_energy: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_energy: Option<i32>,
     #[serde(default)]
     pub seen: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -386,12 +439,25 @@ pub struct Opponent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banished: Option<Vec<CardRef>>,
 }
+/// All location identities held during the preceding turn, in lane order.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviousTurnLocations {
+    pub complete: bool,
+    pub ids: [Vec<String>; 3],
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Position {
     pub turn: u8,
     #[serde(default = "six")]
     pub total_turns: u8,
     pub energy: i32,
+    /// Persistent maximum energy before temporary one-turn grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_energy: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_energy: Option<i32>,
     pub hand: Vec<CardRef>,
     pub deck: Vec<String>,
     pub locations: [LocationRef; 3],
@@ -413,6 +479,8 @@ pub struct Position {
     pub banished: Option<Vec<CardRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<ObservedHistory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_turn_locations: Option<PreviousTurnLocations>,
 }
 
 impl Position {
@@ -680,7 +748,12 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         cost: row.cost,
         ongoing_cost: 0,
         temporary_hand_cost: None,
+        next_turn_cost_delta: None,
+        player_cost_set_until: None,
         created: false,
+        created_in_hand: None,
+        created_hand_seat: None,
+        creation_pending: false,
         created_by_card_id: None,
         created_by_location_id: None,
         created_by_player: None,
@@ -727,6 +800,12 @@ pub(crate) fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u
         {
             *state = used;
         }
+        if let Some(used) = reference.negasonic_consumed() {
+            cards::meta_l3::restore_negasonic(card, used);
+        }
+        if let Some(used) = reference.black_knight_consumed() {
+            cards::meta_l3::restore_black_knight(card, used);
+        }
         if reference.nebula_active() == Some(true)
             && let Some(state) = card
                 .state
@@ -737,6 +816,9 @@ pub(crate) fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u
         }
         if let Some((progress, completed)) = reference.objective() {
             cards::restore_objective(card, progress, completed);
+        }
+        if let Some((progress, completed)) = reference.archangel_objective() {
+            cards::meta_l3::restore_archangel(card, progress, completed);
         }
     }
     card.activated = reference.activated.unwrap_or(false);
@@ -974,7 +1056,10 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         });
     let possible: Vec<_> = all_locations(recruit_locations)
         .into_iter()
-        .filter(|id| !known_locations.contains(&id))
+        .filter(|id| {
+            !known_locations.contains(&id)
+                && (cards::reference_rules_enabled() || *id != "SacredTimeline")
+        })
         .collect();
     let hidden_locations = sample(rng, &possible, 3 - known_locations.len())?;
     let mut selected = hidden_locations.into_iter();
@@ -986,6 +1071,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             def,
             observed_id: (def.id != id).then_some(id),
             revealed: src.id.is_some(),
+            destroyed: false,
             revealed_turn: src.id.as_ref().map(|_| {
                 src.revealed_turn
                     .unwrap_or(((i + 1) as u8).min(position.turn))
@@ -1040,6 +1126,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         stakes: None,
         next_resolution_order: 1,
         is_wait_for_staging: true,
+        is_start_turn: false,
         reveal_priority: priority,
         total_turns: position.total_turns,
         played: Default::default(),
@@ -1049,11 +1136,19 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         ending_reveals: false,
         delayed_reveals: Default::default(),
         deferred_added_reveals: Vec::new(),
+        post_resolve_plays: Vec::new(),
+        end_turn_lane_order: None,
         current_location: 0,
         location_reveal_order: [0, 1, 2],
         destroyed: None,
         rng: RefCell::new(rng),
     };
+    if let Some(list) = &position.opponent.deck_list {
+        game.players[1].starting_deck = list
+            .iter()
+            .map(|id| card_def(id).ok().map(|def| def.id))
+            .collect();
+    }
     // Python's Game._from_position: revealed lanes count as already scheduled, and the
     // remaining reveals follow the hidden lanes in lane order.
     let mut order: Vec<usize> = (0..3).filter(|&lane| game.lanes[lane].revealed).collect();
@@ -1072,6 +1167,16 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         .iter()
         .any(|l| l.revealed && l.def.delays_reveals && l.revealed_turn == Some(position.turn));
     game.players[0].energy = position.energy;
+    for (seat, default, maximum) in [
+        (0, position.default_energy, position.max_energy),
+        (1, opp.default_energy, opp.max_energy),
+    ] {
+        let base = default.unwrap_or(i32::from(position.turn));
+        game.players[seat].default_energy_offset = base - i32::from(position.turn);
+        if let Some(maximum) = maximum {
+            game.players[seat].permanent_energy = maximum - base;
+        }
+    }
     game.players[0].next_play_power = position.pending_power;
     game.players[1].next_play_power = opp.pending_power;
     let mut observed_refs: Vec<(usize, &CardRef)> = Vec::new();
@@ -1187,6 +1292,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 game.cards.push(card);
                 if is_graveyard {
                     game.players[owner].graveyard.push((id, None));
+                    game.players[owner].graveyard_order.push(id);
                 } else {
                     game.players[owner].banished.push(id);
                 }
@@ -1398,8 +1504,10 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 .flat_map(|player| &player.hand)
                 .filter_map(|&id| {
                     let card = &game.cards[id];
-                    (!card.abilities_removed && card.ability_def().in_hand_ongoing.is_some())
-                        .then_some(card.def.id)
+                    (!card.abilities_removed
+                        && (card.ability_def().in_hand_ongoing.is_some()
+                            || card.ability_def().late_in_hand_ongoing.is_some()))
+                    .then_some(card.def.id)
                 }),
         );
         let active_locations: HashSet<_> = game
@@ -1485,7 +1593,9 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         }
     }
     game.players[1].energy = opp.energy.unwrap_or_else(|| {
-        position.turn as i32
+        opp.max_energy
+            .or(opp.default_energy)
+            .unwrap_or(i32::from(position.turn))
             + game
                 .lanes
                 .iter()
@@ -1531,6 +1641,33 @@ mod observed_history_tests {
             ]
         }))
         .unwrap()
+    }
+    #[test]
+    fn hidden_location_sampling_excludes_unrestorable_sacred_timeline() {
+        let mut position = base();
+        position.locations[0].id = None;
+        for seed in 0..300 {
+            let mut rng = PythonRandom::seed(seed);
+            let game = build_game(&position, &mut rng).unwrap();
+            assert_ne!(game.lanes[0].def.id, "SacredTimeline");
+        }
+    }
+
+    #[test]
+    fn observed_energy_baselines_are_hydrated_independently() {
+        let mut position = base();
+        position.default_energy = Some(4);
+        position.max_energy = Some(6);
+        position.opponent.default_energy = Some(2);
+        position.opponent.max_energy = Some(5);
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert_eq!(game.players[0].default_energy_offset, 1);
+        assert_eq!(game.players[0].permanent_energy, 2);
+        assert_eq!(game.players[0].energy, 3);
+        assert_eq!(game.players[1].default_energy_offset, -1);
+        assert_eq!(game.players[1].permanent_energy, 3);
+        assert_eq!(game.players[1].energy, 5);
     }
 
     #[test]
@@ -1619,6 +1756,31 @@ mod observed_history_tests {
         );
         card.ability_state.as_mut().unwrap().abilities[0].ability_def_id = "other".into();
         assert_eq!(card.thing_fill_used(), None);
+    }
+
+    #[test]
+    fn negasonic_restores_only_complete_reviewed_trigger() {
+        let mut reference: CardRef = serde_json::from_value(json!({
+            "id":"NegasonicTeenageWarhead","ability_state":{"complete":true,"abilities":[{
+                "ability_def_id":"NegasonicTeenageWarheadPostCardResolvedTrigger",
+                "index":0,"kind":"trigger","lifetime":"OneTime",
+                "has_triggered_once":true,"state":null
+            }],"objective":null}
+        }))
+        .unwrap();
+        let mut runtime = make_card(&reference.id, 0).unwrap();
+        apply_card_reference(&mut runtime, &reference, 3);
+        assert_eq!(
+            runtime
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<bool>(),
+            Some(&true)
+        );
+        reference.ability_state.as_mut().unwrap().complete = false;
+        assert_eq!(reference.negasonic_consumed(), None);
     }
 
     #[test]

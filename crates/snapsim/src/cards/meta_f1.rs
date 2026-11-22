@@ -115,8 +115,7 @@ fn drax(game: &mut Game<'_>, card: usize) {
         let mut rng = game.fork_rng();
         let mut simulation = game.fork(rng.as_mut());
         simulation.move_card(card, lane);
-        let power = simulation.powers()[lane];
-        if power[owner] > power[1 - owner] {
+        if simulation.lane_winner(lane) == Some(owner) {
             valid.push(lane);
         }
     }
@@ -151,8 +150,7 @@ fn isca(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    let powers = game.powers()[lane];
-    if powers[owner] < powers[1 - owner] {
+    if game.lane_winner(lane) == Some(1 - owner) {
         game.multiply_power(card, 2, owner);
     }
 }

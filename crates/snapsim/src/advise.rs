@@ -359,8 +359,12 @@ pub fn advise_json_with_cancel(
     options_json: &str,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<String, String> {
-    let position = Position::from_json(position_json)?;
-    let options: AdviseOptions = serde_json::from_str(options_json).map_err(|e| e.to_string())?;
+    let mut position = Position::from_json(position_json)?;
+    let raw_options: Value = serde_json::from_str(options_json).map_err(|e| e.to_string())?;
+    if let Some(previous) = raw_options.get("previous_turn_locations") {
+        position.previous_turn_locations = serde_json::from_value(previous.clone()).ok();
+    }
+    let options: AdviseOptions = serde_json::from_value(raw_options).map_err(|e| e.to_string())?;
     serde_json::to_string(&advise(&position, &options, cancel)?).map_err(|e| e.to_string())
 }
 
@@ -619,6 +623,7 @@ mod tests {
                 {"id":"Ruins", "mine":[], "theirs":[]},
                 {"id":"Ruins", "mine":[], "theirs":[]}
             ],
+            "previous_turn_locations":{"complete":true,"ids":[["Ruins"],["Ruins"],["Ruins"]]},
             "opponent": {"hand":0, "deck":0}
         })
         .to_string();
@@ -648,6 +653,38 @@ mod tests {
             .sum::<f64>();
         assert!((total - 1.0).abs() < 1e-12);
         assert_eq!(enabled, serde_json::from_str::<Value>(&default).unwrap());
+    }
+
+    #[test]
+    fn missing_previous_locations_are_approximate_or_declined() {
+        let position = json!({
+            "turn":2,"energy":2,"hand":[],"deck":[],
+            "locations":[{"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]}],
+            "opponent":{"hand":0,"deck":0}
+        })
+        .to_string();
+        let mut options = json!({"rollouts":1,"seed":42,"max_plans":1,"time_limit":null,
+            "approximate":false,"playout":"spread","workers":1});
+        let exact: Value =
+            serde_json::from_str(&advise_json(&position, &options.to_string()).unwrap()).unwrap();
+        assert_eq!(exact["status"], "unsupported");
+        assert!(
+            exact["unsupported"]["state"]
+                .to_string()
+                .contains("Feast/AltarOfDeath")
+        );
+        options["approximate"] = json!(true);
+        let approximate: Value =
+            serde_json::from_str(&advise_json(&position, &options.to_string()).unwrap()).unwrap();
+        assert_eq!(approximate["status"], "approximate");
+        options["approximate"] = json!(false);
+        options["previous_turn_locations"] =
+            json!({"complete":true,"ids":[["Ruins"],["Ruins"],["Ruins"]]});
+        let complete: Value =
+            serde_json::from_str(&advise_json(&position, &options.to_string()).unwrap()).unwrap();
+        assert_eq!(complete["status"], "ok");
     }
 
     #[test]

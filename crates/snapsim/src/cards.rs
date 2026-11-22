@@ -32,6 +32,10 @@ mod meta_k1;
 mod meta_k2;
 mod meta_k3;
 mod meta_k4;
+mod meta_l1;
+mod meta_l2;
+pub(crate) mod meta_l3;
+mod meta_l4;
 pub(crate) mod no_text;
 mod recruit_a;
 mod recruit_b;
@@ -80,6 +84,10 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_k2::TOKENS,
     meta_k4::TOKENS,
     meta_k3::TOKENS,
+    meta_l4::TOKENS,
+    meta_l3::TOKENS,
+    meta_l2::TOKENS,
+    meta_l1::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -164,12 +172,14 @@ pub type PlayRequirement = fn(&Game<'_>, usize, usize, usize) -> bool;
 pub type ActivateRequirement = fn(&Game<'_>, usize) -> bool;
 /// Arguments: the guarding card, the card whose cost would change, its old and its new cost.
 pub type CostGuard = fn(&Game<'_>, usize, usize, i32, i32) -> bool;
+pub type OngoingPlayGuard = fn(&Game<'_>, usize, usize, usize, usize) -> bool;
 
 pub struct CardDef {
     pub id: &'static str,
     pub reveal: Option<CardHook>,
     pub ongoing: Option<CardHook>,
     pub in_hand_ongoing: Option<CardHook>,
+    pub late_in_hand_ongoing: Option<CardHook>,
     /// Refresh objective progress after all ongoing effects have run.
     pub objective_update: Option<CardHook>,
     /// Freeze readiness before any post-end-turn objective completes.
@@ -186,6 +196,8 @@ pub struct CardDef {
     pub on_play: Option<PlayHook>,
     /// Arguments: card, destination lane, playing seat.
     pub can_play: Option<PlayRequirement>,
+    /// Source, target card, destination lane, playing seat; false blocks the play.
+    pub ongoing_play_guard: Option<OngoingPlayGuard>,
     /// Once-per-game player activation, and an optional additional requirement.
     pub on_activate: Option<CardHook>,
     pub can_activate: Option<ActivateRequirement>,
@@ -196,6 +208,8 @@ pub struct CardDef {
     pub move_each_turn: bool,
     /// Ongoing source grants a voluntary move to another card in its lane.
     pub grants_move_from: Option<fn(&Game<'_>, usize, usize) -> bool>,
+    pub grants_move_globally: Option<fn(&Game<'_>, usize, usize) -> bool>,
+    pub blocks_player_move: Option<fn(&Game<'_>, usize, usize) -> bool>,
     pub pre_end_turn: Option<CardHook>,
     pub end_turn: Option<CardHook>,
     /// An End-of-Turn trigger implemented through the event hook.
@@ -206,6 +220,7 @@ pub struct CardDef {
     pub on_discard: Option<CardHook>,
     pub on_hand_added: Option<PlayHook>,
     pub start_turn: Option<CardHook>,
+    pub post_start_turn: Option<CardHook>,
     pub on_event: Option<fn(&mut Game<'_>, usize, crate::game::Event)>,
     pub on_added: Option<CardHook>,
     pub initial_state: Option<fn() -> Box<dyn crate::game::CardState>>,
@@ -234,6 +249,7 @@ impl CardDef {
             reveal: None,
             ongoing: None,
             in_hand_ongoing: None,
+            late_in_hand_ongoing: None,
             objective_update: None,
             objective_freeze: None,
             late_ongoing: None,
@@ -244,12 +260,15 @@ impl CardDef {
             reveal_repetitions: None,
             on_play: None,
             can_play: None,
+            ongoing_play_guard: None,
             on_activate: None,
             can_activate: None,
             activate_cost: 0,
             move_limit: 0,
             move_each_turn: false,
             grants_move_from: None,
+            grants_move_globally: None,
+            blocks_player_move: None,
             pre_end_turn: None,
             blocks_spawns: false,
             end_turn: None,
@@ -269,6 +288,7 @@ impl CardDef {
             on_discard: None,
             on_hand_added: None,
             start_turn: None,
+            post_start_turn: None,
             on_event: None,
             on_added: None,
             initial_state: None,
@@ -402,6 +422,10 @@ static GROUPS: &[&[CardDef]] = &[
     meta_k2::CARDS,
     meta_k1::CARDS,
     meta_k4::CARDS,
+    meta_l4::CARDS,
+    meta_l3::CARDS,
+    meta_l1::CARDS,
+    meta_l2::CARDS,
     kahhori::CARDS,
 ];
 

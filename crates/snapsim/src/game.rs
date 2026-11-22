@@ -78,6 +78,7 @@ pub enum AttachedAbilityKind {
         lane: usize,
         expect: bool,
         power: i32,
+        staged_only: bool,
     },
     MovePower {
         source: usize,
@@ -87,6 +88,10 @@ pub enum AttachedAbilityKind {
     NicoPrepare {
         used: u8,
     },
+    CannotPlayTurn {
+        turn: u8,
+    },
+    RevealAtGameEnd,
 }
 
 pub fn initial_attachments(def: &'static CardDef) -> Vec<AttachedAbility> {
@@ -125,6 +130,7 @@ impl Card {
                 lane,
                 expect,
                 power,
+                staged_only: false,
             },
         });
     }
@@ -152,8 +158,15 @@ pub struct Card {
     pub cost: i32,
     pub ongoing_cost: i32,
     pub temporary_hand_cost: Option<(u8, i32)>,
+    pub next_turn_cost_delta: Option<(u8, i32)>,
+    pub player_cost_set_until: Option<(u8, i32)>,
     /// Lasting cost before location modifiers.
     pub created: bool,
+    /// Whether creation occurred in hand; None means the origin is unobserved.
+    pub created_in_hand: Option<bool>,
+    /// Seat whose hand was the creation zone, when known.
+    pub created_hand_seat: Option<usize>,
+    pub(crate) creation_pending: bool,
     /// Visible client provenance; absent when not reported.
     pub created_by_card_id: Option<String>,
     pub created_by_location_id: Option<String>,
@@ -252,6 +265,7 @@ impl Card {
 pub enum PlayerTrigger {
     BeforeCardRevealed,
     CardPlayed,
+    CardResolved,
     EndTurn,
 }
 
@@ -294,9 +308,11 @@ pub struct MoveGrant {
     pub source: usize,
     pub card: Option<usize>,
     pub lane: Option<usize>,
+    pub destination: Option<usize>,
     pub start_turn: u8,
     pub end_turn: u8,
     pub remaining: u8,
+    pub unlimited: bool,
     /// Invoked with (source card, moved card) after the granted move resolves.
     pub on_move: Option<crate::cards::PlayHook>,
 }
@@ -314,28 +330,58 @@ struct StagedAction {
     action: Action,
 }
 
+/// Immutable event snapshot, retained when the card returns or is resurrected.
+#[derive(Clone, Copy, Debug)]
+pub struct CardZoneEvent {
+    pub turn: u8,
+    pub card: usize,
+    pub power: i32,
+    pub lane: Option<usize>,
+}
+
 #[derive(Clone, Default)]
 pub struct Player {
     pub hand: Vec<usize>,
     pub deck: Vec<usize>,
+    /// Original deck identities; None means a restored position did not report them.
+    pub starting_deck: Option<Vec<&'static str>>,
+    /// Original opening-hand entity indices; absent in unobserved restored positions.
+    pub starting_hand: Option<Vec<usize>>,
     pub discard: Vec<usize>,
     pub banished: Vec<usize>,
     pub set_aside: Vec<usize>,
     /// Cards in destruction order and their death lane, if it was observed.
     pub graveyard: Vec<(usize, Option<usize>)>,
+    /// Current graveyard cards in combined discard/destruction insertion order.
+    /// Graveyard::GetDestroyedAndDiscardedCards 0x7dd80e8 filters this order.
+    pub graveyard_order: Vec<usize>,
+    /// Successful discard and destruction events in occurrence order.
+    pub discard_history: Vec<CardZoneEvent>,
+    pub destruction_history: Vec<CardZoneEvent>,
+    /// Colonel America's shared set of turns folded from its discard context.
+    pub colonel_discard_turns: Vec<u8>,
     pub pending_effects: Vec<PendingEffect>,
     /// Wave's player-owned maximum-cost effect, through this turn.
     pub wave_until: Option<u8>,
+    /// Player-owned (expiry turn, printed target cost, assigned cost) effects.
+    pub hand_cost_sets: Vec<(u8, i32, i32)>,
     pub move_grants: Vec<MoveGrant>,
     staged_actions: Vec<StagedAction>,
     pub scheduled_energy: Vec<(u8, i32)>,
     /// Persistent increase to energy refreshed on each subsequent turn.
     pub permanent_energy: i32,
+    /// Offset of the client's default energy from the normal turn progression.
+    pub default_energy_offset: i32,
     pub movable_cards_played: Vec<usize>,
+    /// PlayerMoveStatsComponent.NumberOfPlayerCardsMovedThisGame.
+    pub cards_moved_this_game: u32,
+    pub last_moved_card: Option<usize>,
     /// Drawn cards, preserving the turn and draw order.
     pub draws: Vec<(u8, usize)>,
     /// Resolved played cards, preserving turn and resolution order.
     pub play_history: Vec<(u8, usize)>,
+    /// Number of resolved plays that had On Reveal text at resolution time.
+    pub on_reveal_cards_played: usize,
     /// Snapshot of all staged plays, including those not yet resolved.
     pub staged_history: Vec<StagedPlay>,
     /// Observed turns containing plays or moves, including cards no longer visible.
@@ -360,6 +406,7 @@ pub struct Lane {
     /// Original ID when an unsupported location is represented by an inert rule.
     pub observed_id: Option<String>,
     pub revealed: bool,
+    pub destroyed: bool,
     pub revealed_turn: Option<u8>,
     pub cards: Vec<usize>,
     pub bonus: [i32; 2],
@@ -387,6 +434,13 @@ pub enum Event {
     TurnEnd,
     Ongoing,
     CardDrawn {
+        card: usize,
+        seat: usize,
+    },
+    CardReturnedToHand {
+        card: usize,
+    },
+    CardStaged {
         card: usize,
         seat: usize,
     },
@@ -420,6 +474,11 @@ pub enum Event {
         card: usize,
         from: usize,
         to: usize,
+    },
+    CardOwnerChanged {
+        card: usize,
+        old: usize,
+        new: usize,
     },
     CardMerged {
         card: usize,
@@ -640,6 +699,7 @@ pub struct Game<'a> {
     pub turn: u8,
     pub stakes: Option<Stakes>,
     pub is_wait_for_staging: bool,
+    pub is_start_turn: bool,
     pub reveal_priority: Option<usize>,
     pub total_turns: u8,
     pub played: [Vec<(usize, usize)>; 2],
@@ -649,6 +709,8 @@ pub struct Game<'a> {
     pub(crate) ending_reveals: bool,
     pub delayed_reveals: [Vec<usize>; 2],
     pub(crate) deferred_added_reveals: Vec<usize>,
+    pub(crate) post_resolve_plays: Vec<usize>,
+    pub(crate) end_turn_lane_order: Option<[usize; 3]>,
     /// Python's `current_location`: scheduled reveals consumed so far. A lane that a
     /// card already revealed (Scarlet Witch, Magik) still uses up its scheduled turn.
     pub current_location: usize,
@@ -689,6 +751,7 @@ impl<'a> Game<'a> {
             turn: self.turn,
             stakes: self.stakes.clone(),
             is_wait_for_staging: self.is_wait_for_staging,
+            is_start_turn: self.is_start_turn,
             reveal_priority: self.reveal_priority,
             total_turns: self.total_turns,
             played: self.played.clone(),
@@ -698,6 +761,8 @@ impl<'a> Game<'a> {
             ending_reveals: self.ending_reveals,
             delayed_reveals: self.delayed_reveals.clone(),
             deferred_added_reveals: self.deferred_added_reveals.clone(),
+            post_resolve_plays: self.post_resolve_plays.clone(),
+            end_turn_lane_order: self.end_turn_lane_order,
             current_location: self.current_location,
             location_reveal_order: self.location_reveal_order,
             destroyed: self.destroyed.clone(),
@@ -708,7 +773,15 @@ impl<'a> Game<'a> {
     pub fn fork_rng(&self) -> Box<dyn GameRng> {
         self.rng.borrow().clone_rng()
     }
-    fn emit(&mut self, event: Event) {
+    // DeepSpaceBehavior::PreventCardAbilities 0x7d4e4dc disables card
+    // trigger and activate abilities here, but not player-owned effects.
+    fn card_triggers_allowed(&self, card: usize) -> bool {
+        self.cards[card]
+            .lane
+            .is_none_or(|lane| !self.lanes[lane].revealed || self.lanes[lane].def.id != "DeepSpace")
+    }
+
+    pub(crate) fn emit(&mut self, event: Event) {
         if !*HAS_EVENT_HOOKS {
             return;
         }
@@ -736,6 +809,7 @@ impl<'a> Game<'a> {
         for card in observers {
             if self.cards[card].lane.is_some()
                 && !self.cards[card].abilities_removed
+                && self.card_triggers_allowed(card)
                 && let Some(hook) = self.cards[card].ability_def().on_event
             {
                 hook(self, card, event);
@@ -746,8 +820,11 @@ impl<'a> Game<'a> {
             Event::GameStart
                 | Event::TurnStart
                 | Event::TurnEnd
+                | Event::GameEnd
                 | Event::Empower { .. }
                 | Event::CardDrawn { .. }
+                | Event::CardReturnedToHand { .. }
+                | Event::CardDiscarded { .. }
         ) {
             let observers: Vec<_> = self
                 .players
@@ -760,6 +837,31 @@ impl<'a> Game<'a> {
                 .collect();
             for card in observers {
                 if !self.cards[card].abilities_removed
+                    && let Some(hook) = self.cards[card].ability_def().on_event
+                {
+                    hook(self, card, event);
+                }
+            }
+        }
+        if matches!(
+            event,
+            Event::BeforeCardRevealed { .. } | Event::CardMerged { .. } | Event::CardStaged { .. }
+        ) {
+            let observers: Vec<_> = self
+                .players
+                .iter()
+                .flat_map(|player| player.hand.iter().copied())
+                .filter(|&id| {
+                    !self.cards[id].abilities_removed
+                        && self.cards[id].ability_def().on_event.is_some()
+                })
+                .collect();
+            for card in observers {
+                if !self.cards[card].abilities_removed
+                    && self
+                        .players
+                        .iter()
+                        .any(|player| player.hand.contains(&card))
                     && let Some(hook) = self.cards[card].ability_def().on_event
                 {
                     hook(self, card, event);
@@ -881,6 +983,9 @@ impl<'a> Game<'a> {
     /// increase from the next turn for post-resolve and end-turn effects.
     pub fn add_permanent_energy(&mut self, seat: usize, amount: i32) {
         self.players[seat].permanent_energy += amount;
+        if self.is_start_turn {
+            self.set_energy(seat, (self.players[seat].energy + amount).max(0));
+        }
     }
 
     pub fn schedule_energy(&mut self, seat: usize, turn: u8, amount: i32) {
@@ -1049,7 +1154,13 @@ impl<'a> Game<'a> {
         self.steal_power_many(&[from], to, amount, source);
     }
     /// Card::StealPowerPermanently (0x7cb733c) sends one aggregate increase trigger.
-    pub fn steal_power_many(&mut self, from: &[usize], to: usize, amount: i32, source: usize) {
+    pub fn steal_power_many(
+        &mut self,
+        from: &[usize],
+        to: usize,
+        amount: i32,
+        source: usize,
+    ) -> bool {
         let mut stolen = 0;
         for &card in from {
             // StealPowerPermanently (0x7cb733c) checks immunity before adding a modifier.
@@ -1063,6 +1174,7 @@ impl<'a> Game<'a> {
         if stolen > 0 {
             self.change_stat(to, Stat::Power, StatOperation::Add, stolen, source, true);
         }
+        stolen > 0
     }
     /// Steal distinct amounts per target, emitting one aggregate Empower.
     pub fn steal_power_weighted(&mut self, from: &[(usize, i32)], to: usize, source: usize) {
@@ -1402,7 +1514,12 @@ impl<'a> Game<'a> {
                     cost: data.cost,
                     ongoing_cost: 0,
                     temporary_hand_cost: None,
+                    next_turn_cost_delta: None,
+                    player_cost_set_until: None,
                     created: false,
+                    created_in_hand: Some(false),
+                    created_hand_seat: None,
+                    creation_pending: false,
                     created_by_card_id: None,
                     created_by_location_id: None,
                     created_by_player: None,
@@ -1436,6 +1553,13 @@ impl<'a> Game<'a> {
                 });
                 players[seat].deck.push(index);
             }
+            players[seat].starting_deck = Some(
+                players[seat]
+                    .deck
+                    .iter()
+                    .map(|&id| cards[id].def.id)
+                    .collect(),
+            );
             rng.shuffle(&mut players[seat].deck);
         }
         let chosen = rng.sample_indices(available.len(), 3);
@@ -1443,6 +1567,7 @@ impl<'a> Game<'a> {
             def: available[chosen[i]],
             observed_id: None,
             revealed: false,
+            destroyed: false,
             revealed_turn: None,
             cards: Vec::new(),
             bonus: [0; 2],
@@ -1459,6 +1584,7 @@ impl<'a> Game<'a> {
             stakes: None,
             next_resolution_order: 1,
             is_wait_for_staging: false,
+            is_start_turn: false,
             total_turns: 6,
             reveal_priority: None,
             played: Default::default(),
@@ -1468,6 +1594,8 @@ impl<'a> Game<'a> {
             ending_reveals: false,
             delayed_reveals: Default::default(),
             deferred_added_reveals: Vec::new(),
+            post_resolve_plays: Vec::new(),
+            end_turn_lane_order: None,
             current_location: 0,
             location_reveal_order: [0, 1, 2],
             destroyed: None,
@@ -1477,6 +1605,9 @@ impl<'a> Game<'a> {
         // StartGame::OnEnter (0x7e47c68) triggers game-start before the opening draw.
         for seat in 0..2 {
             game.draw_initial_hand(seat);
+        }
+        for player in &mut game.players {
+            player.starting_hand = Some(player.hand.clone());
         }
         game.turn = 1;
         Ok(game)
@@ -1534,11 +1665,16 @@ impl<'a> Game<'a> {
             owner,
             ongoing_cost: 0,
             temporary_hand_cost: None,
+            next_turn_cost_delta: None,
+            player_cost_set_until: None,
             cost: row.cost,
             permanent: row.power,
             base_power_override: None,
             stat_updates: Vec::new(),
             created: true,
+            created_in_hand: None,
+            created_hand_seat: None,
+            creation_pending: true,
             created_by_card_id: None,
             created_by_location_id: None,
             created_by_player: None,
@@ -1761,6 +1897,12 @@ impl<'a> Game<'a> {
     /// played, added to the board or discarded, so cards elsewhere use their lasting cost.
     pub fn card_cost(&self, card: usize) -> i32 {
         let mut cost = self.cards[card].cost + self.cards[card].ongoing_cost;
+        if let Some((until, value)) = self.cards[card].player_cost_set_until
+            && self.turn <= until
+            && self.cost_change_allowed(card, cost, value)
+        {
+            cost = value;
+        }
         if self
             .players
             .iter()
@@ -1776,6 +1918,12 @@ impl<'a> Game<'a> {
                     }
                 }
             }
+            if let Some((turn, delta)) = self.cards[card].next_turn_cost_delta
+                && turn == self.turn
+                && self.cost_change_allowed(card, cost, cost + delta)
+            {
+                cost += delta;
+            }
             if !self.cards[card].abilities_removed
                 && let Some(hook) = self.cards[card].ability_def().modify_final_cost
             {
@@ -1789,6 +1937,14 @@ impl<'a> Game<'a> {
                 && self.cost_change_allowed(card, cost, value)
             {
                 cost = value;
+            }
+            for &(until, target, value) in &self.players[self.cards[card].owner].hand_cost_sets {
+                if self.turn <= until
+                    && self.printed_cost(card) == target
+                    && self.cost_change_allowed(card, cost, value)
+                {
+                    cost = value;
+                }
             }
             if self.players[self.cards[card].owner]
                 .wave_until
@@ -1808,12 +1964,7 @@ impl<'a> Game<'a> {
     pub fn swap_other_locations(&mut self, source: usize) {
         let a = (source + 1) % 3;
         let b = (source + 2) % 3;
-        self.lanes.swap(a, b);
-        for lane in [a, b] {
-            for &card in &self.lanes[lane].cards {
-                self.cards[card].lane = Some(lane);
-            }
-        }
+        self.swap_location_objects(a, b);
         self.ongoing();
     }
 
@@ -1864,7 +2015,7 @@ impl<'a> Game<'a> {
             .filter(|&&card| self.cards[card].owner == seat)
             .count()
             + queued
-            < 4
+            < self.lane_slot_capacity(lane)
     }
     // SoulStoneBehavior::ProtectThanos (0x7f42b00) and
     // SpaceStoneBehavior::MakeThanosUnrestrictedPlay (0x7f442cc).
@@ -1903,8 +2054,15 @@ impl<'a> Game<'a> {
         if self.card_cost(card) > energy || !self.has_space(lane, seat, queued) {
             return false;
         }
-        if self.thanos_stone_active(card, "SpaceStone") {
+        // Jeff's IgnorePlayRestrictionsAction and IgnoreMoveRestrictionsAction
+        // are self-targeted ongoing actions (ExecuteOngoingAction 0x7e0e6f4).
+        if self.thanos_stone_active(card, "SpaceStone") || self.jeff_unrestricted(card) {
             return true;
+        }
+        if self.cards[card].attached_abilities.iter().any(|ability| {
+            matches!(ability.kind, AttachedAbilityKind::CannotPlayTurn { turn } if turn == self.turn)
+        }) {
+            return false;
         }
         if self.lane_locked(lane)
             || (!self.cards[card].abilities_removed
@@ -1913,6 +2071,16 @@ impl<'a> Game<'a> {
                     .can_play
                     .is_some_and(|test| !test(self, card, lane, seat)))
         {
+            return false;
+        }
+        if self.lanes[lane].cards.iter().any(|&source| {
+            self.cards[source].revealed
+                && self.ongoing_active(source)
+                && self.cards[source]
+                    .ability_def()
+                    .ongoing_play_guard
+                    .is_some_and(|guard| !guard(self, source, card, lane, seat))
+        }) {
             return false;
         }
         // GooseBehavior::PreventExpensiveCards (0x7eb7988).
@@ -1963,19 +2131,42 @@ impl<'a> Game<'a> {
         }
         true
     }
+    fn jeff_unrestricted(&self, card: usize) -> bool {
+        !self.cards[card].abilities_removed
+            && self.cards[card].ability_def().id == "JeffTheBabyLandShark"
+    }
+    fn ongoing_blocks_move(&self, card: usize, source: usize) -> bool {
+        !self.jeff_unrestricted(card)
+            && self.lanes[source].cards.iter().copied().any(|provider| {
+                self.cards[provider].revealed
+                    && self.ongoing_active(provider)
+                    && self.cards[provider]
+                        .ability_def()
+                        .blocks_player_move
+                        .is_some_and(|test| test(self, provider, card))
+            })
+    }
+
     /// Install a movement permission without moving or revealing a card.
     pub fn grant_move(&mut self, grant: MoveGrant) {
         self.players[grant.seat].move_grants.push(grant);
     }
 
-    fn matching_move_grant(&self, card: usize, seat: usize) -> Option<usize> {
+    fn matching_move_grant(
+        &self,
+        card: usize,
+        seat: usize,
+        destination: Option<usize>,
+    ) -> Option<usize> {
         let lane = self.cards[card].lane?;
         self.players[seat].move_grants.iter().position(|grant| {
-            grant.remaining != 0
+            (grant.unlimited || grant.remaining != 0)
                 && grant.start_turn <= self.turn
                 && self.turn <= grant.end_turn
                 && grant.card.is_none_or(|target| target == card)
                 && grant.lane.is_none_or(|target| target == lane)
+                && destination
+                    .is_none_or(|lane| grant.destination.is_none_or(|target| target == lane))
         })
     }
 
@@ -1995,13 +2186,18 @@ impl<'a> Game<'a> {
         {
             return false;
         }
-        if self.lanes[source].revealed
+        if self.ongoing_blocks_move(card, source) {
+            return false;
+        }
+        if !self.jeff_unrestricted(card)
+            && self.lanes[source].revealed
             && let Some(test) = self.lanes[source].def.allows_move_from
             && !test(self, source, card, destination, seat)
         {
             return false;
         }
-        if self.lanes[destination].revealed
+        if !self.jeff_unrestricted(card)
+            && self.lanes[destination].revealed
             && let Some(test) = self.lanes[destination].def.allows_addition
             && !test(self, destination, card, destination, seat)
         {
@@ -2016,7 +2212,21 @@ impl<'a> Game<'a> {
             && (target.player_moves_used < target.ability_def().move_limit
                 || target.ability_def().move_each_turn
                     && target.player_move_turn != Some(self.turn)))
-            || self.matching_move_grant(card, seat).is_some()
+            || self
+                .matching_move_grant(card, seat, Some(destination))
+                .is_some()
+            || self
+                .lanes
+                .iter()
+                .flat_map(|lane| lane.cards.iter().copied())
+                .any(|provider| {
+                    self.cards[provider].revealed
+                        && self.ongoing_active(provider)
+                        && self.cards[provider]
+                            .ability_def()
+                            .grants_move_globally
+                            .is_some_and(|test| test(self, provider, card))
+                })
             || self.lanes[source].cards.iter().copied().any(|provider| {
                 self.cards[provider].revealed
                     && self.ongoing_active(provider)
@@ -2037,7 +2247,7 @@ impl<'a> Game<'a> {
         if !self.can_player_move(card, destination, seat) {
             return false;
         }
-        let grant = self.matching_move_grant(card, seat);
+        let grant = self.matching_move_grant(card, seat, Some(destination));
         let source = self.cards[card].lane.unwrap();
         if !self.move_card(card, destination) {
             return false;
@@ -2053,7 +2263,9 @@ impl<'a> Game<'a> {
         }
         if let Some(index) = grant {
             let grant = &mut self.players[seat].move_grants[index];
-            grant.remaining -= 1;
+            if !grant.unlimited {
+                grant.remaining -= 1;
+            }
             let source = grant.source;
             let callback = grant.on_move;
             if let Some(hook) = callback {
@@ -2075,7 +2287,18 @@ impl<'a> Game<'a> {
         {
             return false;
         }
-        !self.lanes[destination].revealed
+        if self.ongoing_blocks_move(card, source) {
+            return false;
+        }
+        if !self.jeff_unrestricted(card)
+            && self.lanes[source].revealed
+            && let Some(test) = self.lanes[source].def.allows_move_from
+            && !test(self, source, card, destination, target.owner)
+        {
+            return false;
+        }
+        self.jeff_unrestricted(card)
+            || !self.lanes[destination].revealed
             || self.lanes[destination]
                 .def
                 .allows_addition
@@ -2089,6 +2312,7 @@ impl<'a> Game<'a> {
             && target.lane.is_some()
             && target.revealed
             && !target.abilities_removed
+            && self.card_triggers_allowed(card)
             && !target.activated
             && !target.activate_staged
             && target.observed_can_activate.unwrap_or(true)
@@ -2153,6 +2377,7 @@ impl<'a> Game<'a> {
                     .iter()
                     .position(|&id| id == card)
                     .unwrap();
+                self.emit(Event::CardStaged { card, seat });
                 self.players[seat].hand.remove(slot);
                 self.set_energy(seat, self.players[seat].energy - cost);
                 self.players[seat].energy_spent_this_turn += cost;
@@ -2178,11 +2403,15 @@ impl<'a> Game<'a> {
                 self.players[seat].non_play_action_turn = Some(self.turn);
                 let from = self.cards[card].lane.unwrap();
                 self.players[seat].move_from_turn[from] = Some(self.turn);
-                let grant = self.matching_move_grant(card, seat).map(|index| {
-                    let grant = &mut self.players[seat].move_grants[index];
-                    grant.remaining -= 1;
-                    grant.clone()
-                });
+                let grant = self
+                    .matching_move_grant(card, seat, Some(lane))
+                    .map(|index| {
+                        let grant = &mut self.players[seat].move_grants[index];
+                        if !grant.unlimited {
+                            grant.remaining -= 1;
+                        }
+                        grant.clone()
+                    });
                 if let Some(grant) = grant
                     && let Some(hook) = grant.on_move
                 {
@@ -2283,6 +2512,7 @@ impl<'a> Game<'a> {
                             self.cards[card].activated = true;
                             self.ongoing();
                             if !self.cards[card].abilities_removed
+                                && self.card_triggers_allowed(card)
                                 && let Some(hook) = self.cards[card].ability_def().on_activate
                             {
                                 hook(self, card);
@@ -2295,24 +2525,37 @@ impl<'a> Game<'a> {
         }
     }
     pub fn move_card(&mut self, card: usize, destination: usize) -> bool {
+        if !self.cards[card].revealed {
+            return false;
+        }
+        self.move_card_including_staged(card, destination)
+    }
+
+    /// JuggernautBehavior::MoveOpposingCardsPlayedThisTurn 0x7ed6d34
+    /// can move unrevealed staged cards as well as revealed cards.
+    pub fn move_card_including_staged(&mut self, card: usize, destination: usize) -> bool {
         let Some(source) = self.cards[card].lane else {
             return false;
         };
-        if !self.cards[card].revealed
-            || self.cards[card].ability_def().immune_destroy_move
+        if (self.cards[card].revealed && self.cards[card].ability_def().immune_destroy_move)
             || destination >= 3
             || source == destination
             || !self.has_space(destination, self.cards[card].owner, 0)
         {
             return false;
         }
-        if self.lanes[source].revealed
+        if self.ongoing_blocks_move(card, source) {
+            return false;
+        }
+        if !self.jeff_unrestricted(card)
+            && self.lanes[source].revealed
             && let Some(test) = self.lanes[source].def.allows_move_from
             && !test(self, source, card, destination, self.cards[card].owner)
         {
             return false;
         }
-        if self.lanes[destination].revealed
+        if !self.jeff_unrestricted(card)
+            && self.lanes[destination].revealed
             && let Some(test) = self.lanes[destination].def.allows_addition
             && !test(self, destination, card, destination, self.cards[card].owner)
         {
@@ -2337,26 +2580,33 @@ impl<'a> Game<'a> {
     }
 
     fn finish_move(&mut self, card: usize, source: usize, destination: usize) {
+        // Game::UpdatePlayerMoveStats (0x7db05a0) counts all location transfers.
+        self.players[self.cards[card].owner].cards_moved_this_game += 1;
+        self.players[self.cards[card].owner].last_moved_card = Some(card);
         self.cards[card].move_turns.push(self.turn);
-        if let Some(hook) = self.cards[card].ability_def().on_move {
+        if self.cards[card].revealed
+            && self.card_triggers_allowed(card)
+            && let Some(hook) = self.cards[card].ability_def().on_move
+        {
             hook(self, card, source);
         }
         let abilities = std::mem::take(&mut self.cards[card].attached_abilities);
-        if !self.cards[card].abilities_removed {
-            for ability in abilities {
-                if let AttachedAbilityKind::MovePower { source, turn, hook } = ability.kind
-                    && turn == self.turn
-                {
-                    hook(self, source, card);
-                } else {
-                    self.cards[card].attached_abilities.push(ability);
-                }
+        for ability in abilities {
+            if !self.cards[card].abilities_removed
+                && self.card_triggers_allowed(card)
+                && let AttachedAbilityKind::MovePower { source, turn, hook } = ability.kind
+                && turn == self.turn
+            {
+                hook(self, source, card);
+            } else {
+                self.cards[card].attached_abilities.push(ability);
             }
         }
         let observers = self.lanes[destination].cards.clone();
         for observer in observers {
             if observer != card
                 && self.cards[observer].revealed
+                && self.card_triggers_allowed(observer)
                 && let Some(hook) = self.cards[observer].ability_def().on_move_here
             {
                 hook(self, observer, card);
@@ -2374,8 +2624,10 @@ impl<'a> Game<'a> {
         });
         self.ongoing();
     }
-    fn notify_added(&mut self, card: usize, lane: usize) {
-        if let Some(hook) = self.cards[card].ability_def().on_added {
+    pub(crate) fn notify_added(&mut self, card: usize, lane: usize) {
+        if self.card_triggers_allowed(card)
+            && let Some(hook) = self.cards[card].ability_def().on_added
+        {
             hook(self, card);
         }
         if self.lanes[lane].revealed
@@ -2416,8 +2668,10 @@ impl<'a> Game<'a> {
         if !self.can_add(card, lane, seat) {
             return false;
         }
+        self.finish_creation_zone(card, false, seat);
         for player in &mut self.players {
             player.graveyard.retain(|&(id, _)| id != card);
+            player.graveyard_order.retain(|&id| id != card);
         }
         self.cards[card].owner = seat;
         self.cards[card].lane = Some(lane);
@@ -2439,8 +2693,10 @@ impl<'a> Game<'a> {
         if !self.can_add(card, lane, seat) {
             return false;
         }
+        self.finish_creation_zone(card, false, seat);
         for player in &mut self.players {
             player.graveyard.retain(|&(id, _)| id != card);
+            player.graveyard_order.retain(|&id| id != card);
         }
         self.cards[card].owner = seat;
         self.cards[card].lane = Some(lane);
@@ -2510,6 +2766,7 @@ impl<'a> Game<'a> {
         if self.players[seat].hand.len() >= 7 {
             return false;
         }
+        self.finish_creation_zone(card, !from_deck, seat);
         self.cards[card].owner = seat;
         self.players[seat].hand.push(card);
         if from_deck {
@@ -2531,6 +2788,7 @@ impl<'a> Game<'a> {
         if self.players[seat].hand.len() >= 7 {
             return false;
         }
+        self.finish_creation_zone(card, true, seat);
         self.cards[card].owner = seat;
         self.players[seat].hand.push(card);
         self.ongoing();
@@ -2545,7 +2803,9 @@ impl<'a> Game<'a> {
             .filter(|&id| self.cards[id].revealed && self.cards[id].owner == seat)
             .collect();
         for observer in observers {
-            if let Some(hook) = self.cards[observer].ability_def().on_hand_added {
+            if self.card_triggers_allowed(observer)
+                && let Some(hook) = self.cards[observer].ability_def().on_hand_added
+            {
                 hook(self, observer, seat);
             }
         }
@@ -2566,7 +2826,9 @@ impl<'a> Game<'a> {
                 .filter(|&card| self.cards[card].revealed && self.cards[card].owner == seat)
                 .collect();
             for observer in observers {
-                if let Some(hook) = self.cards[observer].ability_def().on_hand_added {
+                if self.card_triggers_allowed(observer)
+                    && let Some(hook) = self.cards[observer].ability_def().on_hand_added
+                {
                     for _ in 0..count {
                         hook(self, observer, seat);
                     }
@@ -2603,10 +2865,19 @@ impl<'a> Game<'a> {
     /// back to its owner's hand, retaining its permanent modifications.
     pub fn return_board_card_to_hand(&mut self, card: usize) -> bool {
         let seat = self.cards[card].owner;
+        self.return_board_card_to_seat_hand(card, seat)
+    }
+    /// Luke's Bar may return a card to its staging player's hand.
+    pub fn return_board_card_to_seat_hand(&mut self, card: usize, seat: usize) -> bool {
         if self.players[seat].hand.len() >= 7 || !self.take_from_board(card) {
             return false;
         }
-        self.add_hand(seat, card, false)
+        if self.add_hand(seat, card, false) {
+            self.emit(Event::CardReturnedToHand { card });
+            true
+        } else {
+            false
+        }
     }
 
     /// Return whether the discard succeeded, including cards whose discard
@@ -2621,12 +2892,31 @@ impl<'a> Game<'a> {
             .position(|&id| id == card)
             .expect("discard card must be in hand");
         self.players[seat].hand.remove(slot);
+        // MorbiusBehavior::GetPowerChange 0x7f01d3c and
+        // ColonelAmericaBehavior::UpdateDiscardTurnCount 0x7e82934 use events,
+        // not the mutable discard zone. Record before the card's discard hook.
+        self.players[seat].discard_history.push(CardZoneEvent {
+            turn: self.turn,
+            card,
+            power: self.cards[card].power(),
+            lane: None,
+        });
+        self.players[seat].graveyard_order.push(card);
         if let Some(hook) = self.cards[card].ability_def().on_discard {
             hook(self, card);
         } else {
             self.players[seat].discard.push(card);
         }
+        if !self.players[seat].discard.contains(&card)
+            && !self.players[seat]
+                .graveyard
+                .iter()
+                .any(|&(id, _)| id == card)
+        {
+            self.players[seat].graveyard_order.retain(|&id| id != card);
+        }
         self.emit(Event::CardDiscarded { card, seat });
+        self.ongoing();
         true
     }
     /// Game::BanishCard (0x7dac084) moves the card to its owner's banished zone.
@@ -2644,6 +2934,7 @@ impl<'a> Game<'a> {
             player.deck.retain(|&id| id != card);
             player.discard.retain(|&id| id != card);
             player.graveyard.retain(|&(id, _)| id != card);
+            player.graveyard_order.retain(|&id| id != card);
         }
         self.players[owner].banished.push(card);
         self.ongoing();
@@ -2689,12 +2980,39 @@ impl<'a> Game<'a> {
     }
 
     pub fn destroy_card(&mut self, card: usize) -> bool {
-        if self.cards[card].revealed && self.thanos_stone_active(card, "SoulStone") {
-            return false;
-        }
+        self.destroy_card_impl(card, false)
+    }
+
+    pub(crate) fn force_destroy_card(&mut self, card: usize) -> bool {
+        self.destroy_card_impl(card, true)
+    }
+
+    fn destroy_card_impl(&mut self, card: usize, force: bool) -> bool {
         let Some(lane) = self.cards[card].lane else {
             return false;
         };
+        if !force && !self.can_destroy_card(card, lane) {
+            return false;
+        }
+        if force {
+            let owner = self.cards[card].owner;
+            if let Some(play) = self.players[owner]
+                .staged_history
+                .iter_mut()
+                .rev()
+                .find(|play| play.card == card)
+            {
+                play.resolved = true;
+            }
+            self.cards[card].revealed = true;
+        }
+        self.finish_destroy_card(card, lane)
+    }
+
+    fn can_destroy_card(&self, card: usize, lane: usize) -> bool {
+        if self.cards[card].revealed && self.thanos_stone_active(card, "SoulStone") {
+            return false;
+        }
         if self.cards[card].revealed && self.cards[card].ability_def().immune_destroy_move {
             return false;
         }
@@ -2725,11 +3043,25 @@ impl<'a> Game<'a> {
         {
             return false;
         }
+        true
+    }
+
+    fn finish_destroy_card(&mut self, card: usize, lane: usize) -> bool {
+        // ArchangelHorsemanBehavior::GetValidCount 0x7e697a0 and
+        // DeathBehavior::DiscountSelf 0x7e89764 count destruction events.
+        let owner = self.cards[card].owner;
+        self.players[owner].destruction_history.push(CardZoneEvent {
+            turn: self.turn,
+            card,
+            power: self.cards[card].power(),
+            lane: Some(lane),
+        });
         self.lanes[lane].cards.retain(|&id| id != card);
         self.cards[card].last_lane = Some(lane);
         self.players[self.cards[card].owner]
             .graveyard
             .push((card, Some(lane)));
+        self.players[owner].graveyard_order.push(card);
         if let Some(destroyed) = &mut self.destroyed {
             destroyed.push((card, lane));
         }
@@ -2741,11 +3073,14 @@ impl<'a> Game<'a> {
             hook(self, card);
         }
         self.emit(Event::CardDestroyed { card, lane });
-        cards::angel_replace(self, self.cards[card].owner, lane);
+        if !self.lanes[lane].destroyed {
+            cards::angel_replace(self, self.cards[card].owner, lane);
+        }
+        self.ongoing();
         true
     }
     /// The deck slot `draw` takes next: a card due this turn, else the first eligible one.
-    fn next_draw_slot(&self, seat: usize) -> Option<usize> {
+    pub(crate) fn next_draw_slot(&self, seat: usize) -> Option<usize> {
         let deck = &self.players[seat].deck;
         deck.iter()
             .position(|&id| self.cards[id].def.draw_turn == Some(self.turn))
@@ -2763,31 +3098,10 @@ impl<'a> Game<'a> {
         self.players[seat].deck.first().copied()
     }
     pub fn draw(&mut self, seat: usize) {
-        if self.players[seat].hand.len() >= 7 {
-            return;
-        }
-        // WidowsBiteBehavior::StopCardDraw (0x7cf2bd8).
-        if self.players[seat].hand.iter().any(|&card| {
-            !self.cards[card].abilities_removed
-                && self.cards[card].ability_def().blocks_draw_in_hand
-        }) {
-            return;
-        }
-        for lane in 0..3 {
-            if self.lanes[lane].revealed
-                && let Some(hook) = self.lanes[lane].def.before_draw
-                && let Some(card) = hook(self, lane, seat)
-            {
-                self.add_hand(seat, card, true);
-                return;
-            }
-        }
-        if let Some(slot) = self.next_draw_slot(seat) {
-            let card = self.players[seat].deck.remove(slot);
-            self.add_hand(seat, card, true);
-        }
+        self.draw_from_deck(seat, seat);
     }
     pub fn start_turn(&mut self) {
+        self.is_start_turn = true;
         for player in &mut self.players {
             player.energy_spent_this_turn = 0;
         }
@@ -2799,7 +3113,10 @@ impl<'a> Game<'a> {
         self.delays_reveals = false;
         for seat in 0..2 {
             let permanent_energy = self.players[seat].permanent_energy;
-            self.set_energy(seat, i32::from(self.turn) + permanent_energy);
+            self.set_energy(
+                seat,
+                i32::from(self.turn) + self.players[seat].default_energy_offset + permanent_energy,
+            );
             let bonus: i32 = self.players[seat]
                 .scheduled_energy
                 .iter()
@@ -2818,7 +3135,7 @@ impl<'a> Game<'a> {
         if self.current_location < usize::from(self.turn).min(self.lanes.len()) {
             let lane = self.location_reveal_order[self.current_location];
             self.current_location += 1;
-            if !self.lanes[lane].revealed {
+            if !self.lanes[lane].revealed && !self.lanes[lane].destroyed {
                 self.lanes[lane].revealed = true;
                 self.lanes[lane].revealed_turn = Some(self.turn);
                 self.delays_reveals |= self.lanes[lane].def.delays_reveals;
@@ -2863,11 +3180,32 @@ impl<'a> Game<'a> {
                 }
             }
         }
+        let observers: Vec<_> = self
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .filter(|&id| {
+                self.cards[id].revealed && self.cards[id].ability_def().post_start_turn.is_some()
+            })
+            .collect();
+        for id in observers {
+            if self.cards[id].lane.is_some()
+                && self.cards[id].revealed
+                && !self.cards[id].abilities_removed
+                && let Some(hook) = self.cards[id].ability_def().post_start_turn
+            {
+                hook(self, id);
+            }
+        }
         self.emit(Event::TurnStart);
+        self.is_start_turn = false;
         self.is_wait_for_staging = true;
     }
     pub fn powers(&self) -> [[i32; 2]; 3] {
         let base: [[i32; 2]; 3] = std::array::from_fn(|lane| {
+            if self.lanes[lane].destroyed {
+                return [0, 0];
+            }
             std::array::from_fn(|seat| {
                 (self.lanes[lane]
                     .cards
@@ -2885,7 +3223,7 @@ impl<'a> Game<'a> {
         for (source, location) in self.lanes.iter().enumerate() {
             if location.revealed && location.def.contributes_to_other_lanes {
                 for (destination, totals) in result.iter_mut().enumerate() {
-                    if source != destination {
+                    if source != destination && !self.lanes[destination].destroyed {
                         for seat in 0..2 {
                             totals[seat] += base[source][seat];
                         }
@@ -2895,15 +3233,46 @@ impl<'a> Game<'a> {
         }
         result
     }
+    /// Winner of a lane, or None on a tie. Game::UpdateLocationWinner
+    /// 0x7da9bf4 uses the location's forced-tie and fewest-points flags.
+    pub fn lane_winner(&self, lane: usize) -> Option<usize> {
+        self.lane_winner_with_power(lane, self.powers()[lane])
+    }
+
+    fn lane_winner_with_power(&self, lane: usize, power: [i32; 2]) -> Option<usize> {
+        let location = &self.lanes[lane];
+        if location.destroyed || (location.revealed && location.def.id == "Cancun") {
+            return None;
+        }
+        let ordering = power[0].cmp(&power[1]);
+        let ordering = if location.revealed && location.def.id == "BarWithNoName" {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        match ordering {
+            std::cmp::Ordering::Greater => Some(0),
+            std::cmp::Ordering::Less => Some(1),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
     pub fn winner(&self) -> i32 {
         let powers = self.powers();
         let mut wins = [0, 0];
         let mut total = [0, 0];
-        for p in powers {
-            wins[0] += i32::from(p[0] > p[1]);
-            wins[1] += i32::from(p[1] > p[0]);
-            total[0] += p[0];
-            total[1] += p[1];
+        for (lane, p) in powers.into_iter().enumerate() {
+            if let Some(winner) = self.lane_winner_with_power(lane, p) {
+                wins[winner] += 1;
+            }
+            // GenerateGameResultDataByPowerGameBehavior::Get 0x7dce440
+            // excludes a forced-tie lane from the power tiebreak.
+            if !self.lanes[lane].destroyed
+                && !(self.lanes[lane].revealed && self.lanes[lane].def.id == "Cancun")
+            {
+                total[0] += p[0];
+                total[1] += p[1];
+            }
         }
         if (wins[0], total[0]) > (wins[1], total[1]) {
             0
@@ -3014,6 +3383,16 @@ impl<'a> Game<'a> {
                 }
             }
         }
+        for seat in 0..2 {
+            for index in 0..self.players[seat].hand.len() {
+                let card = self.players[seat].hand[index];
+                if !self.cards[card].abilities_removed
+                    && let Some(hook) = self.cards[card].ability_def().late_in_hand_ongoing
+                {
+                    hook(self, card);
+                }
+            }
+        }
         for lane in 0..3 {
             for index in 0..self.lanes[lane].cards.len() {
                 let id = self.lanes[lane].cards[index];
@@ -3032,10 +3411,13 @@ impl<'a> Game<'a> {
     }
 
     pub fn trigger_on_reveal(&mut self, card: usize) {
-        let Some(lane) = self.cards[card].lane else {
+        let Some(hook) = self.cards[card].ability_def().reveal else {
             return;
         };
-        let Some(hook) = self.cards[card].ability_def().reveal else {
+        self.trigger_reveal_hook(card, hook);
+    }
+    pub(crate) fn trigger_reveal_hook(&mut self, card: usize, hook: cards::CardHook) {
+        let Some(lane) = self.cards[card].lane else {
             return;
         };
         if self.cards[card].abilities_removed
@@ -3095,6 +3477,13 @@ impl<'a> Game<'a> {
         if self.cards[id].revealed {
             return;
         }
+        if self.cards[id]
+            .attached_abilities
+            .iter()
+            .any(|ability| matches!(ability.kind, AttachedAbilityKind::RevealAtGameEnd))
+        {
+            return;
+        }
         // DarkDimensionBehavior::MakeCardsHidden @ 0x7d4d94c stops
         // hiding cards once the client enters EndGame.
         if self.delays_reveals
@@ -3147,7 +3536,7 @@ impl<'a> Game<'a> {
             let seat = self.cards[id].owner;
             if (self.cards[id].ability_def().move_limit > 0
                 || self.cards[id].ability_def().move_each_turn
-                || self.matching_move_grant(id, seat).is_some())
+                || self.matching_move_grant(id, seat, None).is_some())
                 && !self.players[seat].movable_cards_played.contains(&id)
             {
                 self.players[seat].movable_cards_played.push(id);
@@ -3156,9 +3545,16 @@ impl<'a> Game<'a> {
         // Card::ResolveForPlay @ 0x7cb9d90 can change the card's owner while
         // resolving; the play remains attributed to the staging player.
         let staging_owner = self.cards[id].owner;
+        let was_played = self.cards[id].turn_played > 0;
+        let post_resolve_start = self.post_resolve_plays.len();
         self.cards[id].latest_resolution_order = self.next_resolution_order;
         self.next_resolution_order += 1;
         self.trigger_on_reveal(id);
+        // Card::ResolveForPlay 0x7cb9d90 calls TrackCardsPlayedStats
+        // 0x7cba364 after the reveal, even when the card left its location.
+        if was_played && self.cards[id].has_resolve_trigger() {
+            self.players[staging_owner].on_reveal_cards_played += 1;
+        }
         self.cards[id].revealed = true;
         // ResolveForPlay (0x7cb9d90) updates ongoing after SetRevealed;
         // TriggerAbility::Activate (0x7c93fd8) refreshes after each resolve.
@@ -3172,7 +3568,9 @@ impl<'a> Game<'a> {
                 .filter(|&other| other != id && self.cards[other].revealed)
                 .collect();
             for other in observers {
-                if let Some(hook) = self.cards[other].ability_def().on_play {
+                if self.card_triggers_allowed(other)
+                    && let Some(hook) = self.cards[other].ability_def().on_play
+                {
                     hook(self, other, id);
                 }
             }
@@ -3206,6 +3604,9 @@ impl<'a> Game<'a> {
         // Card::ResolveForPlay @ 0x7cb9d90: banish skills before
         // PostCardResolvedTrigger, which reaches cards and locations.
         self.emit(Event::CardResolved { card: id });
+        if self.cards[id].turn_played > 0 {
+            self.trigger_player_effects(staging_owner, PlayerTrigger::CardResolved, Some(id));
+        }
         if self.cards[id].turn_played > 0
             && let Some(lane) = self.cards[id].lane
             && self.lanes[lane].revealed
@@ -3221,6 +3622,10 @@ impl<'a> Game<'a> {
             if lane == 0 || !self.move_card(id, lane - 1) {
                 break;
             }
+        }
+        let post_resolve = self.post_resolve_plays.split_off(post_resolve_start);
+        for card in post_resolve {
+            self.reveal(card);
         }
     }
     /// Start the next turn: clear last turn's plays and draw, reveal and refresh.
@@ -3307,6 +3712,7 @@ impl<'a> Game<'a> {
         if self.turn >= self.total_turns {
             self.finish_reveals();
             self.emit(Event::GameEnd);
+            self.resolve_endgame_hidden_cards();
             self.ongoing();
         }
         if let Some(stakes) = &mut self.stakes {
@@ -3648,10 +4054,18 @@ impl<'a> Game<'a> {
                 lane,
                 expect,
                 power,
+                staged_only,
             } = ability.kind
                 && turn == self.turn
             {
-                if self.played_at(owner, lane) == expect {
+                let played = if staged_only {
+                    self.played[owner].iter().any(|&(id, played_lane)| {
+                        played_lane == lane && self.cards[id].turn_played == self.turn
+                    })
+                } else {
+                    self.played_at(owner, lane)
+                };
+                if played == expect {
                     self.add_power(card, power, owner);
                 }
             } else {
@@ -3680,8 +4094,11 @@ impl<'a> Game<'a> {
         if !interleave {
             for &id in &observers {
                 expire(self, id);
-                self.resolve_attached_watches(id);
+                if self.card_triggers_allowed(id) {
+                    self.resolve_attached_watches(id);
+                }
                 if !self.cards[id].abilities_removed
+                    && self.card_triggers_allowed(id)
                     && let Some(hook) = self.cards[id].ability_def().pre_end_turn
                 {
                     hook(self, id);
@@ -3691,14 +4108,21 @@ impl<'a> Game<'a> {
         for id in observers {
             if interleave {
                 expire(self, id);
-                self.resolve_attached_watches(id);
+                if self.card_triggers_allowed(id) {
+                    self.resolve_attached_watches(id);
+                }
             }
-            if let Some(hook) = self.cards[id].ability_def().end_turn {
+            if !self.cards[id].abilities_removed
+                && self.card_triggers_allowed(id)
+                && let Some(hook) = self.cards[id].ability_def().end_turn
+            {
                 hook(self, id);
             }
         }
         self.ongoing();
-        for lane in 0..3 {
+        self.end_turn_lane_order = Some([0, 1, 2]);
+        for original in 0..3 {
+            let lane = self.end_turn_lane_order.unwrap()[original];
             if self.lanes[lane].revealed
                 && let Some(hook) = self.lanes[lane].def.on_turn_end
             {
@@ -3706,6 +4130,7 @@ impl<'a> Game<'a> {
                 self.ongoing();
             }
         }
+        self.end_turn_lane_order = None;
         self.emit(Event::TurnEnd);
         for seat in 0..2 {
             self.trigger_player_effects(seat, PlayerTrigger::EndTurn, None);
@@ -3769,12 +4194,13 @@ impl<'a> Game<'a> {
                 if self.cards[id].lane.is_some() {
                     continue;
                 }
-                let hand = &mut self.players[seat].hand;
-                let slot = hand
+                let slot = self.players[seat]
+                    .hand
                     .iter()
                     .position(|&card| card == id)
                     .expect("planned card not in hand");
-                hand.remove(slot);
+                self.emit(Event::CardStaged { card: id, seat });
+                self.players[seat].hand.remove(slot);
                 let spent = self.card_cost(id);
                 self.players[seat].energy_spent_this_turn += spent;
                 let energy = self.players[seat].energy - spent;
@@ -3825,6 +4251,7 @@ impl<'a> Game<'a> {
         if self.turn >= self.total_turns {
             self.finish_reveals();
             self.emit(Event::GameEnd);
+            self.resolve_endgame_hidden_cards();
             self.ongoing();
         }
         if let Some(stakes) = &mut self.stakes {
@@ -3866,6 +4293,32 @@ mod staging_tests {
         game.players[0].energy = 6;
         game.players[1].energy = 6;
         game
+    }
+
+    #[test]
+    fn deep_space_blocks_trigger_and_activate() {
+        fn increment(game: &mut Game<'_>, card: usize) {
+            game.cards[card].permanent += 1;
+        }
+        static DEEP: LocationDef = locations::location("DeepSpace", 0, 0, 1, false);
+        static ABILITY: CardDef = CardDef {
+            end_turn: Some(increment),
+            on_activate: Some(increment),
+            ..CardDef::vanilla("DeepSpaceTest")
+        };
+        let mut rng = PythonRandom::seed(17);
+        let mut game = game(&mut rng);
+        let card = place(&mut game, "Wasp", 0, 0);
+        game.cards[card].override_ability = Some(&ABILITY);
+        game.lanes[0].def = &DEEP;
+        let before = game.cards[card].permanent;
+        assert!(!game.can_activate(card, 0));
+        game.end_turn_effects();
+        assert_eq!(game.cards[card].permanent, before);
+        game.lanes[0].def = locations::get("Ruins").unwrap();
+        assert!(game.can_activate(card, 0));
+        game.end_turn_effects();
+        assert_eq!(game.cards[card].permanent, before + 1);
     }
 
     #[test]
@@ -3964,6 +4417,114 @@ mod staging_tests {
         game.cards[stone].abilities_removed = true;
         assert!(game.discard_card(0, thanos));
         assert!(!game.players[0].hand.contains(&thanos));
+    }
+
+    #[test]
+    fn resolved_play_snapshots_on_reveal_before_later_text_changes() {
+        let mut rng = PythonRandom::seed(31);
+        let mut game = game(&mut rng);
+        let card = game.create_card("Medusa", 0);
+        game.players[0].hand.push(card);
+        game.stage_action(0, Action::Play { card, lane: 1 })
+            .unwrap();
+        game.resolve_staged_actions(0);
+        assert_eq!(game.players[0].on_reveal_cards_played, 1);
+        game.cards[card].abilities_removed = true;
+        game.cards[card].override_ability = cards::get("Hulk");
+        game.ongoing();
+        assert_eq!(game.players[0].on_reveal_cards_played, 1);
+        let mut other_rng = PythonRandom::seed(32);
+        assert_eq!(
+            game.fork(&mut other_rng).players[0].on_reveal_cards_played,
+            1
+        );
+    }
+
+    #[test]
+    fn played_reveal_snapshot_uses_post_reveal_text_even_after_bounce() {
+        fn lose_text(game: &mut Game<'_>, card: usize) {
+            game.cards[card].override_ability = cards::get("Hulk");
+        }
+        fn bounce(game: &mut Game<'_>, card: usize) {
+            assert!(game.return_board_card_to_hand(card));
+        }
+        static CHANGE: CardDef = CardDef {
+            reveal: Some(lose_text),
+            ..CardDef::vanilla("ChangeTest")
+        };
+        static BOUNCE: CardDef = CardDef {
+            reveal: Some(bounce),
+            ..CardDef::vanilla("BounceTest")
+        };
+        let mut rng = PythonRandom::seed(33);
+        let mut game = game(&mut rng);
+        let first = game.create_card("Wasp", 0);
+        game.cards[first].override_ability = Some(&CHANGE);
+        game.players[0].hand.push(first);
+        game.stage_action(
+            0,
+            Action::Play {
+                card: first,
+                lane: 0,
+            },
+        )
+        .unwrap();
+        game.resolve_staged_actions(0);
+        assert_eq!(game.players[0].on_reveal_cards_played, 0);
+        let second = game.create_card("Wasp", 0);
+        game.cards[second].override_ability = Some(&BOUNCE);
+        game.players[0].hand.push(second);
+        game.stage_action(
+            0,
+            Action::Play {
+                card: second,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        game.resolve_staged_actions(0);
+        assert_eq!(game.players[0].on_reveal_cards_played, 1);
+    }
+
+    #[test]
+    fn zone_events_survive_return_and_resurrection() {
+        let mut rng = PythonRandom::seed(9);
+        let mut game = game(&mut rng);
+        let discarded = game.create_card("Wasp", 0);
+        game.players[0].hand.push(discarded);
+        assert!(game.discard_card(0, discarded));
+        game.players[0].discard.clear();
+        game.players[0].graveyard_order.clear();
+        game.players[0].hand.push(discarded);
+        assert!(game.discard_card(0, discarded));
+        assert_eq!(game.players[0].discard_history.len(), 2);
+        let destroyed = place(&mut game, "Cyclops", 1, 0);
+        assert!(game.destroy_card(destroyed));
+        assert!(game.revive_card(destroyed, 1, 1, destroyed));
+        let event = game.players[1].destruction_history[0];
+        assert_eq!(
+            (event.card, event.lane, event.turn),
+            (destroyed, Some(0), game.turn)
+        );
+        assert!(game.players[1].graveyard.is_empty());
+    }
+
+    #[test]
+    fn graveyard_order_interleaves_and_removes_resurrected_cards() {
+        let mut rng = PythonRandom::seed(17);
+        let mut game = game(&mut rng);
+        let a = game.create_card("Wasp", 0);
+        let b = place(&mut game, "Cyclops", 0, 0);
+        let c = game.create_card("Hulk", 0);
+        game.players[0].hand.extend([a, c]);
+        assert!(game.discard_card(0, a));
+        assert!(game.destroy_card(b));
+        assert!(game.discard_card(0, c));
+        assert_eq!(game.players[0].graveyard_order, [a, b, c]);
+        assert!(game.revive_card(b, 1, 1, b));
+        assert_eq!(game.players[0].graveyard_order, [a, c]);
+        assert!(game.destroy_card(b));
+        assert_eq!(game.players[0].graveyard_order, [a, c, b]);
     }
 
     #[test]
@@ -4175,9 +4736,11 @@ mod staging_tests {
             source: professor,
             card: Some(professor),
             lane: None,
+            destination: None,
             start_turn: game.turn,
             end_turn: game.turn,
             remaining: 1,
+            unlimited: false,
             on_move: None,
         });
         let card = game.create_card("Wasp", 1);

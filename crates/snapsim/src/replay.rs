@@ -36,6 +36,7 @@ pub struct Frame {
     pub recruit: bool,
     pub locations: Vec<Value>,
     pub location_turns: Vec<Value>,
+    pub previous_turn_locations: Option<crate::position::PreviousTurnLocations>,
     pub observed_history: Option<crate::position::ObservedHistory>,
     pub location_history: Vec<Option<crate::position::LocationHistoryState>>,
     pub totals: Vec<Value>,
@@ -232,6 +233,32 @@ pub fn matches(
                 );
             }
         }
+        let previous_turn_locations = if frames.last().is_some_and(|last| last.turn == turn) {
+            frames
+                .last()
+                .and_then(|last| last.previous_turn_locations.clone())
+        } else if frames.last().is_some_and(|last| last.turn == turn - 1) {
+            let mut ids: [Vec<String>; 3] = Default::default();
+            for prior in frames
+                .iter()
+                .rev()
+                .take_while(|frame| frame.turn == turn - 1)
+            {
+                for (lane, id) in prior.locations.iter().enumerate() {
+                    if let Some(id) = id.as_str()
+                        && !ids[lane].iter().any(|seen| seen == id)
+                    {
+                        ids[lane].push(id.to_owned());
+                    }
+                }
+            }
+            Some(crate::position::PreviousTurnLocations {
+                complete: true,
+                ids,
+            })
+        } else {
+            serde_json::from_value(game["previous_turn_locations"].clone()).ok()
+        };
         frames.push(Frame {
             line,
             turn,
@@ -248,6 +275,7 @@ pub fn matches(
                 && truthy(&game["legal_actions"]),
             recruit: observation["source"]["league"] == "RankedRecruit",
             locations: array(&game["locations"]).iter().map(revealed_id).collect(),
+            previous_turn_locations,
             observed_history: if observation["schema_version"] == 2 {
                 serde_json::from_value::<crate::position::ObservedHistory>(game["history"].clone())
                     .ok()
@@ -575,6 +603,7 @@ mod tests {
             "source": {"terminal": terminal},
             "game": {
                 "turn": turn, "total_turns": 6, "game_key": key,
+                "previous_turn_locations":{"complete":true,"ids":[["Ruins"],[],[]]},
                 "legal_actions": [1], "visuals_pending": false, "pending_stage_request": false,
                 "players": [
                     {"slot": "local", "entity_id": 1, "ended_turn": 0, "zones": {"hand": {"count": 0, "cards": []}, "deck": {"count": 0}}},

@@ -84,13 +84,12 @@ fn zombie_captain_marvel(game: &mut Game<'_>, card: usize) {
         }
     }
     game.ongoing();
-    let powers = game.powers();
     let mut candidates = [0; 3];
     let mut count = 0;
-    for (destination, power) in powers.iter().enumerate() {
+    for destination in 0..3 {
         // <DestroyAndMove>b__1 (0x7cfb134) excludes the source location,
         // but does not filter full or otherwise inaccessible destinations.
-        if destination != lane && power[owner] < power[1 - owner] {
+        if destination != lane && game.lane_winner(destination) == Some(1 - owner) {
             candidates[count] = destination;
             count += 1;
         }
@@ -134,8 +133,7 @@ fn omega_red(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    let power = game.powers()[lane];
-    if power[owner] > power[1 - owner] {
+    if game.lane_winner(lane) == Some(owner) {
         for destination in 0..3 {
             if destination != lane {
                 game.lanes[destination].bonus[owner] += 3;

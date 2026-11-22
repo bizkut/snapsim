@@ -79,11 +79,9 @@ fn star_brand_crater(game: &mut Game<'_>, lane: usize) {
 // CrownCityBehavior::BuffAdjacentLocations @ 0x7d4c204: ties give neither
 // player a bonus; the winning player receives power at each adjacent lane.
 fn crown_city(game: &mut Game<'_>, lane: usize) {
-    let power = game.powers()[lane];
-    if power[0] == power[1] {
+    let Some(winner) = game.lane_winner(lane) else {
         return;
-    }
-    let winner = usize::from(power[1] > power[0]);
+    };
     if lane > 0 {
         game.lanes[lane - 1].bonus[winner] += 4;
     }

@@ -263,7 +263,11 @@ mod tests {
 
     #[test]
     fn daredevil_plans_after_visible_opponent_staging() {
-        let p = position(json!([{"id":"Daredevil"}]), json!([]));
+        let mut p = position(json!([{"id":"Daredevil"}]), json!([]));
+        // Turn execution must not reveal a randomly sampled location.
+        for lane in &mut p.locations {
+            lane.id = Some("Ruins".into());
+        }
         let mut rng = PythonRandom::seed(1);
         let mut game = build_game(&p, &mut rng).unwrap();
         let enemy = game.create_card("Wasp", 1);

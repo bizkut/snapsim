@@ -1250,30 +1250,20 @@ mod tests {
 
     #[test]
     fn registered_end_turn_trigger_flags_match_client_inventory() {
-        let mut actual: Vec<_> = crate::cards::registry()
-            .filter(|def| def.end_turn_trigger)
-            .map(|def| def.id)
+        let mismatches: Vec<_> = crate::cards::registry()
+            .filter_map(|def| {
+                let expected = super::super::no_text::END_OF_TURN_TRIGGER_IDS.contains(&def.id);
+                (def.end_turn_trigger != expected).then_some((
+                    def.id,
+                    def.end_turn_trigger,
+                    expected,
+                ))
+            })
             .collect();
-        actual.sort_unstable();
-        let mut expected = [
-            "AdamWarlock",
-            "Attuma",
-            "BlackCat",
-            "DraxAvatarOfLife",
-            "HellcowFracturedFrontier",
-            "HumanTorchFirstSteps",
-            "HydraBob",
-            "Isca",
-            "Moondragon",
-            "MrFantasticFirstSteps",
-            "Sunspot",
-            "TheThingFirstSteps",
-            "VampireKillmonger",
-            "WidowsKiss",
-            "ZombieBlade",
-        ];
-        expected.sort_unstable();
-        assert_eq!(actual, expected);
+        assert!(
+            mismatches.is_empty(),
+            "end-turn flag mismatches (id, actual, expected): {mismatches:?}"
+        );
     }
 
     #[test]

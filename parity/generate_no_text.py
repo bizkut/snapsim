@@ -57,6 +57,15 @@ const CARD_NO_TEXT: &[(&str, bool)] = &[''')
         print(f'    ({json.dumps(name, ensure_ascii=True)}, {str(empty).lower()}),')
     print('''];
 
+/// Definitions with an ability whose TriggerType is exactly EndOfTurnTrigger.
+#[cfg(test)]
+pub(crate) const END_OF_TURN_TRIGGER_IDS: &[&str] = &[''')
+    for name, behavior in sorted(defs.items()):
+        abilities = behavior.get("Abilities") or []
+        if any(ability.get("TriggerType") == "CubeGame.EndOfTurnTrigger" for ability in abilities):
+            print(f'    {json.dumps(name, ensure_ascii=True)},')
+    print('''];
+
 #[cfg(test)]
 mod tests {
     use super::has_no_text;

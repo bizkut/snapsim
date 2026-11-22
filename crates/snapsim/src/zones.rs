@@ -80,6 +80,7 @@ impl Game<'_> {
             player.deck.retain(|&id| id != absorbed);
             player.discard.retain(|&id| id != absorbed);
             player.graveyard.retain(|&(id, _)| id != absorbed);
+            player.graveyard_order.retain(|&id| id != absorbed);
         }
         self.players[self.cards[absorbed].owner]
             .set_aside
