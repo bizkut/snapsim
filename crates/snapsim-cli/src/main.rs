@@ -122,6 +122,34 @@ struct Compare {
     #[arg(long, default_value = "default")]
     b_prior: String,
     #[arg(long)]
+    stakes: bool,
+    #[arg(long)]
+    a_snap_threshold: Option<f64>,
+    #[arg(long)]
+    b_snap_threshold: Option<f64>,
+    #[arg(long)]
+    a_retreat_threshold: Option<f64>,
+    #[arg(long)]
+    b_retreat_threshold: Option<f64>,
+    #[arg(long, default_value_t = 1.0)]
+    a_snap_probability: f64,
+    #[arg(long, default_value_t = 1.0)]
+    b_snap_probability: f64,
+    #[arg(long, default_value_t = 1.0)]
+    a_retreat_probability: f64,
+    #[arg(long, default_value_t = 1.0)]
+    b_retreat_probability: f64,
+    #[arg(long, default_value_t = 1)]
+    stake_initial: u32,
+    #[arg(long)]
+    stake_initial_next: Option<u32>,
+    #[arg(long)]
+    stake_prevent_raise: bool,
+    #[arg(long, default_value_t = 8)]
+    stake_maximum: u32,
+    #[arg(long, default_value_t = 2)]
+    stake_final_multiplier: u32,
+    #[arg(long)]
     plays_only: bool,
 }
 #[derive(Args)]
@@ -251,7 +279,7 @@ fn run(cli: Cli) -> Result<(), String> {
             snapsim::advise::advise(&p, &options, &|| false)?
         }
         Command::Compare(a) => snapsim::compare::compare(
-            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"plays_only":a.plays_only}),
+            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"plays_only":a.plays_only,"stakes":a.stakes,"a_snap_threshold":a.a_snap_threshold,"b_snap_threshold":a.b_snap_threshold,"a_retreat_threshold":a.a_retreat_threshold,"b_retreat_threshold":a.b_retreat_threshold,"a_snap_probability":a.a_snap_probability,"b_snap_probability":a.b_snap_probability,"a_retreat_probability":a.a_retreat_probability,"b_retreat_probability":a.b_retreat_probability,"stake_initial":a.stake_initial,"stake_initial_next":a.stake_initial_next,"stake_prevent_raise":a.stake_prevent_raise,"stake_maximum":a.stake_maximum,"stake_final_multiplier":a.stake_final_multiplier}),
         )?,
         Command::Benchmark(a) => snapsim::compare::benchmark(
             &json!({"deck_file":a.deck_file,"mode":a.mode,"games":a.games,"seed":a.seed,"rollouts":a.rollouts,"opponent":a.opponent,"plays_only":a.plays_only}),

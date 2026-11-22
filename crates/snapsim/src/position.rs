@@ -1015,6 +1015,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             .map(|id| location_def(id).expect("registered location"))
             .collect(),
         turn: position.turn,
+        stakes: None,
         next_resolution_order: 1,
         is_wait_for_staging: true,
         reveal_priority: priority,

@@ -41,14 +41,18 @@ rust = set(json.loads(subprocess.check_output(['$T/snapsim', 'coverage']))['$1']
 py = set(json.loads(subprocess.check_output(['$PY', '$REF/advise.py', 'coverage']))['$1'])
 print('|'.join(sorted(rust - py)) or '^$')"; }
 beyond=$(beyond_for cards); beyond_locations=$(beyond_for locations)
-compared=""; new_content=""
+compared=""; new_content=""; schema_v2=""
 for f in $files; do
-    if grep -qE "\"card_id\": ?\"($beyond)\"|\"location_id\": ?\"($beyond_locations)\"" "$f"; then
+    # The frozen reference reads only schema v1 observations; v2 recordings are checked by replay-client.
+    if grep -qE '"schema_version": ?2' "$f"; then
+        schema_v2+=" $f"
+    elif grep -qE "\"card_id\": ?\"($beyond)\"|\"location_id\": ?\"($beyond_locations)\"" "$f"; then
         new_content+=" $f"
     else
         compared+=" $f"
     fi
 done
+echo "replay: schema v2 (client gate only):$schema_v2"
 echo "replay: $(echo $compared | wc -w | tr -d ' ') recordings compared; new content in:$new_content"
 gate replay $PY $ROOT/parity/replay_compare.py --python $PY --reference $REF --rust $T/snapsim-replaycheck $compared
 # The client rules themselves, deliberate changes included, against every real recording:

@@ -425,6 +425,175 @@ pub enum Event {
     },
 }
 
+#[cfg(test)]
+mod stakes_tests {
+    use super::{RetreatCost, Stakes};
+
+    #[test]
+    fn observed_current_and_projected_sequence() {
+        let mut stakes = Stakes {
+            current: 1,
+            next: 1,
+            maximum: 8,
+            can_raise: true,
+            player_multiplier: [1; 2],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+        };
+        stakes.snap(0).unwrap();
+        assert_eq!((stakes.current, stakes.next), (1, 2));
+        stakes.advance_turn();
+        assert_eq!((stakes.current, stakes.next), (2, 2));
+        // Observed final-turn projection: 2 -> 4.
+        stakes.set_end_game_multiplier(2);
+        assert_eq!((stakes.current, stakes.next), (2, 4));
+        stakes.finish_game();
+        assert_eq!((stakes.current, stakes.next), (4, 4));
+    }
+    #[test]
+    fn fixed_stake_and_provisional_retreat() {
+        let mut stakes = Stakes {
+            current: 2,
+            next: 1,
+            maximum: 2,
+            can_raise: false,
+            player_multiplier: [1; 2],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+        };
+        assert!(stakes.snap(0).is_err());
+        stakes.advance_turn();
+        assert_eq!(stakes.current, 2);
+        assert_eq!(
+            stakes.retreat_now(0, RetreatCost::DisplayedCurrent),
+            Ok([-2, 2])
+        );
+        stakes.set_end_game_multiplier(2);
+        stakes.finish_game();
+        assert_eq!(stakes.showdown(Some(1)), [-2, 2]);
+        assert_eq!(stakes.showdown(None), [0, 0]);
+    }
+
+    #[test]
+    fn projected_value_includes_all_multipliers_and_cap() {
+        let mut stakes = Stakes {
+            current: 2,
+            next: 2,
+            maximum: 16,
+            can_raise: true,
+            player_multiplier: [2, 1],
+            end_game_multiplier: 2,
+            game_multiplier: 2,
+            snapped: [true, false],
+        };
+        stakes.update_next();
+        assert_eq!(stakes.next, 16);
+        stakes.maximum = 8;
+        stakes.update_next();
+        assert_eq!(stakes.next, 8);
+        stakes.advance_turn();
+        assert_eq!((stakes.current, stakes.next), (8, 8));
+    }
+}
+
+/// This rule is a provisional inference, not a verified client result rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetreatCost {
+    DisplayedCurrent,
+}
+
+/// Explicit stake state. Modes must supply their own initial and maximum values;
+/// an absent state means that cube accounting is not configured.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stakes {
+    pub current: u32,
+    pub next: u32,
+    pub maximum: u32,
+    pub can_raise: bool,
+    pub player_multiplier: [u32; 2],
+    pub end_game_multiplier: u32,
+    pub game_multiplier: u32,
+    pub snapped: [bool; 2],
+}
+
+impl Stakes {
+    /// Record a player's snap. Pending increases are promoted at turn end.
+    pub fn snap(&mut self, seat: usize) -> Result<(), &'static str> {
+        if seat >= 2 || !self.can_raise || self.snapped[seat] || self.next >= self.maximum {
+            return Err("snap unavailable");
+        }
+        self.player_multiplier[seat] = self.player_multiplier[seat].saturating_mul(2);
+        self.update_next();
+        self.snapped[seat] = true;
+        Ok(())
+    }
+
+    /// Projection in Game::UpdateCubeValueNextTurn @ 0x7db0df8–0x7db0e2c.
+    pub fn update_next(&mut self) {
+        self.next = self
+            .current
+            .saturating_mul(self.player_multiplier[0])
+            .saturating_mul(self.player_multiplier[1])
+            .saturating_mul(self.end_game_multiplier)
+            .saturating_mul(self.game_multiplier)
+            .min(self.maximum);
+    }
+
+    /// Game::CheckIncreaseStakesForNextTurn @ 0x7db0fc4 promotes player and
+    /// game multipliers, then resets them; the end-game multiplier is separate.
+    pub fn advance_turn(&mut self) {
+        self.current = self
+            .current
+            .saturating_mul(self.player_multiplier[0])
+            .saturating_mul(self.player_multiplier[1])
+            .saturating_mul(self.game_multiplier)
+            .min(self.maximum);
+        self.player_multiplier = [1; 2];
+        self.game_multiplier = 1;
+        self.update_next();
+    }
+
+    pub fn set_end_game_multiplier(&mut self, multiplier: u32) {
+        self.end_game_multiplier = multiplier;
+        self.update_next();
+    }
+
+    /// CheckEndOfGameIncreaseStakesGameBehavior @ 0x7dccd14 applies the
+    /// configured final multiplier, capped at MaxCubeValue.
+    pub fn finish_game(&mut self) {
+        self.current = self
+            .current
+            .saturating_mul(self.end_game_multiplier)
+            .min(self.maximum);
+        self.end_game_multiplier = 1;
+        self.update_next();
+    }
+
+    pub fn showdown(&self, winner: Option<usize>) -> [i64; 2] {
+        let cubes = i64::from(self.current);
+        match winner {
+            Some(0) => [cubes, -cubes],
+            Some(1) => [-cubes, cubes],
+            _ => [0, 0],
+        }
+    }
+
+    /// Inference: immediate retreat pays the current displayed stake. This
+    /// has not been verified against the client result path.
+    pub fn retreat_now(&self, seat: usize, rule: RetreatCost) -> Result<[i64; 2], &'static str> {
+        let cubes = match rule {
+            RetreatCost::DisplayedCurrent => i64::from(self.current),
+        };
+        match seat {
+            0 => Ok([-cubes, cubes]),
+            1 => Ok([cubes, -cubes]),
+            _ => Err("invalid seat"),
+        }
+    }
+}
+
 pub struct Game<'a> {
     pub cards: Vec<Card>,
     pub players: [Player; 2],
@@ -433,6 +602,7 @@ pub struct Game<'a> {
     pub location_pool: Vec<&'static LocationDef>,
     pub next_resolution_order: u32,
     pub turn: u8,
+    pub stakes: Option<Stakes>,
     pub is_wait_for_staging: bool,
     pub reveal_priority: Option<usize>,
     pub total_turns: u8,
@@ -481,6 +651,7 @@ impl<'a> Game<'a> {
             location_pool: self.location_pool.clone(),
             next_resolution_order: self.next_resolution_order,
             turn: self.turn,
+            stakes: self.stakes.clone(),
             is_wait_for_staging: self.is_wait_for_staging,
             reveal_priority: self.reveal_priority,
             total_turns: self.total_turns,
@@ -1221,6 +1392,7 @@ impl<'a> Game<'a> {
             lanes,
             location_pool: available,
             turn: 0,
+            stakes: None,
             next_resolution_order: 1,
             is_wait_for_staging: false,
             total_turns: 6,
@@ -2969,6 +3141,9 @@ impl<'a> Game<'a> {
             self.emit(Event::GameEnd);
             self.ongoing();
         }
+        if let Some(stakes) = &mut self.stakes {
+            stakes.advance_turn();
+        }
         self.turn += 1;
         Ok(result)
     }
@@ -3024,6 +3199,42 @@ impl<'a> Game<'a> {
         };
         self.resolve_action_plans(plans, priority)
     }
+    /// Start a turn, then allow stake decisions before either player stages cards.
+    /// Returning false from `stakes` terminates the turn without resolving plays.
+    pub fn play_turn_with_stakes<F, S>(
+        &mut self,
+        mut stakes: S,
+        mut planner: F,
+    ) -> Result<Option<TurnTrace>, String>
+    where
+        F: for<'b> FnMut(&Game<'b>, usize, usize) -> Result<Vec<Action>, String>,
+        S: for<'b> FnMut(&mut Game<'b>) -> Result<bool, String>,
+    {
+        self.begin_turn();
+        if !stakes(self)? {
+            return Ok(None);
+        }
+        let priority = self.action_priority(None);
+        let plans = if let Some(viewer) = self.daredevil_viewer() {
+            let first = 1 - viewer;
+            let opponent = planner(self, first, priority)?;
+            let mut rng = self.fork_rng();
+            let mut view = self.fork(rng.as_mut());
+            for &action in &opponent {
+                view.stage_action(first, action)?;
+            }
+            let response = planner(&view, viewer, priority)?;
+            if viewer == 0 {
+                [response, opponent]
+            } else {
+                [opponent, response]
+            }
+        } else {
+            [planner(self, 0, priority)?, planner(self, 1, priority)?]
+        };
+        self.resolve_action_plans(plans, priority).map(Some)
+    }
+
     pub fn play_turn_with_actions<F>(&mut self, mut planner: F) -> Result<TurnTrace, String>
     where
         F: for<'b> FnMut(&Game<'b>, usize, usize) -> Result<Vec<Action>, String>,
@@ -3374,6 +3585,9 @@ impl<'a> Game<'a> {
             self.finish_reveals();
             self.emit(Event::GameEnd);
             self.ongoing();
+        }
+        if let Some(stakes) = &mut self.stakes {
+            stakes.advance_turn();
         }
         self.turn += 1;
         Ok(result)

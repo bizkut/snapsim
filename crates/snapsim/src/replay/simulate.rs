@@ -286,6 +286,7 @@ pub(super) fn simulate(
             .filter_map(|id| locations::get(id))
             .collect(),
         turn: start.turn as u8,
+        stakes: None,
         next_resolution_order: 1,
         is_wait_for_staging: true,
         total_turns: start.total_turns.as_u64().unwrap_or(6) as u8,

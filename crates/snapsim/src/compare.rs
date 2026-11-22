@@ -1,7 +1,7 @@
 //! Duplicate-seat match evaluation and SearchAI's public-information projection.
 use crate::{
     advise::{self, AdviseOptions},
-    game::{Action, Game},
+    game::{Action, Game, RetreatCost, Stakes},
     position::{self, CardRef, LocationRef, Opponent, Position},
     random::PythonRandom,
 };
@@ -551,8 +551,334 @@ fn default_workers() -> usize {
     .max(1)
 }
 
+/// A stake decision is made from an estimate derived from the player's visible position.
+pub trait StakePolicy {
+    fn decide(&self, estimate: f64, snapped: bool) -> StakeDecision;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StakeDecision {
+    Stay,
+    Snap,
+    Retreat,
+}
+
+#[derive(Clone, Copy)]
+struct ThresholdStakePolicy {
+    snap: Option<f64>,
+    retreat: Option<f64>,
+}
+
+impl StakePolicy for ThresholdStakePolicy {
+    fn decide(&self, estimate: f64, snapped: bool) -> StakeDecision {
+        if self.retreat.is_some_and(|threshold| estimate < threshold) {
+            StakeDecision::Retreat
+        } else if !snapped && self.snap.is_some_and(|threshold| estimate >= threshold) {
+            StakeDecision::Snap
+        } else {
+            StakeDecision::Stay
+        }
+    }
+}
+
+fn stake_estimate(
+    game: &Game<'_>,
+    player: usize,
+    mode: Option<&str>,
+    rollouts: usize,
+    seed: i128,
+) -> Result<f64, String> {
+    let mut position = search_position(game, player, None, mode, None);
+    // The opponent's pending power may not be visible to this player.
+    position.opponent.pending_power = 0;
+    let options = AdviseOptions {
+        rollouts,
+        seed,
+        max_plans: 1,
+        time_limit: None,
+        approximate: true,
+        playout: "spread".into(),
+        workers: 1,
+        plays_only: false,
+    };
+    let result = advise::advise(&position, &options, &|| false)?;
+    result["plans"]
+        .as_array()
+        .and_then(|plans| plans.first())
+        .and_then(|plan| plan["win"].as_f64())
+        .ok_or_else(|| "stake estimate unavailable".to_owned())
+}
+
+fn stake_game(
+    decks: &[Vec<String>; 2],
+    seed: i128,
+    a_seat: usize,
+    mode: Option<&str>,
+    args: &Value,
+) -> Result<i64, String> {
+    let mut rng = PythonRandom::seed(seed);
+    let mut game = Game::new(
+        [&decks[0], &decks[1]],
+        &position::all_locations(mode == Some("recruit")),
+        &mut rng,
+    )?;
+    let initial = args
+        .get("stake_initial")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as u32;
+    let maximum = args
+        .get("stake_maximum")
+        .and_then(Value::as_u64)
+        .unwrap_or(8) as u32;
+    let final_multiplier = args
+        .get("stake_final_multiplier")
+        .and_then(Value::as_u64)
+        .unwrap_or(2) as u32;
+    let rollouts = args.get("rollouts").and_then(Value::as_u64).unwrap_or(32) as usize;
+    if initial == 0 || initial > maximum || rollouts == 0 {
+        return Err("invalid stake configuration".into());
+    }
+    let initial_next = args
+        .get("stake_initial_next")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(initial)) as u32;
+    if initial_next > maximum {
+        return Err("initial projected stake exceeds maximum".into());
+    }
+    game.stakes = Some(Stakes {
+        current: initial,
+        next: initial_next,
+        maximum,
+        can_raise: !args
+            .get("stake_prevent_raise")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        player_multiplier: [1; 2],
+        end_game_multiplier: 1,
+        game_multiplier: 1,
+        snapped: [false; 2],
+    });
+    let policies = [
+        ThresholdStakePolicy {
+            snap: args.get("a_snap_threshold").and_then(Value::as_f64),
+            retreat: args.get("a_retreat_threshold").and_then(Value::as_f64),
+        },
+        ThresholdStakePolicy {
+            snap: args.get("b_snap_threshold").and_then(Value::as_f64),
+            retreat: args.get("b_retreat_threshold").and_then(Value::as_f64),
+        },
+    ];
+    let mut policy_rng = PythonRandom::seed(seed.wrapping_add(0x534e4150));
+    let mut retreat_result = None;
+    while game.turn <= game.total_turns {
+        let turn = game.turn;
+        let result = game.play_turn_with_stakes(
+            |game| {
+                let estimates = [
+                    stake_estimate(
+                        game,
+                        0,
+                        mode,
+                        rollouts,
+                        seed.wrapping_add(i128::from(turn) * 2),
+                    )?,
+                    stake_estimate(
+                        game,
+                        1,
+                        mode,
+                        rollouts,
+                        seed.wrapping_add(i128::from(turn) * 2 + 1),
+                    )?,
+                ];
+                let stakes = game.stakes.as_ref().ok_or("missing stakes")?;
+                let mut decisions = [StakeDecision::Stay; 2];
+                for player in 0..2 {
+                    let side = usize::from(player != a_seat);
+                    decisions[player] =
+                        policies[side].decide(estimates[player], stakes.snapped[player]);
+                    if decisions[player] == StakeDecision::Snap
+                        && (!stakes.can_raise || stakes.next >= stakes.maximum)
+                    {
+                        decisions[player] = StakeDecision::Stay;
+                    }
+                    let probability = match decisions[player] {
+                        StakeDecision::Snap => args
+                            .get(format!(
+                                "{}_snap_probability",
+                                if side == 0 { "a" } else { "b" }
+                            ))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(1.0),
+                        StakeDecision::Retreat => args
+                            .get(format!(
+                                "{}_retreat_probability",
+                                if side == 0 { "a" } else { "b" }
+                            ))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(1.0),
+                        StakeDecision::Stay => 1.0,
+                    };
+                    if !(0.0..=1.0).contains(&probability) {
+                        return Err("stake probability must be in [0,1]".into());
+                    }
+                    if probability < 1.0 && policy_rng.random() >= probability {
+                        decisions[player] = StakeDecision::Stay;
+                    }
+                }
+                if decisions == [StakeDecision::Retreat; 2] || decisions == [StakeDecision::Snap; 2]
+                {
+                    return Err("simultaneous retreat or snap is not established".into());
+                }
+                if let Some(player) = decisions.iter().position(|d| *d == StakeDecision::Retreat) {
+                    retreat_result = Some(
+                        game.stakes
+                            .as_ref()
+                            .unwrap()
+                            .retreat_now(player, RetreatCost::DisplayedCurrent)?[a_seat],
+                    );
+                    return Ok(false);
+                }
+                if let Some(player) = decisions.iter().position(|d| *d == StakeDecision::Snap) {
+                    let stakes = game.stakes.as_mut().unwrap();
+                    if stakes.can_raise && stakes.next < stakes.maximum {
+                        stakes.snap(player)?;
+                        game.players[player].snapped_turns.push(turn);
+                    }
+                }
+                Ok(true)
+            },
+            |game, player, priority| {
+                search_plan(
+                    game,
+                    player,
+                    Some(priority),
+                    mode,
+                    &json!({"rollouts": rollouts, "playout": "spread"}),
+                    seed,
+                    None,
+                )
+            },
+        )?;
+        if result.is_none() {
+            return retreat_result.ok_or_else(|| "retreat result unavailable".into());
+        }
+    }
+    let winner = game.winner();
+    let stakes = game.stakes.as_mut().ok_or("missing stakes")?;
+    stakes.set_end_game_multiplier(final_multiplier);
+    stakes.finish_game();
+    Ok(stakes.showdown((winner < 2).then_some(winner as usize))[a_seat])
+}
+
+fn compare_stakes(args: &Value) -> Result<Value, String> {
+    use rayon::prelude::*;
+    let mode = args.get("mode").and_then(Value::as_str);
+    if mode.is_some() == args.get("deck_file").and_then(Value::as_str).is_some() {
+        return Err("pass exactly one of --deck-file and --mode".into());
+    }
+    for key in [
+        "a_snap_threshold",
+        "b_snap_threshold",
+        "a_retreat_threshold",
+        "b_retreat_threshold",
+        "a_snap_probability",
+        "b_snap_probability",
+        "a_retreat_probability",
+        "b_retreat_probability",
+    ] {
+        if args
+            .get(key)
+            .and_then(Value::as_f64)
+            .is_some_and(|v| !(0.0..=1.0).contains(&v))
+        {
+            return Err(format!("{key} must be in [0,1]"));
+        }
+    }
+    if args.get("time_limit").is_some_and(|v| !v.is_null())
+        || args.get("a_rollouts").is_some_and(|v| !v.is_null())
+        || args.get("b_rollouts").is_some_and(|v| !v.is_null())
+        || args
+            .get("plays_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || ["a_playout", "b_playout"].iter().any(|key| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| v != "spread")
+        })
+        || ["a_prior", "b_prior"].iter().any(|key| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| v != "default")
+        })
+    {
+        return Err(
+            "stakes comparison supports equal --rollouts, spread and default prior only".into(),
+        );
+    }
+    let decks = input_decks(args)?;
+    let games = args.get("games").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let workers = args
+        .get("workers")
+        .and_then(Value::as_u64)
+        .map_or_else(default_workers, |n| n as usize);
+    if games == 0 || workers == 0 {
+        return Err("games and workers must be positive".into());
+    }
+    let seed = i128::from(args.get("seed").and_then(Value::as_i64).unwrap_or(0));
+    let weighted = args.get("deck_prior").and_then(Value::as_str) == Some("weighted");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let pairs: Vec<f64> = pool.install(|| {
+        (0..games)
+            .into_par_iter()
+            .map(|index| {
+                let s = episode_seed(seed, index, true);
+                let mut deal_rng = PythonRandom::seed(s);
+                let mut deal = decks.clone();
+                if mode == Some("recruit") {
+                    for deck in &mut deal {
+                        if deck.is_none() {
+                            *deck = Some(recruit_deck(&mut deal_rng, weighted));
+                        }
+                    }
+                }
+                let [a, b] = deal;
+                let a = a.ok_or("missing first deck")?;
+                let b = b.ok_or("missing second deck")?;
+                let first = stake_game(&[a.clone(), b.clone()], s, 0, mode, args)?;
+                let second_decks = if decks[0].is_some() && mode == Some("recruit") {
+                    [b, a]
+                } else {
+                    [a, b]
+                };
+                let second = stake_game(&second_decks, s, 1, mode, args)?;
+                Ok((first + second) as f64 / 2.0)
+            })
+            .collect::<Result<_, String>>()
+    })?;
+    let mean = pairs.iter().sum::<f64>() / games as f64;
+    let ci = if games > 1 {
+        let variance = pairs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (games - 1) as f64;
+        let radius = 1.959963984540054 * (variance / games as f64).sqrt();
+        Some([mean - radius, mean + radius])
+    } else {
+        None
+    };
+    Ok(
+        json!({"net_cubes_per_game": mean, "paired": {"score": mean, "ci95": ci, "pairs": games},
+        "pair_scores": pairs, "retreat_semantics": if args.get("a_retreat_threshold").and_then(Value::as_f64).is_some() || args.get("b_retreat_threshold").and_then(Value::as_f64).is_some() { "provisional" } else { "not_used" },
+        "draw_semantics": "provisional", "snap_acceptance": "provisional", "config": args}),
+    )
+}
+
 /// Run the duplicate-seat compare harness with seed-ordered pair results.
 pub fn compare(args: &Value) -> Result<Value, String> {
+    if args.get("stakes").and_then(Value::as_bool).unwrap_or(false) {
+        return compare_stakes(args);
+    }
     use rayon::prelude::*;
     let mode = args.get("mode").and_then(Value::as_str);
     let deck_file = args.get("deck_file").and_then(Value::as_str);
@@ -695,6 +1021,15 @@ pub fn benchmark(args: &Value) -> Result<Value, String> {
 mod tests {
     use super::{compare_pair, episode_seed, paired_95, wilson_95};
     use serde_json::json;
+
+    #[test]
+    fn stake_comparison_is_seed_deterministic() {
+        let options = json!({"stakes": true, "mode": "recruit", "games": 2,
+            "workers": 1, "rollouts": 2, "seed": 19, "a_snap_threshold": 0.8});
+        let first = super::compare(&options).unwrap();
+        let second = super::compare(&options).unwrap();
+        assert_eq!(first, second);
+    }
 
     #[test]
     fn episode_seed_reserves_held_out_bit() {

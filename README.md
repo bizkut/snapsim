@@ -27,6 +27,35 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
 `snapsim` uses arena indices for cards and board lanes. `Game` owns the turn flow, player zones, priority, event dispatch and Ongoing recomputation; `policy` contains the heuristic, spread and margin planners. The game borrows a `GameRng`, so hooks can use `game.rng.borrow_mut()` and consume the same stream as the Python reference. `PythonRandom` implements CPython's integer seeding and sampling; its fixtures come from CPython 3.12.16. `data` exposes typed copies of the reference catalogs.
 
 `cards::registry()` (one descriptor slice per card-group module, listed in `cards::GROUPS`) and `locations::REGISTRY` contain rule descriptors. Card modules provide callbacks; see `cards/sword_master.rs` for a random effect and `cards/representative.rs` for reveal, ongoing, play and end-turn examples. Location modules provide callbacks; see `locations/turns.rs` for an end-turn rule. Each descriptor can provide initial per-instance state, and hooks can access the game's RNG. `Event` also exposes turn, reveal, play, addition, movement, destruction, discard, location reveal, energy and turn-count events. Hooks must preserve the Python event and RNG call order.
+Cube accounting is opt-in. `snapsim compare --stakes` compares two stake policies
+using equal `--rollouts` per seat for both play and visible-position win estimates.
+`--a-snap-threshold` and `--b-snap-threshold` snap at or above the estimate;
+omitting a threshold never snaps. `--a-retreat-threshold` and
+`--b-retreat-threshold` retreat below it. The corresponding
+`--{a,b}-{snap,retreat}-probability` options gate those decisions; the remaining
+probability stays. This independent-action response model is a stand-in, not a
+calibrated opponent. Results report mean net cubes and a duplicate-seat paired
+confidence interval. The estimate is simulated against the advisor's playout
+model and is not calibrated against live opponents.
+
+Modes supply stakes with `--stake-initial`, `--stake-initial-next`,
+`--stake-maximum`, `--stake-final-multiplier`, and `--stake-prevent-raise`.
+The defaults are a configurable comparison scenario, not automatic league
+detection. The recorded 20261121-232715-01d945f5 match shows 1/1 → 1/2 → 2/2
+on turn 4, then 2/2 → 2/4 → 4/4 on the final turn; sampling alone does not
+identify the boundary. Bounded instructions in `Game::UpdateCubeValueNextTurn`
+(0x7db0df8–0x7db0e2c) compute `min(maximum, current × player multiplier ×
+end-game multiplier × game multiplier)`. `Game::CheckIncreaseStakesForNextTurn`
+(0x7db0fc4) promotes player and game multipliers, while
+`CheckEndOfGameIncreaseStakesGameBehavior::CheckIncreaseStakesForEndGame`
+(0x7dccd14) uses a configured end multiplier and caps the result. A supplied
+initial `next` is a snapshot value; subsequent projections use the formula.
+`RetreatCost::DisplayedCurrent` is provisional, inferred from the displayed
+value rather than verified against client results; comparisons using retreats
+report `"retreat_semantics": "provisional"`. Draws paying zero, one snap per
+seat, and snap request acceptance are also provisional. Simultaneous snaps or
+retreats fail closed, and Retreat Later is not implemented.
+
 
 The engine exposes location replacement, delayed reveal scheduling, location cost hooks, ability removal, On Reveal and Ongoing repetition, movement, off-board placement, hand swaps and Horde creation. Lasting card costs are stored on cards. `Game::card_cost` mirrors Python's `energy_cost`: revealed locations modify the cost of hand cards only, in lane order, while board and deck cards keep their lasting cost. `Card::has_ongoing`, `can_reduce_power` and `reduce_power` support ability and immunity checks. `Game::copy_card` clones `CardState`, resets temporary board state and invokes the descriptor's optional `clear_reveal_state` hook. `cards::deck_eligible_ids()` matches the reference's sorted `deck_eligible_ids()`, which Agent 13 draws from. Registry membership alone is not a parity proof.
 
