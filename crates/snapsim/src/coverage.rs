@@ -113,6 +113,124 @@ pub fn sampling_priors(position: &Position) -> Value {
     json!({"opponent_cards": {"source":source,"size":cards.len(),"weighting":if source == "mode:recruit" && position.opponent.prior.as_deref() != Some("uniform") {"weighted"} else {"uniform"}}, "hidden_locations":{"source":loc_source,"size":loc_count}, "own_deck":{"source":deck_source,"size":deck_size}})
 }
 
+// Player-owned triggers survive their source. A card's staging turn is not a
+// reveal turn (e.g. Dark Dimension), so only resolved action history can
+// establish expiration or consumption.
+fn installed_effect_possible(position: &Position, id: &str) -> bool {
+    let actions = position
+        .history
+        .as_ref()
+        .and_then(|history| history.actions.as_ref());
+    let active = |entity: Option<i64>| {
+        if entity.is_none() {
+            return true;
+        }
+        let Some(action) = actions.and_then(|actions| {
+            actions.iter().find(|action| {
+                action.card_id == id
+                    && action.kind == "play"
+                    && action.resolved
+                    && entity.is_none_or(|entity| action.card_entity_id == entity)
+            })
+        }) else {
+            return true;
+        };
+        // A later re-reveal is not an action history entry. Only use the
+        // original play's time if the observed latest resolution still agrees.
+        let latest = position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .chain(position.graveyard.iter().flatten())
+            .chain(position.banished.iter().flatten())
+            .chain(position.opponent.graveyard.iter().flatten())
+            .chain(position.opponent.banished.iter().flatten())
+            .find(|card| card.entity_id == entity)
+            .and_then(|card| card.latest_resolution_order);
+        if latest.is_none() || latest != action.resolution_order {
+            return true;
+        }
+        let Some(turn) = action.turn_resolved else {
+            return true;
+        };
+        if id == "Wave" {
+            return turn.saturating_add(1) >= position.turn;
+        }
+        let seat = if action.owner == "local" { 0 } else { 1 };
+        let Some(history) = position.complete_past_actions(seat) else {
+            return true;
+        };
+        let Some(order) = action.resolution_order else {
+            return true;
+        };
+        !history.iter().any(|later| {
+            later.kind == "play"
+                && later.resolved
+                && later
+                    .turn_resolved
+                    .zip(later.resolution_order)
+                    .is_some_and(|(t, o)| (t, o) > (turn, order))
+        })
+    };
+    let visible = position
+        .locations
+        .iter()
+        .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+        .filter(|card| card.revealed && card.id == id)
+        .chain(
+            position
+                .graveyard
+                .iter()
+                .flatten()
+                .filter(|card| card.id == id),
+        )
+        .chain(
+            position
+                .banished
+                .iter()
+                .flatten()
+                .filter(|card| card.id == id),
+        )
+        .chain(
+            position
+                .opponent
+                .graveyard
+                .iter()
+                .flatten()
+                .filter(|card| card.id == id),
+        )
+        .chain(
+            position
+                .opponent
+                .banished
+                .iter()
+                .flatten()
+                .filter(|card| card.id == id),
+        );
+    if visible.into_iter().any(|card| active(card.entity_id)) {
+        return true;
+    }
+    if let Some(actions) = actions
+        && actions
+            .iter()
+            .filter(|action| action.card_id == id && action.kind == "play" && action.resolved)
+            .any(|action| active(Some(action.card_entity_id)))
+    {
+        return true;
+    }
+    position.opponent.seen.iter().any(|seen| seen == id)
+        && !actions.is_some_and(|actions| {
+            actions
+                .iter()
+                .any(|action| action.card_id == id && action.kind == "play" && action.resolved)
+        })
+        && !position
+            .locations
+            .iter()
+            .flat_map(|lane| &lane.theirs)
+            .any(|card| card.id == id)
+}
+
 pub fn coverage(position: &Position) -> Value {
     let mut card_ids: BTreeSet<&str> = position
         .hand
@@ -134,6 +252,13 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    if !cards::reference_rules_enabled() {
+        for id in ["Wave", "Stick"] {
+            if installed_effect_possible(position, id) {
+                extra_state.insert(format!("{id} effect may be active"));
+            }
+        }
+    }
     // A ledger entry proves augments are in use, but it does not enumerate
     // attached abilities that have not produced a stat update yet.
     if !cards::reference_rules_enabled()

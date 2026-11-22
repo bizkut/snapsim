@@ -299,6 +299,8 @@ pub struct Player {
     /// Cards in destruction order and their death lane, if it was observed.
     pub graveyard: Vec<(usize, Option<usize>)>,
     pub pending_effects: Vec<PendingEffect>,
+    /// Wave's player-owned maximum-cost effect, through this turn.
+    pub wave_until: Option<u8>,
     pub move_grants: Vec<MoveGrant>,
     staged_actions: Vec<StagedAction>,
     pub scheduled_energy: Vec<(u8, i32)>,
@@ -1725,6 +1727,15 @@ impl<'a> Game<'a> {
                 && self.cost_change_allowed(card, cost, value)
             {
                 cost = value;
+            }
+            if self.players[self.cards[card].owner]
+                .wave_until
+                .is_some_and(|turn| self.turn <= turn)
+            {
+                let capped = cost.min(4);
+                if self.cost_change_allowed(card, cost, capped) {
+                    cost = capped;
+                }
             }
         }
         cost.max(0)

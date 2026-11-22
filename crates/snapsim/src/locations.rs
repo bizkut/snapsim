@@ -8,6 +8,7 @@ mod locations_d1;
 mod locations_d2;
 mod locations_d3;
 mod locations_e;
+mod locations_f;
 mod recruit_a;
 mod turns;
 
@@ -230,6 +231,10 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_e::THUNDERBOLTS_TOWER,
     locations_e::THE_ABBEY,
     locations_e::RAFT,
+    locations_f::JOTUNHEIM,
+    locations_f::UTOPIA,
+    locations_f::CAMP_LEHIGH,
+    locations_f::ATTILAN,
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {

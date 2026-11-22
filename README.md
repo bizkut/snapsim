@@ -19,6 +19,7 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
   The Abbey and The Raft have a shared one-shot location trigger whose consumed state is not exported. Previously revealed copies therefore decline strict advice and replay checking rather than assuming it is unused.
   Nebula's installed pre-end trigger and The Thing (First Steps)'s one-time fill-trigger consumption are not exported by the readers. Earlier revealed copies therefore have uncertain state in isolated positions; their Power alone does not establish those flags.
   Card augment attachments are not exported; a changed augment-sourced stat ledger makes the replay turn not checkable. A visible augment ledger also makes strict advice report uncertain card augment state.
+  Wave and Stick install player-owned effects that are not exported. Strict advice reports uncertain state when a visible card or recorded play could have left one active; cards still in hand or deck do not cause a decline.
   For an opponent's revealed play, replay checking uses recorded stat-ledger updates proven to predate the turn to reconstruct hidden pre-play Power. When a relevant update's timing cannot be established, the turn is not checkable rather than guessing that Power.
   For Cave of the Dragon, the checker uses uniquely observed created-card identities and, when visible in separate frames, their reveal order; it still consumes the normal random draws. Frozen-reference checks do not use this evidence.
 

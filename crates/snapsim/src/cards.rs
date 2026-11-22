@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod agent13;
 mod core_rules;
+mod kahhori;
 mod meta_a1;
 mod meta_a2;
 mod meta_b1;
@@ -23,6 +24,8 @@ mod meta_g;
 mod meta_h1;
 mod meta_h2;
 mod meta_h3;
+mod meta_i1;
+mod meta_i2;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
@@ -65,6 +68,7 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_h1::TOKENS,
     meta_h2::TOKENS,
     meta_h3::TOKENS,
+    meta_i1::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -367,6 +371,9 @@ static GROUPS: &[&[CardDef]] = &[
     meta_h1::CARDS,
     meta_h2::CARDS,
     meta_h3::CARDS,
+    meta_i1::CARDS,
+    meta_i2::CARDS,
+    kahhori::CARDS,
 ];
 
 /// Every registered card rule.
