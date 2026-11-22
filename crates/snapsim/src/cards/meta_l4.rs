@@ -1181,8 +1181,7 @@ fn stryfe_update(game: &mut Game<'_>, card: usize) {
             .count();
     }
     if let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .persistent_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<StryfeState>())
         && !state.completed
         && !state.ready
@@ -1192,8 +1191,7 @@ fn stryfe_update(game: &mut Game<'_>, card: usize) {
 }
 fn stryfe_freeze(game: &mut Game<'_>, card: usize) {
     if let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .persistent_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<StryfeState>())
         && !state.completed
         && state.progress >= 3
@@ -1206,11 +1204,14 @@ fn stryfe_complete(game: &mut Game<'_>, card: usize, event: crate::game::Event) 
     if !matches!(event, crate::game::Event::AfterTurnEnd) {
         return;
     }
-    let state = game.cards[card]
-        .state
-        .as_deref_mut()
+    // Text removal can leave no objective. Borrowed reveals retain the
+    // original objective separately from the temporary reveal context.
+    let Some(state) = game.cards[card]
+        .persistent_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<StryfeState>())
-        .unwrap();
+    else {
+        return;
+    };
     if !state.ready || state.completed {
         return;
     }
@@ -1348,6 +1349,16 @@ mod tests {
         );
     }
     #[test]
+    fn stryfe_without_objective_state_ignores_turn_end() {
+        let mut rng = PythonRandom::seed(3);
+        let mut g = fixture(&mut rng);
+        let stryfe = place(&mut g, "Stryfe", 0, 0);
+        g.cards[stryfe].state = Some(Box::new(0usize));
+        stryfe_complete(&mut g, stryfe, crate::game::Event::AfterTurnEnd);
+        g.cards[stryfe].state = None;
+        stryfe_complete(&mut g, stryfe, crate::game::Event::AfterTurnEnd);
+    }
+    #[test]
     fn stryfe_keeps_borrowed_arrow_and_hawkeye_watches() {
         let mut rng = PythonRandom::seed(9);
         let mut g = fixture(&mut rng);
@@ -1371,6 +1382,36 @@ mod tests {
                 .as_any()
                 .is::<StryfeState>()
         );
+    }
+    #[test]
+    fn stryfe_borrowing_frigga_copies_its_objective_context() {
+        let mut rng = PythonRandom::seed(10);
+        let mut g = fixture(&mut rng);
+        g.players[0].hand.clear();
+        let stryfe = place(&mut g, "Stryfe", 0, 0);
+        let state = g.cards[stryfe]
+            .state
+            .as_deref_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<StryfeState>()
+            .unwrap();
+        state.ready = true;
+        state.completed = true;
+        g.players[0].play_history.push((g.turn, stryfe));
+        let frigga = g.create_card("Frigga", 0);
+        assert!(g.trigger_borrowed_reveal(stryfe, frigga));
+        let copy = g.players[0].hand[0];
+        let state = g.cards[copy]
+            .state
+            .as_deref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StryfeState>()
+            .unwrap();
+        assert!(state.ready && state.completed);
+        g.add_card(copy, 1, 0, true);
+        stryfe_complete(&mut g, copy, crate::game::Event::AfterTurnEnd);
     }
     #[test]
     fn stryfe_retains_state_from_borrowed_text_replacement() {

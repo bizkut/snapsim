@@ -32,15 +32,26 @@ impl Game<'_> {
         let original_def = self.cards[source].def;
         let original_ability = self.cards[source].override_ability;
         let original = std::mem::replace(&mut self.cards[source].state, context);
+        let previous = self.cards[source].borrowed_original_state.take();
+        self.cards[source].borrowed_original_state =
+            Some(previous.as_ref().unwrap_or(&original).clone());
         self.trigger_reveal_hook(source, hook);
         // A copied reveal may permanently replace the recipient's text. In that
         // case copy_text/transform installed a new state that must not be
         // overwritten by the objective state belonging to the removed text.
-        if std::ptr::eq(self.cards[source].def, original_def)
+        if self.cards[source].borrowed_original_state.is_some()
+            && std::ptr::eq(self.cards[source].def, original_def)
             && self.cards[source].override_ability.map(|def| def.id)
                 == original_ability.map(|def| def.id)
         {
-            self.cards[source].state = original;
+            if previous.is_some() {
+                self.cards[source].state = original;
+            } else {
+                self.cards[source].state = self.cards[source]
+                    .borrowed_original_state
+                    .take()
+                    .expect("borrowed state is present");
+            }
         }
         true
     }

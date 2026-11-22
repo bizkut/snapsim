@@ -201,10 +201,18 @@ pub struct Card {
     pub merged_to: Option<usize>,
     pub attached_abilities: Vec<AttachedAbility>,
     pub state: Option<Box<dyn CardState>>,
+    /// Persistent state hidden temporarily while another card's reveal runs.
+    pub(crate) borrowed_original_state: Option<Option<Box<dyn CardState>>>,
 }
 impl Card {
     pub fn ability_def(&self) -> &'static CardDef {
         self.override_ability.unwrap_or(self.def)
+    }
+    pub(crate) fn persistent_state_mut(&mut self) -> Option<&mut (dyn CardState + 'static)> {
+        self.borrowed_original_state
+            .as_mut()
+            .unwrap_or(&mut self.state)
+            .as_deref_mut()
     }
     pub fn power(&self) -> i32 {
         self.permanent + self.ongoing + self.location_power
@@ -1550,6 +1558,7 @@ impl<'a> Game<'a> {
                     merged_to: None,
                     attached_abilities: initial_attachments(def),
                     state: def.initial_state.map(|init| init()),
+                    borrowed_original_state: None,
                 });
                 players[seat].deck.push(index);
             }
@@ -1703,6 +1712,7 @@ impl<'a> Game<'a> {
             merged_to: None,
             attached_abilities: initial_attachments(def),
             state: def.initial_state.map(|init| init()),
+            borrowed_original_state: None,
         });
         index
     }
@@ -1726,9 +1736,10 @@ impl<'a> Game<'a> {
         // Card::Copy (0x7caed0c) carries replacement provenance.
         self.cards[card].replaced_card_def_id = self.cards[source].replaced_card_def_id;
         self.cards[card].state = self.cards[source]
-            .state
-            .as_deref()
-            .map(CardState::clone_box);
+            .borrowed_original_state
+            .as_ref()
+            .unwrap_or(&self.cards[source].state)
+            .clone();
         if let Some(clear) = self.cards[card].ability_def().clear_reveal_state {
             clear(&mut self.cards[card]);
         }
@@ -1753,6 +1764,7 @@ impl<'a> Game<'a> {
         abilities.retain(|ability| !self.is_default_attached(card, ability));
         self.cards[card].attached_abilities = abilities;
         self.cards[card].abilities_removed = true;
+        self.cards[card].borrowed_original_state = None;
         self.cards[card].state = None;
         self.ongoing();
     }
@@ -1774,6 +1786,7 @@ impl<'a> Game<'a> {
         let removed = self.cards[source].abilities_removed;
         self.cards[card].override_ability = Some(def);
         self.cards[card].abilities_removed = removed;
+        self.cards[card].borrowed_original_state = None;
         self.cards[card].state = def.initial_state.map(|init| init());
         if removed {
             self.cards[card].attached_abilities.clear();
@@ -1830,6 +1843,7 @@ impl<'a> Game<'a> {
         target.replaced_card_def_id = None;
         target.override_ability = None;
         target.abilities_removed = false;
+        target.borrowed_original_state = None;
         target.state = def.initial_state.map(|init| init());
         target.permanent = power;
         target.base_power_override = None;
@@ -1868,9 +1882,10 @@ impl<'a> Game<'a> {
         let def = self.cards[source].def;
         let override_ability = self.cards[source].override_ability;
         let state = self.cards[source]
-            .state
-            .as_deref()
-            .map(CardState::clone_box);
+            .borrowed_original_state
+            .as_ref()
+            .unwrap_or(&self.cards[source].state)
+            .clone();
         let updates = self.cards[source]
             .stat_updates
             .iter()
@@ -1888,6 +1903,7 @@ impl<'a> Game<'a> {
         target.morphed_from_entity = Some(source);
         target.replaced_card_def_id = replaced_card_def_id;
         target.override_ability = override_ability;
+        target.borrowed_original_state = None;
         target.state = state;
         target.stat_updates = updates;
         target.cost = cost;

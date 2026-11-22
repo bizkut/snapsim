@@ -67,6 +67,8 @@ The engine exposes location replacement, delayed reveal scheduling, location cos
 
 Copied text, merging and attached abilities follow the client. Copying text (`Card::CopyText`) loads the copied definition with fresh state and repeats its On Reveal under reveal-doubling effects; Nico Minoru's prepared spell is her current text, and her preparation trigger is tracked separately. Abilities one card attaches to another (Hawkeye's and Jessica Jones's end-of-turn buff, Web Sling's move-power trigger) are instances on that card with their turn, location and origin: an instance installed by the card's own text is replaced with that text, while one cloned from another card stays. A merge (Symbiote Spider-Man) adds the absorbed card's power from modifiers, copies its text and clones its attached abilities except those the receiver already has by default (`CloneExternalAbilities`).
 
+When Stryfe uses a card's On Reveal, the borrowed reveal has its own temporary context; a card copied during that reveal retains Stryfe's persistent state rather than the borrowed context.
+
 ## Adding content
 
 1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and list it in that module's descriptor slice (cards; add a new module's `CARDS` and `TOKENS` slices to `cards::GROUPS` and `cards::TOKEN_GROUPS`) or in `locations::REGISTRY`. Tokens, which decks may not contain, go in the module's `TOKENS`. Use the catalog's current printed stats; do not invent stand-in rules.

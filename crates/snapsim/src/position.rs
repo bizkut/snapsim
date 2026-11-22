@@ -803,6 +803,7 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         turn_played: 0,
         attached_abilities: crate::game::initial_attachments(def),
         state: def.initial_state.map(|init| init()),
+        borrowed_original_state: None,
     })
 }
 
