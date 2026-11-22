@@ -36,6 +36,12 @@ mod meta_l1;
 mod meta_l2;
 pub(crate) mod meta_l3;
 mod meta_l4;
+mod meta_m1;
+mod meta_m2;
+pub(crate) mod meta_m3;
+mod meta_m4;
+mod meta_m5;
+mod meta_m6;
 pub(crate) mod no_text;
 mod recruit_a;
 mod recruit_b;
@@ -88,6 +94,7 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_l3::TOKENS,
     meta_l2::TOKENS,
     meta_l1::TOKENS,
+    meta_m5::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -426,6 +433,12 @@ static GROUPS: &[&[CardDef]] = &[
     meta_l3::CARDS,
     meta_l1::CARDS,
     meta_l2::CARDS,
+    meta_m1::CARDS,
+    meta_m2::CARDS,
+    meta_m3::CARDS,
+    meta_m4::CARDS,
+    meta_m5::CARDS,
+    meta_m6::CARDS,
     kahhori::CARDS,
 ];
 

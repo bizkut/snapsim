@@ -277,6 +277,25 @@ impl CardRef {
         }
     }
 
+    pub(crate) fn selene_objective(&self) -> Option<(usize, bool)> {
+        if self.id != "SeleneHorseman" {
+            return None;
+        }
+        let state = self.ability_state.as_ref()?;
+        if !state.abilities.is_empty() {
+            return None;
+        }
+        let objective = state.objective.as_ref()?;
+        if objective.goal != 3 || objective.progress > objective.goal {
+            return None;
+        }
+        match objective.state.as_str() {
+            "InProgress" if objective.progress < 3 => Some((objective.progress as usize, false)),
+            "Completed" if objective.progress == 3 => Some((3, true)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn verified_base_power(&self) -> Option<i32> {
         let printed = CARD_DATA.get(&self.id)?.power;
         if self
@@ -819,6 +838,9 @@ pub(crate) fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u
         }
         if let Some((progress, completed)) = reference.archangel_objective() {
             cards::meta_l3::restore_archangel(card, progress, completed);
+        }
+        if let Some((progress, completed)) = reference.selene_objective() {
+            cards::meta_m3::restore_selene(card, progress, completed);
         }
     }
     card.activated = reference.activated.unwrap_or(false);
@@ -1820,6 +1842,25 @@ mod observed_history_tests {
             .unwrap()
             .state = "GoalReached".into();
         assert_eq!(card.objective(), None);
+    }
+
+    #[test]
+    fn selene_objective_requires_consistent_observed_state() {
+        let mut card: CardRef = serde_json::from_value(json!({
+            "id":"SeleneHorseman","ability_state":{"complete":false,"abilities":[],
+                "objective":{"state":"InProgress","progress":2,"goal":3}}
+        }))
+        .unwrap();
+        assert_eq!(card.selene_objective(), Some((2, false)));
+        let objective = card
+            .ability_state
+            .as_mut()
+            .unwrap()
+            .objective
+            .as_mut()
+            .unwrap();
+        objective.state = "Completed".into();
+        assert_eq!(card.selene_objective(), None);
     }
 
     #[test]

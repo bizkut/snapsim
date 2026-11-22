@@ -27,11 +27,56 @@ impl Game<'_> {
             self.add_hand(seat, card, true);
         }
     }
+
+    /// Player::DrawCard(Card) (0x7de7abc) draws a selected deck card,
+    /// running the same pre-draw interception as an ordinary draw.
+    pub fn draw_specific(&mut self, seat: usize, card: usize) {
+        let Some(slot) = self.players[seat].deck.iter().position(|&id| id == card) else {
+            return;
+        };
+        if self.players[seat].hand.len() >= 7
+            || self.players[seat].hand.iter().any(|&id| {
+                !self.cards[id].abilities_removed
+                    && self.cards[id].ability_def().blocks_draw_in_hand
+            })
+        {
+            return;
+        }
+        for lane in 0..3 {
+            if self.lanes[lane].revealed
+                && let Some(hook) = self.lanes[lane].def.before_draw
+                && let Some(replacement) = hook(self, lane, seat)
+            {
+                self.add_hand(seat, replacement, true);
+                return;
+            }
+        }
+        self.players[seat].deck.remove(slot);
+        self.add_hand(seat, card, true);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::random::PythonRandom;
+
+    #[test]
+    fn selected_draw_removes_only_selected_card() {
+        let mut rng = PythonRandom::seed(44);
+        let mut game = super::super::test_game(&mut rng);
+        game.players[0].hand.clear();
+        game.players[0].deck.clear();
+        let first = game.create_card("Wasp", 0);
+        let selected = game.create_card("Hulk", 0);
+        game.players[0].deck.extend([first, selected]);
+        game.draw_specific(0, selected);
+        assert_eq!(game.players[0].deck, [first]);
+        assert_eq!(game.players[0].hand, [selected]);
+        assert_eq!(
+            game.players[0].draws.last().map(|draw| draw.1),
+            Some(selected)
+        );
+    }
 
     #[test]
     fn draws_from_other_deck_and_transfers_owner() {

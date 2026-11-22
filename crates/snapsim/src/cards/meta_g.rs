@@ -151,7 +151,9 @@ mod tests {
         let mut game = build_game(&position("SpaceStone"), &mut rng).unwrap();
         let source = game.lanes[0].cards[0];
         let other = game.create_card("Hulk", 0);
-        let thanos = game.create_card("Thanos", 0);
+        let thanos = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Thanos", 0).unwrap());
         game.players[0].deck.extend([other, thanos]);
         space_stone(&mut game, source);
         assert_eq!(game.players[0].deck, [other]);
@@ -177,7 +179,9 @@ mod tests {
         let mut rng = PythonRandom::seed(4);
         let mut game = build_game(&position("SoulStone"), &mut rng).unwrap();
         let stone = game.lanes[0].cards[0];
-        let thanos = game.create_card("Thanos", 0);
+        let thanos = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Thanos", 0).unwrap());
         game.players[0].hand.push(thanos);
         game.discard_card(0, thanos);
         assert!(game.players[0].hand.contains(&thanos));
@@ -192,7 +196,9 @@ mod tests {
     fn space_overrides_restrictions_but_not_energy_or_capacity() {
         let mut rng = PythonRandom::seed(5);
         let mut game = build_game(&position("SpaceStone"), &mut rng).unwrap();
-        let thanos = game.create_card("Thanos", 0);
+        let thanos = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Thanos", 0).unwrap());
         game.players[0].hand.push(thanos);
         game.lanes[1].def = crate::locations::get("Flooded").unwrap();
         game.lanes[1].revealed = true;

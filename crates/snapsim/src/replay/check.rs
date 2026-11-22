@@ -11,6 +11,18 @@ fn quantum_unknown(reveal: Option<i64>, played: Option<i64>, turn: i64) -> bool 
     played.is_none_or(|played| played < turn && reveal.is_none_or(|r| played >= r))
 }
 
+fn order_variants(moves: &[usize], plays: &[usize]) -> Result<usize, String> {
+    let ties = moves
+        .iter()
+        .map(|line| plays.iter().filter(|play| *play == line).count())
+        .sum::<usize>();
+    match ties {
+        0 => Ok(1),
+        1 => Ok(2),
+        _ => Err("multiple simultaneous play/move order ambiguities cannot be enumerated".into()),
+    }
+}
+
 fn io_error(path: &Path, error: std::io::Error) -> String {
     if let Some(code) = error.raw_os_error() {
         let message = error.to_string();
@@ -453,28 +465,74 @@ pub fn check_observations(
                 {
                     return Err("Ta Lo may have buffed an unobserved opponent hand card".into());
                 }
+                let variants = if cards::reference_rules_enabled() {
+                    1
+                } else {
+                    order_variants(
+                        &staged
+                            .moves
+                            .iter()
+                            .map(|(_, _, line)| *line)
+                            .collect::<Vec<_>>(),
+                        &staged
+                            .plays
+                            .iter()
+                            .map(|play| play.stage_line)
+                            .collect::<Vec<_>>(),
+                    )?
+                };
                 let mut best = None;
+                let mut last_error = None;
                 for seed in 0..seeds {
-                    let diffs = super::simulate::simulate(
-                        start, target, &staged, frames, &history, deck, seed,
-                    )?;
-                    if diffs.is_empty() {
-                        return Ok(report::consistent(
-                            index + 1,
-                            turn,
-                            staged.before.line,
-                            target.line,
-                            seed,
-                            seeds,
-                        ));
+                    for order in 0..variants {
+                        let diffs = match super::simulate::simulate(
+                            start,
+                            target,
+                            &staged,
+                            frames,
+                            &history,
+                            deck,
+                            (seed, order == 1),
+                        ) {
+                            Ok(diffs) => diffs,
+                            Err(error) => {
+                                last_error = Some(error);
+                                continue;
+                            }
+                        };
+                        if diffs.is_empty() {
+                            let mut row = report::consistent(
+                                index + 1,
+                                turn,
+                                staged.before.line,
+                                target.line,
+                                seed,
+                                seeds,
+                            );
+                            if variants > 1 {
+                                row.order_enumerated = true;
+                                let selected = if order == 0 {
+                                    "move first"
+                                } else {
+                                    "play first"
+                                };
+                                row.detail.push_str(&format!(
+                                    "; play/move order unknown, matched with {selected}"
+                                ));
+                            }
+                            return Ok(row);
+                        }
+                        if best.as_ref().is_none_or(
+                            |(_, previous): &(usize, Vec<super::Difference>)| {
+                                diffs.len() < previous.len()
+                            },
+                        ) {
+                            best = Some((seed, diffs));
+                        }
                     }
-                    if best.as_ref().is_none_or(
-                        |(_, previous): &(usize, Vec<super::Difference>)| {
-                            diffs.len() < previous.len()
-                        },
-                    ) {
-                        best = Some((seed, diffs));
-                    }
+                }
+                if let Some(error) = last_error {
+                    return Err(error);
                 }
                 let (seed, differences) = best.expect("positive seeds");
                 let mut cards: BTreeSet<String> = differences
@@ -566,7 +624,16 @@ pub fn check_observations(
 }
 #[cfg(test)]
 mod location_state_tests {
-    use super::{quantum_unknown, theater_unknown};
+    use super::{order_variants, quantum_unknown, theater_unknown};
+
+    #[test]
+    fn replay_enumerates_one_ambiguous_move_and_play() {
+        assert_eq!(order_variants(&[89], &[85]), Ok(1));
+        assert_eq!(order_variants(&[89], &[89]), Ok(2));
+        assert_eq!(order_variants(&[89, 92], &[89]), Ok(2));
+        assert!(order_variants(&[89, 89], &[89]).is_err());
+        assert!(order_variants(&[89], &[89, 89]).is_err());
+    }
 
     #[test]
     fn theater_old_reveal_needs_unknown_draw_context() {

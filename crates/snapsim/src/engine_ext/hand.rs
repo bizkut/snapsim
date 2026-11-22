@@ -467,6 +467,31 @@ mod tests {
     }
 
     #[test]
+    fn remove_text_removes_default_attachments_and_recalculates_ongoing() {
+        let mut rng = PythonRandom::seed(10);
+        let mut game = game(&mut rng);
+        let nico = game.create_card("NicoMinoru", 0);
+        let other = game.create_card("Hawkeye", 0);
+        game.cards[nico].attach_watch(other, 1, 0, true, 3);
+        game.remove_text(nico);
+        assert!(game.cards[nico].abilities_removed);
+        assert_eq!(game.cards[nico].attached_abilities.len(), 1);
+        assert_eq!(game.cards[nico].attached_abilities[0].origin, Some(other));
+
+        let blue_marvel = game.create_card("BlueMarvel", 0);
+        let hulk = game.create_card("Hulk", 0);
+        game.add_card(blue_marvel, 0, 0, false);
+        game.add_card(hulk, 0, 0, false);
+        game.cards[blue_marvel].revealed = true;
+        game.cards[hulk].revealed = true;
+        game.ongoing();
+        let before = game.cards[hulk].power();
+        game.remove_text(blue_marvel);
+        assert!(game.cards[blue_marvel].abilities_removed);
+        assert_eq!(game.cards[hulk].power(), before - 1);
+    }
+
+    #[test]
     fn opening_hand_copy_uses_current_original_state() {
         let mut rng = PythonRandom::seed(9);
         let mut game = game(&mut rng);

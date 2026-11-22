@@ -156,8 +156,9 @@ pub(super) fn simulate(
     frames: &[Frame],
     history: &History,
     local_deck: &[String],
-    seed: usize,
+    trial: (usize, bool),
 ) -> Result<Vec<Difference>, String> {
+    let (seed, plays_before_tied_move) = trial;
     let mut hidden_rng = PythonRandom::seed(seed as i128);
     let mut game_rng = PythonRandom::seed(seed as i128);
     let mut known = history.seen.clone();
@@ -599,20 +600,49 @@ pub(super) fn simulate(
     {
         game.cards[slot] = make(observed, 1, &Value::Null, &Value::Null)?;
     }
-    for (entity_id, lane) in &staged.moves {
-        let index = cards.iter().find(|(id, _)| id == entity_id).unwrap().1;
-        if !game.move_card(index, *lane) {
-            return Err(format!(
-                "observed pre-reveal move of {} [{}] cannot be staged",
-                game.cards[index].def.id,
-                label(entity_id)
-            ));
-        }
-        game.ongoing();
+    // Staged cards can already be present when a later manual move fires.
+    // Preserve the observed order rather than always applying moves first.
+    let reference = crate::cards::reference_rules_enabled();
+    let mut order = Vec::with_capacity(staged.moves.len() + staged.plays.len());
+    for (index, (_, _, line)) in staged.moves.iter().enumerate() {
+        order.push((
+            if reference { 0 } else { *line },
+            usize::from(plays_before_tied_move && !reference),
+            0,
+            0,
+            index,
+        ));
     }
-    let mut order: Vec<_> = staged.plays.iter().collect();
-    order.sort_by_key(|p| (p.card.lane, p.card.slot.as_i64().unwrap_or(0)));
-    for play in order {
+    for (index, play) in staged.plays.iter().enumerate() {
+        order.push((
+            if reference { 1 } else { play.stage_line },
+            usize::from(!plays_before_tied_move || reference),
+            play.card.lane,
+            play.card.slot.as_i64().unwrap_or(0),
+            index,
+        ));
+    }
+    order.sort_unstable();
+    for (_, sort_kind, _, _, index) in order {
+        let kind = if plays_before_tied_move && !reference {
+            1 - sort_kind
+        } else {
+            sort_kind
+        };
+        if kind == 0 {
+            let (entity_id, lane, _) = &staged.moves[index];
+            let card = cards.iter().find(|(id, _)| id == entity_id).unwrap().1;
+            if !game.move_card(card, *lane) {
+                return Err(format!(
+                    "observed pre-reveal move of {} [{}] cannot be staged",
+                    game.cards[card].def.id,
+                    label(entity_id)
+                ));
+            }
+            game.ongoing();
+            continue;
+        }
+        let play = &staged.plays[index];
         let id = play.id.as_str().ok_or("missing card_id")?;
         let index = push(&mut game, id, play.card.owner, &play.cost, &play.power)?;
         if play.card.owner == 1 {

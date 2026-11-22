@@ -20,6 +20,7 @@ pub fn consistent(
             "lines {before_line}→{target_line}; seed {seed} (matched after {}/{seeds} attempts)",
             seed + 1
         ),
+        order_enumerated: false,
         differences: Vec::new(),
         cards: Vec::new(),
         locations: Vec::new(),
@@ -45,6 +46,7 @@ pub fn inconsistent(
         detail: format!(
             "lines {before_line}→{target_line}; no match in {seeds} seeds (closest seed {closest_seed})"
         ),
+        order_enumerated: false,
         differences,
         cards,
         locations,
@@ -64,6 +66,7 @@ pub fn uncheckable(
         turn,
         status: Status::Uncheckable,
         detail: format!("lines {first_line}–{last_line}: {reason}"),
+        order_enumerated: false,
         differences: Vec::new(),
         cards: Vec::new(),
         locations: Vec::new(),
@@ -81,12 +84,14 @@ fn label(status: &Status) -> &'static str {
 #[derive(Default)]
 struct Counts {
     consistent: usize,
+    order_enumerated: usize,
     inconsistent: usize,
     uncheckable: usize,
 }
 impl Counts {
-    fn add(&mut self, status: &Status) {
-        match status {
+    fn add(&mut self, row: &ResultRow) {
+        self.order_enumerated += usize::from(row.order_enumerated);
+        match row.status {
             Status::Consistent => self.consistent += 1,
             Status::Inconsistent => self.inconsistent += 1,
             Status::Uncheckable => self.uncheckable += 1,
@@ -96,10 +101,17 @@ impl Counts {
 
 impl std::fmt::Display for Counts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The suffix appears only when some match needed an enumerated play/move
+        // order, so reports without one stay byte-identical to the frozen Python
+        // replay checker (parity gate `replay`).
+        write!(f, "{} consistent", self.consistent)?;
+        if self.order_enumerated > 0 {
+            write!(f, " ({} order-enumerated)", self.order_enumerated)?;
+        }
         write!(
             f,
-            "{} consistent, {} inconsistent, {} not checkable",
-            self.consistent, self.inconsistent, self.uncheckable
+            ", {} inconsistent, {} not checkable",
+            self.inconsistent, self.uncheckable
         )
     }
 }
@@ -121,8 +133,8 @@ impl Report {
         writeln!(output, "{path}")?;
         let mut file_counts = Counts::default();
         for row in rows {
-            file_counts.add(&row.status);
-            self.counts.add(&row.status);
+            file_counts.add(row);
+            self.counts.add(row);
             writeln!(
                 output,
                 "  match {} turn {}: {} — {}",

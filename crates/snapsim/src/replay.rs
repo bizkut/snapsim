@@ -343,7 +343,7 @@ pub struct Play {
 /// The ordered inputs that were visible before the first reveal.
 pub struct Staging<'a> {
     pub plays: Vec<Play>,
-    pub moves: Vec<(Value, usize)>,
+    pub moves: Vec<(Value, usize, usize)>,
     pub before: &'a Frame,
     pub opponent_count: i64,
 }
@@ -539,7 +539,7 @@ pub fn staging<'a>(
                 ));
             }
             if card.lane != *lane {
-                moves.push((prior.entity.clone(), card.lane));
+                moves.push((prior.entity.clone(), card.lane, frame.line));
                 *lane = card.lane;
             }
         }
@@ -572,6 +572,7 @@ pub struct ResultRow {
     pub turn: i64,
     pub status: Status,
     pub detail: String,
+    pub order_enumerated: bool,
     pub differences: Vec<Difference>,
     pub cards: Vec<String>,
     pub locations: Vec<String>,

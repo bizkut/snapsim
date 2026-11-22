@@ -121,7 +121,10 @@ fn topaz(game: &mut Game<'_>, card: usize, event: Event) {
     let played_lane = game.played[owner]
         .iter()
         .find_map(|&(id, lane)| (id == target).then_some(lane));
-    if lane != 1 && game.cards[target].owner == owner && played_lane == Some(lane) {
+    // Its own post-resolve event precedes activation of the newly revealed
+    // trigger; later allied plays at this location can trigger it.
+    if target != card && lane != 1 && game.cards[target].owner == owner && played_lane == Some(lane)
+    {
         game.move_card(target, 1);
     }
 }
@@ -461,6 +464,10 @@ mod tests {
         let mut rng = PythonRandom::seed(1);
         let mut game = game(&mut rng);
         let source = place(&mut game, "Topaz", 0, 0);
+        game.played[0].push((source, 0));
+        topaz(&mut game, source, Event::CardResolved { card: source });
+        assert_eq!(game.cards[source].lane, Some(0));
+        game.played[0].clear();
         let target = place(&mut game, "Wasp", 0, 0);
         game.played[0].push((target, 2));
         topaz(&mut game, source, Event::CardResolved { card: target });
@@ -469,6 +476,27 @@ mod tests {
         game.played[0].push((target, 0));
         topaz(&mut game, source, Event::CardResolved { card: target });
         assert_eq!(game.cards[target].lane, Some(1));
+    }
+
+    #[test]
+    fn topaz_recorded_turn_five_moves_ezekiel_not_herself() {
+        // 20261121-154018-e63a26ff, frames 94–96.
+        let mut rng = PythonRandom::seed(1);
+        let mut game = game(&mut rng);
+        let topaz_card = place(&mut game, "Topaz", 1, 2);
+        let ezekiel = place(&mut game, "EzekielSims", 1, 2);
+        game.played[1].push((topaz_card, 2));
+        game.played[1].push((ezekiel, 2));
+        topaz(
+            &mut game,
+            topaz_card,
+            Event::CardResolved { card: topaz_card },
+        );
+        assert_eq!(game.cards[topaz_card].lane, Some(2));
+        topaz(&mut game, topaz_card, Event::CardResolved { card: ezekiel });
+        assert_eq!(game.cards[topaz_card].lane, Some(2));
+        assert_eq!(game.cards[ezekiel].lane, Some(1));
+        assert_eq!(game.cards[ezekiel].power(), 2);
     }
 
     #[test]

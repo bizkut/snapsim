@@ -244,7 +244,9 @@ mod tests {
         let mut rng = PythonRandom::seed(5);
         let mut game = build_game(&position("PowerStone"), &mut rng).unwrap();
         let stone = game.lanes[0].cards[0];
-        let thanos = game.create_card("Thanos", 0);
+        let thanos = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Thanos", 0).unwrap());
         game.players[0].hand.push(thanos);
         for id in [
             "PowerStone",
@@ -269,7 +271,9 @@ mod tests {
         let mut rng = PythonRandom::seed(6);
         let mut game = build_game(&position("TimeStone"), &mut rng).unwrap();
         let stone = game.lanes[0].cards[0];
-        let thanos = game.create_card("Thanos", 0);
+        let thanos = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Thanos", 0).unwrap());
         game.players[0].deck.push(thanos);
         let cost = game.cards[thanos].cost;
         time_stone(&mut game, stone);

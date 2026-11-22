@@ -1653,6 +1653,7 @@ impl<'a> Game<'a> {
     }
 
     pub fn create_card(&mut self, id: &str, owner: usize) -> usize {
+        debug_assert!(cards::get(id).is_some(), "unregistered created card {id}");
         let def = crate::position::card_def(id).expect("unregistered created card");
         let row = CATALOG.get(id).expect("missing created card data");
         let index = self.cards.len();
@@ -1745,6 +1746,17 @@ impl<'a> Game<'a> {
                 .is_some_and(|origin| origin.def.id == receiver.def.id)
     }
 
+    /// Card::RemoveText (0x7cb2ebc) removes default abilities, while
+    /// preserving attached abilities originating from other cards.
+    pub fn remove_text(&mut self, card: usize) {
+        let mut abilities = std::mem::take(&mut self.cards[card].attached_abilities);
+        abilities.retain(|ability| !self.is_default_attached(card, ability));
+        self.cards[card].attached_abilities = abilities;
+        self.cards[card].abilities_removed = true;
+        self.cards[card].state = None;
+        self.ongoing();
+    }
+
     /// Copy the source's current text without changing this card's identity or stats.
     /// CopyTextAndActivateResolveAbility (0x7cbb3f4) refreshes ongoing before resolve.
     pub fn copy_text(&mut self, card: usize, source: usize, activate_reveal: bool) -> bool {
@@ -1782,6 +1794,10 @@ impl<'a> Game<'a> {
 
     /// MorphIntoNewCard removes Set modifiers but retains Add and Multiply.
     pub fn transform_card(&mut self, card: usize, target_id: &str) -> bool {
+        debug_assert!(
+            cards::get(target_id).is_some() && CATALOG.contains_key(target_id),
+            "unregistered transformation target {target_id}"
+        );
         let Some(def) = cards::get(target_id) else {
             return false;
         };
@@ -1830,6 +1846,10 @@ impl<'a> Game<'a> {
     }
     /// MorphIntoNewCardWithoutModifiers (0x7cbbe80).
     pub fn transform_card_without_modifiers(&mut self, card: usize, target_id: &str) -> bool {
+        debug_assert!(
+            cards::get(target_id).is_some() && CATALOG.contains_key(target_id),
+            "unregistered transformation target {target_id}"
+        );
         if cards::get(target_id).is_none() || !CATALOG.contains_key(target_id) {
             return false;
         }
@@ -4267,6 +4287,136 @@ mod staging_tests {
     use super::*;
     use crate::random::PythonRandom;
 
+    /// Exercises dynamically chosen card IDs with debug assertions enabled.
+    #[test]
+    #[ignore = "runs 3000 full random games"]
+    fn seeded_registered_card_and_location_smoke() {
+        let pool = crate::cards::deck_eligible_ids();
+        let location_pool = crate::locations::REGISTRY;
+        assert!(pool.len() >= 12 && location_pool.len() >= 3);
+        for seed in 0..3000_i128 {
+            let mut setup = PythonRandom::seed(seed);
+            let mut choices = pool.to_vec();
+            setup.shuffle(&mut choices);
+            let decks: [Vec<String>; 2] = std::array::from_fn(|seat| {
+                (0..12)
+                    .map(|i| {
+                        choices[(seed as usize * 24 + seat * 12 + i) % choices.len()].to_owned()
+                    })
+                    .collect()
+            });
+            let mut locations: Vec<_> = location_pool.iter().map(|def| def.id).collect();
+            setup.shuffle(&mut locations);
+            let lanes: Vec<String> = locations[..3].iter().map(|id| (*id).to_owned()).collect();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut rng = PythonRandom::seed(seed);
+                let mut game = Game::new([&decks[0], &decks[1]], &lanes, &mut rng).unwrap();
+                while game.turn < game.total_turns {
+                    game.play_turn(crate::policy::Policy::Spread);
+                    for (lane, location) in game.lanes.iter().enumerate() {
+                        for &card in &location.cards {
+                            assert_eq!(game.cards[card].lane, Some(lane));
+                            assert!(game.cards[card].owner < 2);
+                        }
+                    }
+                }
+                game.finish_reveals();
+            }));
+            if let Err(error) = result {
+                std::panic::resume_unwind(Box::new(format!(
+                    "smoke seed {seed}, decks {decks:?}, locations {lanes:?}: {error:?}"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn literal_card_creation_and_transformation_targets_are_registered() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        const IDENTITY_ONLY: &[(&str, &str)] = &[
+            ("AgathaHarkness", "excluded from random card selection"),
+            (
+                "CaptainAmericaAvengers",
+                "identity check for compatible Captain America",
+            ),
+            (
+                "CaptainAmericaChampion",
+                "identity check for compatible Captain America",
+            ),
+            ("Thanos", "identity check for Infinity Stone effects"),
+            (
+                "ThanosChampion",
+                "identity check for Infinity Stone effects",
+            ),
+        ];
+        let mut missing = Vec::new();
+        for directory in ["cards", "locations"] {
+            for entry in std::fs::read_dir(root.join(directory)).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                // no_text.rs is the client-wide inventory generated by
+                // parity/generate_no_text.py, not an effect target list.
+                if directory == "cards" && path.file_name().is_some_and(|name| name == "no_text.rs")
+                {
+                    continue;
+                }
+                let contents = std::fs::read_to_string(&path).unwrap();
+                let source = contents.split("#[cfg(test)]").next().unwrap();
+                for literal in source.split('"').skip(1).step_by(2) {
+                    if CATALOG.contains_key(literal)
+                        && cards::get(literal).is_none()
+                        && !IDENTITY_ONLY.iter().any(|(id, _)| *id == literal)
+                    {
+                        missing.push(format!("{}: {literal}", path.display()));
+                    }
+                }
+                for (method, argument) in [
+                    (".create_card(", 0),
+                    (".transform_card(", 1),
+                    (".transform_card_without_modifiers(", 1),
+                ] {
+                    for tail in source.split(method).skip(1) {
+                        let mut depth = 0;
+                        let mut start = 0;
+                        let mut current = 0;
+                        for (index, byte) in tail.bytes().enumerate() {
+                            match byte {
+                                b'(' | b'[' | b'{' => depth += 1,
+                                b')' | b']' | b'}' if depth > 0 => depth -= 1,
+                                b',' | b')' if depth == 0 => {
+                                    if current == argument {
+                                        let value = tail[start..index].trim();
+                                        if let Some(id) = value
+                                            .strip_prefix('"')
+                                            .and_then(|value| value.strip_suffix('"'))
+                                            && (cards::get(id).is_none()
+                                                || !CATALOG.contains_key(id))
+                                        {
+                                            missing.push(format!("{}: {id}", path.display()));
+                                        }
+                                        break;
+                                    }
+                                    if byte == b')' {
+                                        break;
+                                    }
+                                    current += 1;
+                                    start = index + 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "unregistered card literals: {missing:?}"
+        );
+    }
+
     fn game(rng: &mut PythonRandom) -> Game<'_> {
         let deck = [
             "Abomination",
@@ -4410,7 +4560,9 @@ mod staging_tests {
         let mut rng = PythonRandom::seed(7);
         let mut game = game(&mut rng);
         let stone = place(&mut game, "SoulStone", 0, 0);
-        let thanos = game.create_card("Thanos", 0);
+        let thanos = game.cards.len();
+        game.cards
+            .push(crate::position::make_card("Thanos", 0).unwrap());
         game.players[0].hand.push(thanos);
         assert!(!game.discard_card(0, thanos));
         assert!(game.players[0].hand.contains(&thanos));
