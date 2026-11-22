@@ -231,6 +231,7 @@ pub fn search_plan(
             .and_then(Value::as_u64)
             .unwrap_or(32) as usize,
         seed,
+        position_rollouts: 0,
         max_plans: 1,
         time_limit,
         approximate: true,
@@ -593,6 +594,7 @@ fn stake_estimate(
     position.opponent.pending_power = 0;
     let options = AdviseOptions {
         rollouts,
+        position_rollouts: 0,
         seed,
         max_plans: 1,
         time_limit: None,

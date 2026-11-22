@@ -3261,6 +3261,71 @@ impl<'a> Game<'a> {
         self.resolve_action_plans(plans, priority)
     }
 
+    /// Resolve an already-started position with both seats controlled by the policy.
+    pub(crate) fn play_position_policy_turn(
+        &mut self,
+        policy: crate::policy::Policy,
+        priority: Option<usize>,
+        plays_only: bool,
+    ) -> Result<TurnTrace, String> {
+        self.pending_plays = std::array::from_fn(|seat| {
+            self.delayed_reveals[seat]
+                .iter()
+                .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
+                .collect()
+        });
+        if plays_only {
+            return self.resolve_started_turn(priority, |game, _| {
+                let mut rng = game.rng.borrow_mut();
+                if let Some(viewer) = game.daredevil_viewer() {
+                    let first = 1 - viewer;
+                    let plan = policy.plan(game, first, &mut **rng);
+                    let mut fork_rng = rng.clone_rng();
+                    let mut view = game.fork(fork_rng.as_mut());
+                    for &(card, lane) in &plan {
+                        view.stage_action(first, Action::Play { card, lane })?;
+                    }
+                    let response = policy.plan(&view, viewer, &mut **rng);
+                    Ok(if viewer == 0 {
+                        [response, plan]
+                    } else {
+                        [plan, response]
+                    })
+                } else {
+                    Ok([
+                        policy.plan(game, 0, &mut **rng),
+                        policy.plan(game, 1, &mut **rng),
+                    ])
+                }
+            });
+        }
+        let priority = self.action_priority(priority);
+        let plans = {
+            let mut rng = self.rng.borrow_mut();
+            if let Some(viewer) = self.daredevil_viewer() {
+                let first = 1 - viewer;
+                let plan = policy.plan_actions(self, first, &mut **rng);
+                let mut fork_rng = rng.clone_rng();
+                let mut view = self.fork(fork_rng.as_mut());
+                for &action in &plan {
+                    view.stage_action(first, action)?;
+                }
+                let response = policy.plan_actions(&view, viewer, &mut **rng);
+                if viewer == 0 {
+                    [response, plan]
+                } else {
+                    [plan, response]
+                }
+            } else {
+                [
+                    policy.plan_actions(self, 0, &mut **rng),
+                    policy.plan_actions(self, 1, &mut **rng),
+                ]
+            }
+        };
+        self.resolve_action_plans(plans, priority)
+    }
+
     /// Resolve a planning position with player moves and activations enabled.
     pub fn resolve_position_actions(
         &mut self,

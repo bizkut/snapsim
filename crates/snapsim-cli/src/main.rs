@@ -270,6 +270,7 @@ fn run(cli: Cli) -> Result<(), String> {
             let options = snapsim::advise::AdviseOptions {
                 rollouts: a.rollouts,
                 seed: a.seed as i128,
+                position_rollouts: 0,
                 max_plans: a.max_plans,
                 time_limit: a.time_limit,
                 approximate: a.approximate,

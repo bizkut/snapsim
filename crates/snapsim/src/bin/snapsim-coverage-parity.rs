@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = AdviseOptions {
         rollouts: 1,
         seed: 0,
+        position_rollouts: 0,
         max_plans: 1,
         time_limit: None,
         approximate: false,

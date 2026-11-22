@@ -52,6 +52,9 @@ impl PlanStep {
 pub struct AdviseOptions {
     pub rollouts: usize,
     pub seed: i128,
+    /// Independent policy-vs-policy samples of the current position (zero disables it).
+    #[serde(default)]
+    pub position_rollouts: u32,
     pub max_plans: usize,
     pub time_limit: Option<f64>,
     #[serde(default)]
@@ -417,10 +420,20 @@ pub(crate) fn advise_with_game(
             json!({"engine":"simulator-rollout", "status":status, "rollouts":0, "plans":[], "unsupported":unsupported, "priors":priors}),
         );
     }
+    let start = Instant::now();
     let deadline = options
         .time_limit
-        .and_then(|v| Instant::now().checked_add(Duration::from_secs_f64(v)));
-    let stopped = || cancel() || deadline.is_some_and(|end| Instant::now() >= end);
+        .and_then(|v| start.checked_add(Duration::from_secs_f64(v)));
+    let plan_deadline = options.time_limit.and_then(|v| {
+        let fraction = if options.position_rollouts > 0 {
+            0.7
+        } else {
+            1.0
+        };
+        start.checked_add(Duration::from_secs_f64(v * fraction))
+    });
+    let stopped = || cancel() || plan_deadline.is_some_and(|end| Instant::now() >= end);
+    let position_stopped = || cancel() || deadline.is_some_and(|end| Instant::now() >= end);
     let mut rng = PythonRandom::seed(options.seed);
     let mut sample_seed = rng.getrandbits(64) as u64;
     let mut first_rng = PythonRandom::seed(sample_seed as i128);
@@ -549,14 +562,93 @@ pub(crate) fn advise_with_game(
         .take(options.max_plans)
         .map(|c| c.result(position, options.plays_only))
         .collect();
-    Ok(json!({"engine": "simulator-rollout", "status": status,
+    let mut result = json!({"engine": "simulator-rollout", "status": status,
         "rollouts": options.rollouts - remaining, "plans": plans,
-        "unsupported": unsupported, "priors": priors}))
+        "unsupported": unsupported, "priors": priors});
+    if options.position_rollouts > 0 {
+        // This stream is independent of plan sampling and never changes plan results.
+        let mut position_rng = PythonRandom::seed(options.seed ^ 0x504f_5349_5449_4f4e);
+        let mut estimate = Candidate::new(Vec::new());
+        for _ in 0..options.position_rollouts {
+            if position_stopped() {
+                break;
+            }
+            let seed = position_rng.getrandbits(64) as u64;
+            let mut rng = PythonRandom::seed(seed as i128);
+            let mut game = build_game(position, &mut rng)?;
+            let priority = match position.priority.as_deref() {
+                Some("me") => Some(0),
+                Some("opponent") => Some(1),
+                _ => None,
+            };
+            game.play_position_policy_turn(policy, priority, options.plays_only)?;
+            while game.turn <= game.total_turns {
+                if options.plays_only {
+                    game.play_turn_plays_only(policy);
+                } else {
+                    game.play_turn_actions(policy)?;
+                }
+            }
+            estimate.record(game.winner());
+        }
+        if estimate.samples > 0 {
+            let samples = estimate.samples as f64;
+            result["position"] = json!({
+                "win": estimate.wins as f64 / samples,
+                "draw": estimate.draws as f64 / samples,
+                "loss": (estimate.samples - estimate.wins - estimate.draws) as f64 / samples,
+                "samples": estimate.samples,
+                "approximate": incomplete,
+            });
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_estimate_is_opt_in_and_independent() {
+        let position = json!({
+            "turn": 3, "energy": 3,
+            "hand": [{"id":"Wasp"}, {"id":"Medusa"}], "deck": [],
+            "locations": [
+                {"id":"Ruins", "mine":[], "theirs":[]},
+                {"id":"Ruins", "mine":[], "theirs":[]},
+                {"id":"Ruins", "mine":[], "theirs":[]}
+            ],
+            "opponent": {"hand":0, "deck":0}
+        })
+        .to_string();
+        let mut options = json!({
+            "rollouts": 20, "seed": 42, "max_plans": 3, "time_limit": null,
+            "approximate": true, "playout": "spread", "workers": 1
+        });
+        let default = advise_json(&position, &options.to_string()).unwrap();
+        options["position_rollouts"] = json!(0);
+        assert_eq!(
+            default,
+            advise_json(&position, &options.to_string()).unwrap()
+        );
+        options["position_rollouts"] = json!(25);
+        let enabled = advise_json(&position, &options.to_string()).unwrap();
+        assert_eq!(
+            enabled,
+            advise_json(&position, &options.to_string()).unwrap()
+        );
+        let mut enabled: Value = serde_json::from_str(&enabled).unwrap();
+        let estimate = enabled.as_object_mut().unwrap().remove("position").unwrap();
+        assert_eq!(estimate["samples"], 25);
+        assert_eq!(estimate["approximate"], false);
+        let total = ["win", "draw", "loss"]
+            .iter()
+            .map(|key| estimate[key].as_f64().unwrap())
+            .sum::<f64>();
+        assert!((total - 1.0).abs() < 1e-12);
+        assert_eq!(enabled, serde_json::from_str::<Value>(&default).unwrap());
+    }
 
     #[test]
     fn plans_use_actual_staged_state_not_only_a_reconstructed_position() {

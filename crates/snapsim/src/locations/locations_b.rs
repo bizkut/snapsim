@@ -1,5 +1,5 @@
 use super::{LocationDef, location};
-use crate::game::Game;
+use crate::game::{Event, Game};
 
 pub const WASHINGTON_DC: LocationDef = LocationDef {
     ongoing: Some(washington_dc),
@@ -67,6 +67,7 @@ pub const PROSCENIUM: LocationDef = LocationDef {
 };
 pub const SHURIS_LAB: LocationDef = LocationDef {
     after_card_play: Some(shuris_lab),
+    on_event: Some(shuris_lab_resolved),
     ..location("ShurisLab", 0, 0, 1, false)
 };
 pub const ORCHIS_FORGE: LocationDef = LocationDef {
@@ -229,8 +230,26 @@ fn stark_tower(game: &mut Game<'_>, lane: usize) {
 fn proscenium(game: &mut Game<'_>, _: usize, card: usize) {
     game.add_power(card, 2, game.cards[card].owner);
 }
+// ShurisLabBehavior::DoublePower @ 0x7d7fb10 checks
+// Location::IsCardPlayedHereByPlayer on PostCardResolved, not the card's
+// current location. Keep the frozen reference's current-location hook.
 fn shuris_lab(game: &mut Game<'_>, _: usize, card: usize) {
-    game.add_power(card, game.cards[card].power(), game.cards[card].owner);
+    if crate::cards::reference_rules_enabled() {
+        game.add_power(card, game.cards[card].power(), game.cards[card].owner);
+    }
+}
+fn shuris_lab_resolved(game: &mut Game<'_>, lane: usize, event: Event) {
+    if crate::cards::reference_rules_enabled() {
+        return;
+    }
+    if let Event::CardResolved { card } = event
+        && game
+            .played_cards_at(game.cards[card].owner, lane)
+            .any(|id| id == card)
+    {
+        game.add_power(card, game.cards[card].power(), game.cards[card].owner);
+        game.ongoing();
+    }
 }
 fn orchis_forge(game: &mut Game<'_>, _: usize, card: usize) {
     let seat = game.cards[card].owner;

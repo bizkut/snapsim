@@ -33,6 +33,7 @@ fn play(game: &mut Game<'_>, name: &str, seat: usize) -> usize {
     game.cards[id].lane = Some(0);
     game.cards[id].turn_played = game.turn;
     game.lanes[0].cards.push(id);
+    game.played[seat].push((id, 0));
     game.reveal(id);
     id
 }
@@ -45,6 +46,29 @@ fn proscenium_and_shuri_trigger_at_reveal() {
     g.lanes[0].def = locations::get("ShurisLab").unwrap();
     let card = play(&mut g, "MistyKnight", 0);
     assert_eq!(g.cards[card].permanent, 6);
+}
+
+#[test]
+fn shuris_lab_uses_play_location_when_spider_island_moves_a_card() {
+    let mut rng = PythonRandom::seed(2);
+    let mut g = game(&mut rng, "ShurisLab");
+    g.lanes[1].def = locations::get("SpiderIsland").unwrap();
+    g.lanes[1].revealed = true;
+    for _ in 0..4 {
+        let blocker = g.create_card("Rock", 0);
+        assert!(g.add_card(blocker, 2, 0, false));
+    }
+    let card = g.create_card("KaZar", 0);
+    assert!(g.add_card(card, 1, 0, false));
+    g.cards[card].revealed = false;
+    g.cards[card].turn_played = g.turn;
+    g.played[0].push((card, 1));
+    g.reveal(card);
+    assert_eq!(g.cards[card].lane, Some(0));
+    assert_eq!(g.cards[card].permanent, 6);
+
+    let card = play(&mut g, "MistyKnight", 0);
+    assert_eq!(g.cards[card].permanent, 7); // 3 base + (3 base + KaZar's 1)
 }
 #[test]
 fn mosh_pit_and_stark_tower_respect_order_and_turn() {
