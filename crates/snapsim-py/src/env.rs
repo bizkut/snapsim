@@ -96,9 +96,8 @@ fn sample_position_masks(
     .map_err(error)
 }
 
-/// Check a SNAP snapshot for hidden-state mask admission. SNAP does not export
-/// complete copied abilities, attachments, or persistent effects, so those
-/// inputs remain unknown even when the visible lanes and card pool are known.
+/// Check a SNAP snapshot for hidden-state mask admission. Effect inventories
+/// are known only when the restored position proves them complete.
 #[pyfunction(signature = (locations, hidden_cards, visible_cards, provenance=None, position=None))]
 fn snapshot_hidden_mask_gate(
     locations: Vec<String>,
@@ -126,15 +125,43 @@ fn snapshot_hidden_mask_gate(
         active_locations: Known::Known(&locations),
         hidden_cards: Known::Known(&hidden_cards),
         visible_cards: Known::Known(&visible_cards),
-        copied_abilities: Known::Unknown,
-        attached_abilities: Known::Unknown,
-        card_cost_effects: Known::Unknown,
+        copied_abilities: if position
+            .as_ref()
+            .is_some_and(|p| p.copied_abilities_provenance_known())
+        {
+            Known::Known(&[])
+        } else {
+            Known::Unknown
+        },
+        attached_abilities: if position
+            .as_ref()
+            .is_some_and(|p| p.attached_abilities_provenance_known())
+        {
+            Known::Known(&[])
+        } else {
+            Known::Unknown
+        },
+        card_cost_effects: if position
+            .as_ref()
+            .is_some_and(|p| p.card_cost_effects_provenance_known())
+        {
+            Known::Known(&[])
+        } else {
+            Known::Unknown
+        },
         player_cost_effects: if player_cost_known {
             Known::Known(&[])
         } else {
             Known::Unknown
         },
-        state_effects: Known::Unknown,
+        state_effects: if position
+            .as_ref()
+            .is_some_and(|p| p.state_effects_provenance_known())
+        {
+            Known::Known(&[])
+        } else {
+            Known::Unknown
+        },
         move_source_provenance: if position
             .as_ref()
             .is_some_and(|p| p.move_source_provenance_known())

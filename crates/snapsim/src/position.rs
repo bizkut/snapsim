@@ -663,6 +663,181 @@ pub struct Position {
 }
 
 impl Position {
+    // This is deliberately an allowlist: a card not reviewed for text copying
+    // cannot prove that its unexported copy pool is empty.
+    fn plain_card_copy_pool_known(id: &str) -> bool {
+        matches!(
+            id,
+            "AntMan"
+                | "Hawkeye"
+                | "KaZar"
+                | "Klaw"
+                | "SquirrelGirl"
+                | "JessicaJones"
+                | "Medusa"
+                | "Squirrel"
+                | "Wolfsbane"
+                | "Bishop"
+                | "Groot"
+                | "Ironheart"
+                | "Starlord"
+                | "Nightcrawler"
+                | "Ninja"
+                | "Cyclops"
+                | "Hulk"
+                | "MistyKnight"
+                | "Shocker"
+                | "CaptainAmerica"
+                | "MrFantastic"
+                | "BlueMarvel"
+                | "IronMan"
+                | "Punisher"
+        )
+    }
+
+    fn legality_inventory(&self) -> Option<&Provenance> {
+        let provenance = self.provenance.as_ref()?;
+        let ledger = provenance.ledger.as_ref()?;
+        if provenance.schema_version != 2
+            || !provenance.entities_complete
+            || !ledger.complete_for_legality
+            || !ledger.match_start_seen
+        {
+            return None;
+        }
+        // The completeness flag must correspond to the actual visible cards
+        // in the restored position, not just an arbitrary subset of entities.
+        for card in self
+            .hand
+            .iter()
+            .chain(self.locations.iter().flat_map(|lane| {
+                lane.mine
+                    .iter()
+                    .chain(lane.theirs.iter().filter(|card| card.revealed))
+            }))
+        {
+            let id = card.entity_id?;
+            if provenance
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == "card"
+                        && entity.entity_id == id
+                        && entity.card_id.as_deref() == Some(card.id.as_str())
+                })
+                .count()
+                != 1
+            {
+                return None;
+            }
+        }
+        Some(provenance)
+    }
+
+    /// True only when no copied abilities are present or hidden in a copy pool.
+    pub fn copied_abilities_provenance_known(&self) -> bool {
+        let Some(provenance) = self.legality_inventory() else {
+            return false;
+        };
+        provenance
+            .entities
+            .iter()
+            .filter(|e| e.kind == "card")
+            .all(|entity| {
+                let Some(id) = entity.card_id.as_deref() else {
+                    return false;
+                };
+                Self::plain_card_copy_pool_known(id)
+                    && entity.abilities.complete
+                    && entity.abilities.items.iter().all(|ability| {
+                        ability.owner_def_type == "Card"
+                            && ability.owner_def_id == id
+                            && ability
+                                .origin_entity_id
+                                .is_none_or(|origin| origin == entity.entity_id)
+                    })
+            })
+            && provenance
+                .ledger
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| {
+                    item.active == Some(false)
+                        || item.legality_relevant == Some(false)
+                        || item.kind != "ability"
+                        || !provenance
+                            .entities
+                            .iter()
+                            .any(|e| e.kind == "card" && e.entity_id == item.target_entity_id)
+                })
+    }
+
+    /// Attached abilities use the same foreign-ability inventory as copies.
+    pub fn attached_abilities_provenance_known(&self) -> bool {
+        self.copied_abilities_provenance_known()
+    }
+
+    /// No cost modifier is assumed representable merely from its current value.
+    pub fn card_cost_effects_provenance_known(&self) -> bool {
+        let Some(provenance) = self.legality_inventory() else {
+            return false;
+        };
+        provenance
+            .entities
+            .iter()
+            .filter(|e| e.kind == "card")
+            .all(|entity| {
+                entity.modifiers.as_ref().is_some_and(|group| {
+                    group.complete
+                        && group
+                            .items
+                            .iter()
+                            .all(|item| item.kind == "CardPowerModifier")
+                })
+            })
+            && provenance
+                .ledger
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| {
+                    item.active == Some(false)
+                        || item.legality_relevant == Some(false)
+                        || item.kind != "cost"
+                })
+    }
+
+    /// A state effect is empty only when all state-bearing inventories are empty.
+    pub fn state_effects_provenance_known(&self) -> bool {
+        let Some(provenance) = self.legality_inventory() else {
+            return false;
+        };
+        provenance.entities.iter().all(|entity| {
+            entity.abilities.complete
+                && entity.movable_components.complete
+                && entity.movable_components.items.is_empty()
+                && (entity.kind != "card"
+                    || entity
+                        .play_requirements
+                        .as_ref()
+                        .is_some_and(|group| group.complete && group.items.is_empty()))
+        }) && provenance
+            .ledger
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .all(|item| {
+                item.active == Some(false)
+                    || item.legality_relevant == Some(false)
+                    || matches!(item.kind.as_str(), "power" | "cost")
+                    || self.black_swan_effect(item).is_some()
+            })
+    }
+
     /// BlackSwanBehavior::AddSetCostAbilityToPlayer 0x7e7386c and its
     /// static constructor 0x7e74384 create BlackSwanOngoing, lifetime
     /// NextTurn, with the source card and current turn. SetCardCost
@@ -2681,6 +2856,76 @@ mod observed_history_tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn empty_legality_inventories_require_complete_schema_two_evidence() {
+        let empty = json!({"complete":true,"reasons":[],"items":[]});
+        let mut position = base();
+        position.hand.push(CardRef {
+            id: "Hawkeye".into(),
+            entity_id: Some(42),
+            ..Default::default()
+        });
+        let fixture = json!({
+            "schema_version":2,"entities_complete":true,
+            "entities":[{"kind":"card","entity_id":42,"card_id":"Hawkeye",
+                "lane_index":null,"abilities":empty,"modifiers":empty,
+                "movable_components":empty,"play_requirements":empty}],
+            "ledger":{"complete":true,"complete_for_legality":true,
+                "match_start_seen":true,"reasons":[],"items":[]}
+        });
+        let known = |value: &Value| {
+            let mut p = position.clone();
+            p.provenance = Some(serde_json::from_value(value.clone()).unwrap());
+            [
+                p.copied_abilities_provenance_known(),
+                p.attached_abilities_provenance_known(),
+                p.card_cost_effects_provenance_known(),
+                p.state_effects_provenance_known(),
+            ]
+        };
+        assert_eq!(known(&fixture), [true; 4]);
+        for pointer in [
+            "/entities_complete",
+            "/ledger/complete_for_legality",
+            "/ledger/match_start_seen",
+        ] {
+            let mut v = fixture.clone();
+            *v.pointer_mut(pointer).unwrap() = json!(false);
+            assert_eq!(known(&v), [false; 4]);
+        }
+        for (group, expected) in [
+            ("abilities", [false, false, true, false]),
+            ("modifiers", [true, true, false, true]),
+            ("movable_components", [true, true, true, false]),
+            ("play_requirements", [true, true, true, false]),
+        ] {
+            let mut v = fixture.clone();
+            v["entities"][0][group]["complete"] = json!(false);
+            assert_eq!(known(&v), expected);
+        }
+        let mut v = fixture.clone();
+        v["entities"][0]["abilities"]["items"] = json!([{
+            "ability_def_id":"Foreign", "owner_def_type":"Card",
+            "owner_def_id":"Other", "index":0, "origin_entity_id":99
+        }]);
+        assert_eq!(known(&v), [false, false, true, true]);
+        let mut v = fixture.clone();
+        v["ledger"]["items"] = json!([{
+            "effect_key":"x","kind":"cost","target_entity_id":42,
+            "creator_entity_id":null,"creator_def_id":"","created_turn":null,
+            "expiry_turn":null,"attribution":"ambiguous","reasons":[],
+            "legality_relevant":true,"active":true
+        }]);
+        assert_eq!(known(&v), [true, true, false, true]);
+        let mut v = fixture.clone();
+        v["entities"][0]["card_id"] = json!("Morph");
+        let mut morph = position.clone();
+        morph.hand[0].id = "Morph".into();
+        morph.provenance = Some(serde_json::from_value(v).unwrap());
+        assert!(!morph.copied_abilities_provenance_known());
+        assert!(!morph.attached_abilities_provenance_known());
+    }
+
     fn intrinsic_fixture(id: &str, moves: &[u8], active: bool) -> Position {
         let mut position = base();
         position.locations[0].mine.push(CardRef {

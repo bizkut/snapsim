@@ -180,6 +180,33 @@ class ConverterTests(unittest.TestCase):
         del position["history"]["action_completeness"]["local"]["2"]
         self.assertIn("move source provenance is unknown", gate())
 
+    def test_snapshot_gate_uses_complete_empty_inventories(self):
+        import copy
+        import snapsim_py as sim
+
+        empty = {"complete": True, "reasons": [], "items": []}
+        entity = {"kind": "card", "entity_id": 42, "card_id": "Hawkeye",
+                  "lane_index": None, **{name: copy.deepcopy(empty) for name in
+                  ("abilities", "modifiers", "movable_components", "play_requirements")}}
+        provenance = {"schema_version": 2, "entities_complete": True, "entities": [entity],
+                      "ledger": {"complete": True, "complete_for_legality": True,
+                                 "match_start_seen": True, "reasons": [], "items": []}}
+        position = {"turn": 1, "energy": 1, "hand": [{"id": "Hawkeye", "entity_id": 42}],
+                    "deck": [], "locations": [{"id": None, "mine": [], "theirs": []}] * 3,
+                    "opponent": {"hand": 0, "deck": 0}, "provenance": provenance}
+        categories = {"copied ability pool is unknown", "attached abilities are unknown",
+                      "card cost effects are unknown", "player/global effects are unknown"}
+        def gate():
+            return set(sim.snapshot_hidden_mask_gate([], [], [], json.dumps(provenance),
+                                                     json.dumps(position)))
+        self.assertFalse(categories & gate())
+        provenance["entities_complete"] = False
+        self.assertEqual(categories & gate(), categories)
+        provenance["entities_complete"] = True
+        entity["card_id"] = position["hand"][0]["id"] = "Morph"
+        self.assertIn("copied ability pool is unknown", gate())
+        self.assertIn("attached abilities are unknown", gate())
+
 
 if __name__ == "__main__":
     unittest.main()
