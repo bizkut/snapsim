@@ -9,7 +9,7 @@ PY=${SNAPSIM_PYTHON:?Set SNAPSIM_PYTHON to the Python interpreter with reference
 RUNS=${SNAPSIM_RUNS:?Set SNAPSIM_RUNS to the recordings directory}
 SNAPS=${SNAPSIM_SNAPSHOTS:?Set SNAPSIM_SNAPSHOTS to the snapshots directory}
 ORACLES=${SNAPSIM_ORACLES:?Set SNAPSIM_ORACLES to the oracle directory}
-export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target-gates}
+export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target-gates}
 export SNAPSIM_REFERENCE_POOL=1 SNAPSIM_REFERENCE_RULES=1
 T=$CARGO_TARGET_DIR/release
 cd "$ROOT"

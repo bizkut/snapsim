@@ -59,6 +59,72 @@ fn observation(obs: &Observation) -> Vec<i32> {
     v
 }
 
+/// Diagnostic masks only: the caller must establish phase, coverage, stake
+/// provenance and hidden-dependence before treating any mask as a label.
+#[pyfunction]
+fn sample_position_masks(
+    position_json: &str,
+    current: u32,
+    next: u32,
+    maximum: u32,
+    can_raise: bool,
+    snapped: (bool, bool),
+) -> PyResult<String> {
+    let position: snapsim::position::Position =
+        serde_json::from_str(position_json).map_err(error)?;
+    let stakes = snapsim::game::Stakes {
+        current,
+        next,
+        maximum,
+        can_raise,
+        player_multiplier: [1; 2],
+        end_game_multiplier: 1,
+        game_multiplier: 1,
+        snapped: [snapped.0, snapped.1],
+        last_raiser: None,
+        pending_retreat: [false; 2],
+    };
+    let mut masks = Vec::with_capacity(8);
+    for seed in 0..8 {
+        let env = Env::from_sampled_position(&position, stakes.clone(), seed).map_err(error)?;
+        masks.push(env.legal_mask(0).map_err(error)?.to_vec());
+    }
+    serde_json::to_string(&serde_json::json!({
+        "coverage": snapsim::coverage::coverage(&position),
+        "masks": masks,
+    }))
+    .map_err(error)
+}
+
+/// Check a SNAP snapshot for hidden-state mask admission. SNAP does not export
+/// complete copied abilities, attachments, or persistent effects, so those
+/// inputs remain unknown even when the visible lanes and card pool are known.
+#[pyfunction]
+fn snapshot_hidden_mask_gate(
+    locations: Vec<String>,
+    hidden_cards: Vec<String>,
+    visible_cards: Vec<String>,
+) -> Vec<String> {
+    use snapsim::hidden_legality::{Inputs, Known, Result, check_hidden_pool};
+    let locations: Vec<&str> = locations.iter().map(String::as_str).collect();
+    let hidden_cards: Vec<&str> = hidden_cards.iter().map(String::as_str).collect();
+    let visible_cards: Vec<&str> = visible_cards.iter().map(String::as_str).collect();
+    let inputs = Inputs {
+        active_locations: Known::Known(&locations),
+        hidden_cards: Known::Known(&hidden_cards),
+        visible_cards: Known::Known(&visible_cards),
+        copied_abilities: Known::Unknown,
+        attached_abilities: Known::Unknown,
+        card_cost_effects: Known::Unknown,
+        player_cost_effects: Known::Unknown,
+        state_effects: Known::Unknown,
+    };
+    match check_hidden_pool(&inputs) {
+        Result::Valid => Vec::new(),
+        Result::Invalid { reasons } => reasons,
+    }
+}
+
 #[pyclass]
 pub struct VecEnv {
     envs: Mutex<Vec<Env>>,
@@ -241,5 +307,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<VecEnv>()?;
     module.add("ENV_OBS_SIZE", OBS_SIZE)?;
     module.add("ENV_ACTION_COUNT", ACTION_COUNT)?;
-    module.add("ENV_NOOP", NOOP)
+    module.add("ENV_NOOP", NOOP)?;
+    module.add_function(wrap_pyfunction!(sample_position_masks, module)?)?;
+    module.add_function(wrap_pyfunction!(snapshot_hidden_mask_gate, module)?)
 }

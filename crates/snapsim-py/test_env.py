@@ -56,6 +56,27 @@ def play(ds, seeds, threads):
 
 
 class VectorEnvTests(unittest.TestCase):
+    def test_sampled_position_masks_are_diagnostic(self):
+        position = {
+            "turn": 1, "energy": 1,
+            "hand": [{"id": "AntMan", "cost": 1, "power": 1}],
+            "deck": [], "deck_count": 0,
+            "locations": [{"id": "Mojoworld", "mine": [], "theirs": []},
+                          {"id": None, "mine": [], "theirs": []},
+                          {"id": None, "mine": [], "theirs": []}],
+            "opponent": {"hand": 3, "deck": 9},
+        }
+        result = json.loads(sim.sample_position_masks(
+            json.dumps(position), 1, 1, 8, True, (False, False)))
+        self.assertEqual(len(result["masks"]), 8)
+        self.assertTrue(all(len(mask) == sim.ENV_ACTION_COUNT for mask in result["masks"]))
+        self.assertTrue(all(mask[69] for mask in result["masks"]))
+        self.assertIn("coverage", result)
+
+    def test_hidden_mask_gate_rejects_missing_provenance(self):
+        reasons = sim.snapshot_hidden_mask_gate([], [], [])
+        self.assertTrue(any("unknown" in reason for reason in reasons))
+
     def test_shapes_and_rejections(self):
         d = decks()[0]
         env = sim.VecEnv([[d, d]], [5])

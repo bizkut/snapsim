@@ -103,7 +103,10 @@ impl Game<'_> {
             }
             let mut effect = self.players[owner].pending_effects.remove(i);
             let fired = self
-                .counted_trigger(|game| (effect.apply)(game, &mut effect, Some(card)))
+                .counted_trigger(|game| {
+                    game.record_card_hook(game.cards[effect.source].def.id, "pending_effect");
+                    (effect.apply)(game, &mut effect, Some(card))
+                })
                 .is_some();
             let source = effect.source;
             self.players[owner].pending_effects.insert(i, effect);
@@ -139,7 +142,11 @@ impl Game<'_> {
                 });
             if let Some(token) = token {
                 if let Some(hook) = self.cards[token].def.reveal {
-                    let _ = self.counted_trigger(|game| hook(game, source));
+                    let def_id = self.cards[token].def.id;
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(def_id, "reveal");
+                        hook(game, source)
+                    });
                 }
                 self.finish_creation_zone(token, false, owner);
                 self.push_banished(owner, token);

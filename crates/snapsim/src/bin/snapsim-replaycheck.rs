@@ -1,10 +1,13 @@
 //! Check visible SNAP turn resolutions in JSONL recordings.
-use snapsim::replay::{check_file, report::Report};
+use snapsim::replay::{
+    check_file, check_file_with_coverage, coverage::CoverageReport, report::Report,
+};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: snapsim-replaycheck [-h] [--seeds N] FILE [FILE ...]";
+const USAGE: &str =
+    "usage: snapsim-replaycheck [-h] [--seeds N] [--coverage-json PATH] FILE [FILE ...]";
 
 fn usage_error(message: &str) -> ExitCode {
     eprintln!("{USAGE}\nsnapsim-replaycheck: error: {message}");
@@ -73,6 +76,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let mut files = Vec::new();
     let mut seeds = 128_i128;
+    let mut coverage_path: Option<PathBuf> = None;
     let mut positional_only = false;
     let mut positional_closed = false;
     let mut unknown = Vec::new();
@@ -84,12 +88,24 @@ fn main() -> ExitCode {
         }
         if !positional_only && (text == "-h" || text == "--help") {
             println!(
-                "{USAGE}\n\nCheck visible SNAP turn resolutions: python replaycheck.py FILE... [--seeds\nN].\n\npositional arguments:\n  FILE\n\noptions:\n  -h, --help  show this help message and exit\n  --seeds N"
+                "{USAGE}\n\nCheck visible SNAP turn resolutions.\n\npositional arguments:\n  FILE\n\noptions:\n  -h, --help           show this help message and exit\n  --seeds N            number of simulation seeds\n  --coverage-json PATH write per-definition evidence as JSON"
             );
             return ExitCode::SUCCESS;
         }
         let mut parts = text.splitn(2, '=');
         let name = parts.next().unwrap_or("");
+        if !positional_only && name == "--coverage-json" {
+            positional_closed |= !files.is_empty();
+            let value = match parts.next() {
+                Some(value) => PathBuf::from(value),
+                None => match args.next() {
+                    Some(value) => PathBuf::from(value),
+                    None => return usage_error("argument --coverage-json: expected one argument"),
+                },
+            };
+            coverage_path = Some(value);
+            continue;
+        }
         let seed_flag = !positional_only && name.starts_with("--s") && "--seeds".starts_with(name);
         if seed_flag {
             positional_closed |= !files.is_empty();
@@ -144,15 +160,25 @@ fn main() -> ExitCode {
     let stdout = io::stdout();
     let mut output = stdout.lock();
     let mut report = Report::default();
+    let mut coverage = coverage_path.as_ref().map(|_| CoverageReport::default());
+    let mut rejected = false;
     for path in files {
         let label = path_display(&path);
-        let rows = match check_file(&path, seeds) {
+        let rows = match if coverage.is_some() {
+            check_file_with_coverage(&path, seeds)
+        } else {
+            check_file(&path, seeds)
+        } {
             Ok(rows) => rows,
             Err(error) => {
                 eprintln!("{label}: {error}");
-                return ExitCode::from(2);
+                rejected = true;
+                continue;
             }
         };
+        if let Some(coverage) = &mut coverage {
+            coverage.add(&rows);
+        }
         if let Err(error) = report
             .file(&mut output, &label, &rows)
             .and_then(|()| output.flush())
@@ -164,6 +190,18 @@ fn main() -> ExitCode {
     if let Err(error) = report.finish(&mut output) {
         eprintln!("{error}");
         return ExitCode::FAILURE;
+    }
+    if let Some((path, coverage)) = coverage_path.zip(coverage) {
+        let result = std::fs::File::create(path).and_then(|file| {
+            serde_json::to_writer_pretty(file, &coverage).map_err(io::Error::other)
+        });
+        if let Err(error) = result {
+            eprintln!("writing coverage: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if rejected {
+        return ExitCode::from(2);
     }
     if report.has_inconsistent() {
         ExitCode::FAILURE

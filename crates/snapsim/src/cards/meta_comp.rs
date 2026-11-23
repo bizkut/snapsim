@@ -173,7 +173,7 @@ impl Game<'_> {
         self.cards[receiver].composed_abilities.push(ability);
         self.ongoing();
         self.execute_ability(receiver, instance, |game, card| {
-            game.trigger_reveal_hook(card, hook)
+            game.trigger_reveal_hook(card, hook, def.id)
         });
         self.cards[receiver]
             .composed_abilities

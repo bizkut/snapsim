@@ -427,13 +427,24 @@ impl Game<'_> {
             .composed_abilities
             .iter()
             .filter(|ability| ability.kind == AbilityKind::Activate)
-            .filter_map(|ability| ability.def.on_activate.map(|hook| (ability.id, hook)))
+            .filter_map(|ability| {
+                ability
+                    .def
+                    .on_activate
+                    .map(|hook| (ability.id, ability.def.id, hook))
+            })
             .collect();
         if let Some(hook) = default.on_activate {
-            self.execute_default_resolve(card, default.id != "Jocasta", hook);
+            self.execute_default_resolve(card, default.id != "Jocasta", |game, card| {
+                game.record_card_hook(default.id, "on_activate");
+                hook(game, card);
+            });
         }
-        for (id, hook) in attached {
-            self.execute_ability(card, id, hook);
+        for (id, def_id, hook) in attached {
+            self.execute_ability(card, id, |game, card| {
+                game.record_card_hook(def_id, "on_activate");
+                hook(game, card);
+            });
         }
     }
 
@@ -465,6 +476,7 @@ impl Game<'_> {
                 ability.def.on_event.map(|hook| {
                     (
                         ability.id,
+                        ability.def.id,
                         hook,
                         ability.def.end_turn_trigger,
                         ability.hidden || ability.def.end_turn_trigger_hidden,
@@ -482,10 +494,13 @@ impl Game<'_> {
                 1
             };
             for _ in 0..repeats {
-                self.execute_default_ability(card, |game, card| hook(game, card, event));
+                self.execute_default_ability(card, |game, card| {
+                    game.record_card_hook(default.id, "on_event");
+                    hook(game, card, event);
+                });
             }
         }
-        for (id, hook, end_turn_trigger, hidden) in attached {
+        for (id, def_id, hook, end_turn_trigger, hidden) in attached {
             let repeats = if matches!(event, Event::TurnEnd)
                 && end_turn_trigger
                 && (!hidden || crate::cards::reference_rules_enabled())
@@ -495,7 +510,10 @@ impl Game<'_> {
                 1
             };
             for _ in 0..repeats {
-                self.execute_ability(card, id, |game, card| hook(game, card, event));
+                self.execute_ability(card, id, |game, card| {
+                    game.record_card_hook(def_id, "on_event");
+                    hook(game, card, event);
+                });
             }
         }
     }

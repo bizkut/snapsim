@@ -19,7 +19,10 @@ impl Game<'_> {
             if self.location_abilities_active(lane)
                 && let Some(hook) = self.lanes[lane].def.before_draw
                 && let Some(card) = self
-                    .counted_trigger(|game| hook(game, lane, seat))
+                    .counted_trigger(|game| {
+                        game.record_location_hook(lane, "before_draw");
+                        hook(game, lane, seat)
+                    })
                     .flatten()
             {
                 self.add_hand(seat, card, true);
@@ -53,7 +56,10 @@ impl Game<'_> {
             if self.location_abilities_active(lane)
                 && let Some(hook) = self.lanes[lane].def.before_draw
                 && let Some(replacement) = self
-                    .counted_trigger(|game| hook(game, lane, seat))
+                    .counted_trigger(|game| {
+                        game.record_location_hook(lane, "before_draw");
+                        hook(game, lane, seat)
+                    })
                     .flatten()
             {
                 self.add_hand(seat, replacement, true);

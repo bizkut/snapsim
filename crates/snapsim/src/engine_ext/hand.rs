@@ -53,7 +53,7 @@ impl Game<'_> {
             let instance = ability.id;
             self.cards[source].composed_abilities.push(ability);
             self.execute_ability(source, instance, |game, card| {
-                game.trigger_reveal_hook(card, hook);
+                game.trigger_reveal_hook(card, hook, def.id);
             });
             self.cards[source]
                 .composed_abilities
@@ -129,10 +129,10 @@ impl Game<'_> {
             || !self.has_space(lane, owner, 0)
             || self.lane_locked(lane)
             || (self.location_abilities_active(lane)
-                && self.lanes[lane]
-                    .def
-                    .allows_addition
-                    .is_some_and(|test| !test(self, lane, card, lane, owner)))
+                && self.lanes[lane].def.allows_addition.is_some_and(|test| {
+                    self.record_location_hook(lane, "allows_addition");
+                    !test(self, lane, card, lane, owner)
+                }))
         {
             return false;
         }

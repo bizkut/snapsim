@@ -651,6 +651,15 @@ pub struct Difference {
     pub lanes: Vec<usize>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ObservedEvidence {
+    pub present_cards: std::collections::BTreeSet<String>,
+    pub present_locations: std::collections::BTreeSet<String>,
+    pub played_cards: std::collections::BTreeMap<String, usize>,
+    pub updater_cards: std::collections::BTreeSet<String>,
+    pub updater_locations: std::collections::BTreeSet<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ResultRow {
     pub match_number: usize,
@@ -661,6 +670,8 @@ pub struct ResultRow {
     pub differences: Vec<Difference>,
     pub cards: Vec<String>,
     pub locations: Vec<String>,
+    pub(crate) hooks: Option<crate::game::ReplayHooks>,
+    pub(crate) observed: Option<ObservedEvidence>,
 }
 
 #[derive(Default)]
@@ -673,10 +684,11 @@ struct History {
 }
 
 mod check;
+pub mod coverage;
 mod json_error;
 pub mod report;
 mod simulate;
-pub use check::{check_file, check_observations};
+pub use check::{check_file, check_file_with_coverage, check_observations};
 
 #[cfg(test)]
 mod tests {

@@ -63,6 +63,86 @@ Stepping releases the GIL and parallelises across games; seed trajectories do
 not depend on the thread count. NumPy is required at runtime; the extension
 retains its Python 3.9 stable ABI.
 
+`Env::from_sampled_position` constructs a planning view from a position and
+explicit stakes, sampling unobserved cards and locations. It does not restore
+ordered phases or pending actions. The Python
+`sample_position_masks(position_json, current, next, maximum, can_raise, snapped)`
+returns coverage and eight diagnostic seat-zero masks, not recorded data or
+validated legality labels. Agreement across samples is not proof of invariance:
+callers must independently establish phase and stake state, reconstruction
+coverage and the absence of hidden-state reads in every applicable legality
+hook before using a mask for training.
+
+### Visible-recording trajectories
+
+`crates/snapsim-py/trajectory_convert.py` and its `convert(paths, output_dir,
+press_dir=None)` function accept SNAP observation JSONL paths and optional
+matching press logs. Install NumPy in the Python environment. The Snapper-Assist
+checkout also provides `scripts/convert_trajectories.py`. For example:
+
+```sh
+python crates/snapsim-py/trajectory_convert.py --output-dir "$WORK/datasets/trajectories" "$RECORDING"
+```
+
+Pass only observation recordings, not press logs, as positional inputs; a
+matching `<recording-stem>.log.jsonl` is loaded separately if present. Each
+`trajectory-NNNNNN.npz` holds one match segment, and `report.json` describes
+counts and skipped reasons. The output is private data and must not be
+committed. Only the recording player's actions are extracted; opponent actions
+are observable only when revealed. Sparse captures cannot establish every
+input, ordering, activation, retreat, or match result, so ambiguous cases are
+skipped rather than guessed.
+
+Shard schema (one row per extracted action):
+
+* `observation`: `int32[N,4096]`, the VecEnv seat-relative encoding described
+  above; it contains no opponent hidden identities.
+* `action`: `int16[N]`, the Env action ID. `turn`: `int16[N]`.
+* `legal_mask`: `uint8[N,73]`. Its bits 0–69 are usable only where
+  `mask_valid` is true; bits 70–72 only where `stake_mask_valid` is true.
+  `mask_reason` records why a mask was rejected, and `mask_basis` names the
+  proof for an accepted mask (`static_visible_only`).
+  `mask_blockers` is a comma-separated set of independently failing gates:
+  `opponent_hidden`, `copied_or_attached`, `effect_provenance`, `visible_hook`,
+  and `location_hook`.
+  After `--remask`, `mask_pool` records `recruit` or `full`; the report lists
+  hidden-card blockers. Incomplete history falls back to the full pool.
+* `snap_flags_known` identifies whether both encoded snap flags are known.
+  Unknown flags are neutral zeros, not observed false values; consumers must
+  use this boolean. `snap_flags_basis` is `fields`, `no_raise_proof`,
+  `press_log`, `mode_rule`, or `unknown`. `mode_rule` follows
+  `compare::stake_can_raise`, whose Recruit setting was motivated by seven
+  recordings (702 frames) without a projected raise; this evidence is a
+  mode-model assumption, not an independently complete client proof.
+* `match_outcome` and `turn_outcome` are signed `int8`; `cube_result` is
+  signed `int16`. Their corresponding `_valid` boolean arrays distinguish
+  unknown from zero. A turn result is currently available only for an
+  observed, non-conceded final-turn result.
+* `source_recording`, `source_stream`, `source_sequence`, and `source_line`
+  locate the original frame for a future mask-only pass.
+
+The initial conversion marks every mask invalid. Remasking separately checks
+opponent-hidden sources and recorded-seat/public effects. SNAP does not export
+complete copied/attached abilities or persistent card/player effects, and
+visible-card and location hooks may be unreviewed. Proven complete provenance
+for those effects, together with reviewed hooks and coverage, would permit
+admission. Do not treat a zero-filled invalid mask as a legal-action label. Once
+the Python extension is built, `--remask` reopens the supplied recordings and
+re-evaluates only mask admission and legality; it does not regenerate actions.
+An accepted mask requires the static hidden-state gate, restored-position
+coverage, and eight matching diagnostic samples. The sample agreement is a
+consistency check, not the proof. Stake masks remain separately invalid when
+stake provenance is insufficient.
+
+```python
+import numpy as np
+with np.load("trajectory-000001.npz", allow_pickle=False) as shard:
+    usable = shard["mask_valid"]
+    observations = shard["observation"][usable]
+    actions = shard["action"][usable]
+    masks = shard["legal_mask"][usable]
+```
+
 Write work files (benchmarks, replay reports, recorded cases) under a persistent folder such as `~/.cache/snapsim-work`, not `/tmp`. The examples below use `WORK="${WORK:-$HOME/.cache/snapsim-work}"`.
 
 ## Environment
@@ -92,6 +172,8 @@ Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim -
 * `benchmark --mode recruit` or `benchmark --deck-file FILE` compares controllers. It accepts `--games`, `--seed`, `--rollouts`, and `--opponent`.
 * Plans include the client's player actions: playing a hand card, moving a movable card and activating an Activate ability. `--plays-only` (on `position`, `compare`, `benchmark` and `deckbuild`) restricts plans to plays, as the frozen reference did; the parity gates use it.
 * The game-log replay checker is the separate binary `snapsim-replaycheck FILE...` (`cargo build --release -p snapsim --bin snapsim-replaycheck`). It replays recorded turns and reports each as consistent, inconsistent or not checkable; use it to validate rule changes against real matches. A turn with a previously revealed Nico Minoru or Maverick and a subsequent play by their owner is not checkable because their pending trigger is not recorded. A turn with Nico resolving before another play by her owner is also not checkable because her prepared spell is hidden. An opponent play after Ta Lo has potentially buffed their hidden hand is not checkable because the affected card and its power are not recorded.
+  Pass `--coverage-json PATH` before the recordings to write per-released-card and per-location evidence. Consistent hook counts identify dispatches in a simulation that matched the observed turn, not proof that each hook produced a visible effect. Inconsistent counts use the closest trial and are not verified. Recorded stat-update source IDs are separate corroborating evidence; presence and recovered plays do not establish that an ability fired. Uncheckable turns have unknown simulated hooks, so the report separates observed update sources and presence-based reasons rather than attributing executions to them. Some dispatched hooks can evaluate a condition and do nothing. Local recordings and generated reports may contain private match data.
+  To avoid attributing sampled hidden cards to the recording, hook totals include only definitions visible on the board/location or named by an observed new stat update during the turn; this conservative filter can omit genuine hand/deck and copied-ability hooks. Stat-update evidence requires the same visible entity and complete ledgers both before and after the turn. Recovered plays require enough recorded staging information; missing observations are not treated as zero plays.
   Collapsed Mine turns with visible Rocks are not checkable because recordings do not fully expose moves and activations needed to determine whether a player skipped. Vormir's per-player consumed triggers are likewise not present in live positions; coverage marks Vormir and Collapsed Mine state approximate.
   Time Theater's per-player draw-use state and Quantum Realm's historical base-power assignments may be absent from observations. When the missing state can affect a turn, replay checking marks it not checkable and strict advice reports the missing state; approximate advice remains available.
   The Abbey and The Raft have a shared one-shot location trigger whose consumed state is not exported. Previously revealed copies therefore decline strict advice and replay checking rather than assuming it is unused.

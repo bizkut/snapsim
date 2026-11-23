@@ -95,6 +95,38 @@ pub struct PhaseStep {
 }
 
 impl Env {
+    /// Construct a sampled local-seat planning view from an observed position.
+    ///
+    /// This is not an exact restore: hidden cards and locations are sampled,
+    /// ordered staging is not reconstructed, and pending actions are absent.
+    /// Callers must establish phase, stakes and coverage independently and
+    /// prove that legality does not depend on hidden data before using a mask.
+    pub fn from_sampled_position(
+        position: &crate::position::Position,
+        stakes: Stakes,
+        seed: i128,
+    ) -> Result<Self, String> {
+        let mut rng = PythonRandom::seed(seed);
+        let mut game = crate::position::build_game(position, &mut rng)?.into_owned();
+        game.stakes = Some(stakes);
+        let priority = game.action_priority(None);
+        let views = [game.fork_owned(), game.fork_owned()];
+        Ok(Self {
+            game,
+            views,
+            plans: Default::default(),
+            staging_actions: Vec::new(),
+            staged_counts: [0; 2],
+            ended: [false; 2],
+            priority,
+            staging_queue: Vec::new(),
+            queue_index: 0,
+            visible_actions: [0; 2],
+            pending_stakes: [None; 2],
+            outcome: None,
+        })
+    }
+
     pub fn reset(seed: i128, decks: [&[String]; 2], recruit: bool) -> Result<Self, String> {
         let mut rng = PythonRandom::seed(seed);
         let locations = crate::position::all_locations(recruit);
@@ -612,6 +644,38 @@ mod tests {
                 .collect(),
         );
         decks
+    }
+
+    #[test]
+    fn restored_position_has_local_planning_mask() {
+        let position: crate::position::Position = serde_json::from_value(serde_json::json!({
+            "turn": 1, "energy": 1,
+            "hand": [{"id": "AntMan", "cost": 1, "power": 1}],
+            "deck": [], "deck_count": 0,
+            "locations": [
+                {"id": "Mojoworld", "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        }))
+        .unwrap();
+        let stakes = Stakes {
+            current: 1,
+            next: 1,
+            maximum: 8,
+            can_raise: true,
+            player_multiplier: [1; 2],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
+        };
+        let env = Env::from_sampled_position(&position, stakes, 1).unwrap();
+        assert!(env.seats_due()[0]);
+        assert_eq!(env.observation(0).unwrap().hand[0].id, "AntMan");
+        assert!(env.legal_mask(0).unwrap()[END_TURN]);
     }
 
     fn trace(deck: &[String], seed: i128, check_mask: bool, recruit: bool) -> Vec<String> {

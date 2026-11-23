@@ -83,6 +83,8 @@ struct ScheduledOngoing {
     card: usize,
     instance: Option<u64>,
     hook: ScheduledOngoingHook,
+    def_id: &'static str,
+    kind: &'static str,
     runs: usize,
     hand: bool,
 }
@@ -1009,6 +1011,13 @@ impl<'a> std::ops::DerefMut for GameRandom<'a> {
     }
 }
 
+/// Hooks invoked by a replay trial, collected only when explicitly enabled.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ReplayHooks {
+    pub cards: std::collections::BTreeSet<(&'static str, &'static str)>,
+    pub locations: std::collections::BTreeSet<(&'static str, &'static str)>,
+}
+
 pub struct Game<'a> {
     pub cards: Vec<Card>,
     pub players: [Player; 2],
@@ -1042,6 +1051,7 @@ pub struct Game<'a> {
     pub(crate) score_overrides: [Option<i32>; 2],
     pub(crate) current_ongoing_source: Option<OngoingSource>,
     pub(crate) ability_call_depth: u8,
+    pub(crate) replay_hooks: Option<RefCell<ReplayHooks>>,
     pub(crate) merge_batches: Vec<Vec<usize>>,
     pub(crate) staging_order: Option<Vec<usize>>,
     pub rng: RefCell<GameRandom<'a>>,
@@ -1065,6 +1075,21 @@ static HAS_SPAWN_BLOCKERS: LazyLock<bool> =
     LazyLock::new(|| cards::registry().any(|entry| entry.blocks_spawns));
 
 impl<'a> Game<'a> {
+    pub(crate) fn record_card_hook(&self, id: &'static str, kind: &'static str) {
+        if let Some(hooks) = &self.replay_hooks {
+            hooks.borrow_mut().cards.insert((id, kind));
+        }
+    }
+
+    pub(crate) fn record_location_hook(&self, lane: usize, kind: &'static str) {
+        if let Some(hooks) = &self.replay_hooks {
+            hooks
+                .borrow_mut()
+                .locations
+                .insert((self.lanes[lane].def.id, kind));
+        }
+    }
+
     /// DefaultGameMode::HandleConcedeRequestInternal 0x7dd1bf4 rejects
     /// conceding while this player is the latest raiser on their snap turn.
     pub fn can_retreat_seat(&self, seat: usize, end_turn: bool) -> bool {
@@ -1083,6 +1108,7 @@ impl<'a> Game<'a> {
         Game {
             cards: self.cards.clone(),
             ability_call_depth: self.ability_call_depth,
+            replay_hooks: self.replay_hooks.clone(),
             players: self.players.clone(),
             human_seat: self.human_seat,
             lanes: self.lanes.clone(),
@@ -1192,7 +1218,10 @@ impl<'a> Game<'a> {
                 if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.on_event
                 {
-                    let _ = self.counted_trigger(|game| hook(game, lane, event));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "on_event");
+                        hook(game, lane, event)
+                    });
                 }
             }
         }
@@ -1278,7 +1307,10 @@ impl<'a> Game<'a> {
                 if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.on_event
                 {
-                    let _ = self.counted_trigger(|game| hook(game, lane, event));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "on_event");
+                        hook(game, lane, event)
+                    });
                 }
             }
         }
@@ -1308,7 +1340,10 @@ impl<'a> Game<'a> {
                         || effect.lifetime == EffectLifetime::NextOtherCard));
             let completed = fired
                 && self
-                    .counted_trigger(|game| (effect.apply)(game, &mut effect, card))
+                    .counted_trigger(|game| {
+                        game.record_card_hook(game.cards[effect.source].def.id, "player_effect");
+                        (effect.apply)(game, &mut effect, card)
+                    })
                     .unwrap_or(false);
             let expired = fired
                 && matches!(
@@ -1710,9 +1745,10 @@ impl<'a> Game<'a> {
                                 && (a.id.is_some() || !self.cards[id].abilities_removed)
                         })
                         .all(|a| {
-                            a.def
-                                .cost_guard
-                                .is_none_or(|guard| guard(self, id, card, old, new))
+                            a.def.cost_guard.is_none_or(|guard| {
+                                self.record_card_hook(a.def.id, "cost_guard");
+                                guard(self, id, card, old, new)
+                            })
                         })
             })
     }
@@ -1782,6 +1818,7 @@ impl<'a> Game<'a> {
                 && location.revealed
                 && let Some(hook) = location.def.modify_cost
             {
+                self.record_location_hook(lane, "modify_cost");
                 let next = hook(self, lane, card, current);
                 if self.cost_change_allowed(card, current, next) {
                     reductions += (current - next).max(0);
@@ -2065,6 +2102,7 @@ impl<'a> Game<'a> {
         let mut game = Self {
             cards,
             ability_call_depth: 0,
+            replay_hooks: None,
             players,
             human_seat: None,
             lanes,
@@ -2106,14 +2144,20 @@ impl<'a> Game<'a> {
                 let original = game.cards[card].default_ability();
                 let generation = game.cards[card].default_ability_generation;
                 if let Some(hook) = original.pre_game_start {
-                    let _ = game.counted_trigger(|game| hook(game, card));
+                    let _ = game.counted_trigger(|game| {
+                        game.record_card_hook(original.id, "pre_game_start");
+                        hook(game, card)
+                    });
                 }
                 if !game.cards[card].abilities_removed
                     && game.cards[card].default_ability_generation == generation
                     && original.id != "NicoMinoru"
                     && let Some(hook) = original.on_event
                 {
-                    let _ = game.counted_trigger(|game| hook(game, card, Event::GameStart));
+                    let _ = game.counted_trigger(|game| {
+                        game.record_card_hook(original.id, "on_event");
+                        hook(game, card, Event::GameStart)
+                    });
                 }
             }
             let chosen;
@@ -2606,6 +2650,7 @@ impl<'a> Game<'a> {
                     && location.revealed
                     && let Some(hook) = location.def.modify_cost
                 {
+                    self.record_location_hook(lane, "modify_cost");
                     let next = hook(self, lane, card, cost);
                     if self.cost_change_allowed(card, cost, next) {
                         cost = next;
@@ -2627,6 +2672,7 @@ impl<'a> Game<'a> {
                     || self.cards[card].default_ability().id != "SuperiorIronMan")
                 && let Some(hook) = self.cards[card].default_ability().modify_final_cost
             {
+                self.record_card_hook(self.cards[card].default_ability().id, "modify_final_cost");
                 let next = hook(self, card, cost);
                 if self.cost_change_allowed(card, cost, next) {
                     cost = next;
@@ -2703,7 +2749,10 @@ impl<'a> Game<'a> {
         if self.location_abilities_active(lane)
             && let Some(hook) = def.on_reveal
         {
-            let _ = self.counted_trigger(|game| hook(game, lane));
+            let _ = self.counted_trigger(|game| {
+                game.record_location_hook(lane, "on_reveal");
+                hook(game, lane)
+            });
         }
         let minimum = self
             .lanes
@@ -2823,7 +2872,10 @@ impl<'a> Game<'a> {
                 && self.cards[card]
                     .default_ability()
                     .can_play
-                    .is_some_and(|test| !test(self, card, lane, seat)))
+                    .is_some_and(|test| {
+                        self.record_card_hook(self.cards[card].default_ability().id, "can_play");
+                        !test(self, card, lane, seat)
+                    }))
         {
             return false;
         }
@@ -2842,6 +2894,7 @@ impl<'a> Game<'a> {
                             }
                             && !(skip_jean && ability.def.id == "JeanGrey")
                             && ability.def.global_play_guard.is_some_and(|guard| {
+                                self.record_card_hook(ability.def.id, "global_play_guard");
                                 !guard(self, source, card, lane, seat, queued_total)
                             })
                     })
@@ -2854,10 +2907,10 @@ impl<'a> Game<'a> {
                 && self.ongoing_active(source)
                 && self.cards[source].ongoing_guard_abilities().any(|ability| {
                     ability.supports(AbilityKind::Ongoing)
-                        && ability
-                            .def
-                            .ongoing_play_guard
-                            .is_some_and(|guard| !guard(self, source, card, lane, seat))
+                        && ability.def.ongoing_play_guard.is_some_and(|guard| {
+                            self.record_card_hook(ability.def.id, "ongoing_play_guard");
+                            !guard(self, source, card, lane, seat)
+                        })
                 })
         }) {
             return false;
@@ -2883,7 +2936,10 @@ impl<'a> Game<'a> {
             if location
                 .def
                 .allows_play_globally_with_count
-                .is_some_and(|test| !test(self, source, seat, queued_total))
+                .is_some_and(|test| {
+                    self.record_location_hook(source, "allows_play_globally_with_count");
+                    !test(self, source, seat, queued_total)
+                })
             {
                 return false;
             }
@@ -2893,19 +2949,35 @@ impl<'a> Game<'a> {
                 location.def.allows_play_elsewhere
             };
             if let Some(test) = predicate
-                && !test(self, source, card, lane, seat)
+                && {
+                    self.record_location_hook(
+                        source,
+                        if source == lane {
+                            "allows_play"
+                        } else {
+                            "allows_play_elsewhere"
+                        },
+                    );
+                    !test(self, source, card, lane, seat)
+                }
             {
                 return false;
             }
             if source == lane
                 && let Some(test) = location.def.allows_play_with_count
-                && !test(self, seat, queued_total)
+                && {
+                    self.record_location_hook(source, "allows_play_with_count");
+                    !test(self, seat, queued_total)
+                }
             {
                 return false;
             }
             if source == lane
                 && let Some(test) = location.def.allows_addition
-                && !test(self, source, card, lane, seat)
+                && {
+                    self.record_location_hook(source, "allows_addition");
+                    !test(self, source, card, lane, seat)
+                }
             {
                 return false;
             }
@@ -2929,9 +3001,10 @@ impl<'a> Game<'a> {
                                     || !self.cards[provider].abilities_removed)
                         })
                         .any(|a| {
-                            a.def
-                                .blocks_player_move
-                                .is_some_and(|test| test(self, provider, card))
+                            a.def.blocks_player_move.is_some_and(|test| {
+                                self.record_card_hook(a.def.id, "blocks_player_move");
+                                test(self, provider, card)
+                            })
                         })
             })
     }
@@ -2954,9 +3027,10 @@ impl<'a> Game<'a> {
                 && self.turn <= grant.end_turn
                 && grant.card.is_none_or(|target| target == card)
                 && grant.lane.is_none_or(|target| target == lane)
-                && grant
-                    .condition
-                    .is_none_or(|condition| condition(self, grant.source, card))
+                && grant.condition.is_none_or(|condition| {
+                    self.record_card_hook(self.cards[grant.source].def.id, "move_grant_condition");
+                    condition(self, grant.source, card)
+                })
                 && destination
                     .is_none_or(|lane| grant.destination.is_none_or(|target| target == lane))
         })
@@ -2986,14 +3060,20 @@ impl<'a> Game<'a> {
         if !self.jeff_unrestricted(card)
             && self.location_abilities_active(source)
             && let Some(test) = self.lanes[source].def.allows_move_from
-            && !test(self, source, card, destination, seat)
+            && {
+                self.record_location_hook(source, "allows_move_from");
+                !test(self, source, card, destination, seat)
+            }
         {
             return false;
         }
         if !self.jeff_unrestricted(card)
             && self.location_abilities_active(destination)
             && let Some(test) = self.lanes[destination].def.allows_addition
-            && !test(self, destination, card, destination, seat)
+            && {
+                self.record_location_hook(destination, "allows_addition");
+                !test(self, destination, card, destination, seat)
+            }
         {
             return false;
         }
@@ -3033,9 +3113,10 @@ impl<'a> Game<'a> {
                                         || !self.cards[provider].abilities_removed)
                             })
                             .any(|a| {
-                                a.def
-                                    .grants_move_globally
-                                    .is_some_and(|test| test(self, provider, card))
+                                a.def.grants_move_globally.is_some_and(|test| {
+                                    self.record_card_hook(a.def.id, "grants_move_globally");
+                                    test(self, provider, card)
+                                })
                             })
                 })
             || self.lanes[source].cards.iter().copied().any(|provider| {
@@ -3049,16 +3130,20 @@ impl<'a> Game<'a> {
                                     || !self.cards[provider].abilities_removed)
                         })
                         .any(|a| {
-                            a.def
-                                .grants_move_from
-                                .is_some_and(|test| test(self, provider, card))
+                            a.def.grants_move_from.is_some_and(|test| {
+                                self.record_card_hook(a.def.id, "grants_move_from");
+                                test(self, provider, card)
+                            })
                         })
             })
             || (self.location_abilities_active(destination)
                 && self.lanes[destination]
                     .def
                     .grants_move_to
-                    .is_some_and(|test| test(self, destination, card, source, seat)))
+                    .is_some_and(|test| {
+                        self.record_location_hook(destination, "grants_move_to");
+                        test(self, destination, card, source, seat)
+                    }))
     }
 
     // Movable ability stacks are consumed by a player move while active.
@@ -3108,7 +3193,10 @@ impl<'a> Game<'a> {
             let source = grant.source;
             let callback = grant.on_move;
             if let Some(hook) = callback {
-                let _ = self.counted_trigger(|game| hook(game, source, card));
+                let _ = self.counted_trigger(|game| {
+                    game.record_card_hook(game.cards[source].def.id, "move_grant");
+                    hook(game, source, card)
+                });
             }
         }
         true
@@ -3135,7 +3223,10 @@ impl<'a> Game<'a> {
         if !self.jeff_unrestricted(card)
             && self.location_abilities_active(source)
             && let Some(test) = self.lanes[source].def.allows_move_from
-            && !test(self, source, card, destination, target.owner)
+            && {
+                self.record_location_hook(source, "allows_move_from");
+                !test(self, source, card, destination, target.owner)
+            }
         {
             return false;
         }
@@ -3144,7 +3235,10 @@ impl<'a> Game<'a> {
             || self.lanes[destination]
                 .def
                 .allows_addition
-                .is_none_or(|test| test(self, destination, card, destination, target.owner))
+                .is_none_or(|test| {
+                    self.record_location_hook(destination, "allows_addition");
+                    test(self, destination, card, destination, target.owner)
+                })
     }
 
     fn activation_definition(&self, card: usize, seat: usize) -> Option<&'static CardDef> {
@@ -3157,7 +3251,10 @@ impl<'a> Game<'a> {
             .find(|def| {
                 def.on_activate.is_some()
                     && self.players[seat].energy >= def.activate_cost
-                    && def.can_activate.is_none_or(|test| test(self, card))
+                    && def.can_activate.is_none_or(|test| {
+                        self.record_card_hook(def.id, "can_activate");
+                        test(self, card)
+                    })
             })
     }
 
@@ -3399,7 +3496,10 @@ impl<'a> Game<'a> {
             if self.location_abilities_active(lane)
                 && let Some(hook) = self.lanes[lane].def.on_staging_end
             {
-                let _ = self.counted_trigger(|game| hook(game, lane));
+                let _ = self.counted_trigger(|game| {
+                    game.record_location_hook(lane, "on_staging_end");
+                    hook(game, lane)
+                });
             }
         }
     }
@@ -3488,14 +3588,20 @@ impl<'a> Game<'a> {
         if !self.jeff_unrestricted(card)
             && self.location_abilities_active(source)
             && let Some(test) = self.lanes[source].def.allows_move_from
-            && !test(self, source, card, destination, self.cards[card].owner)
+            && {
+                self.record_location_hook(source, "allows_move_from");
+                !test(self, source, card, destination, self.cards[card].owner)
+            }
         {
             return false;
         }
         if !self.jeff_unrestricted(card)
             && self.location_abilities_active(destination)
             && let Some(test) = self.lanes[destination].def.allows_addition
-            && !test(self, destination, card, destination, self.cards[card].owner)
+            && {
+                self.record_location_hook(destination, "allows_addition");
+                !test(self, destination, card, destination, self.cards[card].owner)
+            }
         {
             return false;
         }
@@ -3526,7 +3632,10 @@ impl<'a> Game<'a> {
             && self.card_triggers_allowed(card)
             && let Some(hook) = self.cards[card].default_ability().on_move
         {
-            let _ = self.counted_trigger(|game| hook(game, card, source));
+            let _ = self.counted_trigger(|game| {
+                game.record_card_hook(game.cards[card].default_ability().id, "on_move");
+                hook(game, card, source)
+            });
         }
         let abilities = std::mem::take(&mut self.cards[card].attached_abilities);
         for ability in abilities {
@@ -3535,7 +3644,10 @@ impl<'a> Game<'a> {
                 && let AttachedAbilityKind::MovePower { source, turn, hook } = ability.kind
                 && turn == self.turn
             {
-                let _ = self.counted_trigger(|game| hook(game, source, card));
+                let _ = self.counted_trigger(|game| {
+                    game.record_card_hook(game.cards[source].def.id, "move_power");
+                    hook(game, source, card)
+                });
             } else {
                 self.cards[card].attached_abilities.push(ability);
             }
@@ -3547,13 +3659,22 @@ impl<'a> Game<'a> {
                 && self.card_triggers_allowed(observer)
                 && let Some(hook) = self.cards[observer].default_ability().on_move_here
             {
-                let _ = self.counted_trigger(|game| hook(game, observer, card));
+                let _ = self.counted_trigger(|game| {
+                    game.record_card_hook(
+                        game.cards[observer].default_ability().id,
+                        "on_move_here",
+                    );
+                    hook(game, observer, card)
+                });
             }
         }
         if self.location_abilities_active(destination)
             && let Some(hook) = self.lanes[destination].def.on_card_moved
         {
-            let _ = self.counted_trigger(|game| hook(game, destination, card, source));
+            let _ = self.counted_trigger(|game| {
+                game.record_location_hook(destination, "on_card_moved");
+                hook(game, destination, card, source)
+            });
         }
         self.emit(Event::CardMoved {
             card,
@@ -3566,12 +3687,18 @@ impl<'a> Game<'a> {
         if self.card_triggers_allowed(card)
             && let Some(hook) = self.cards[card].default_ability().on_added
         {
-            let _ = self.counted_trigger(|game| hook(game, card));
+            let _ = self.counted_trigger(|game| {
+                game.record_card_hook(game.cards[card].default_ability().id, "on_added");
+                hook(game, card)
+            });
         }
         if self.location_abilities_active(lane)
             && let Some(hook) = self.lanes[lane].def.on_card_added
         {
-            let _ = self.counted_trigger(|game| hook(game, lane, card));
+            let _ = self.counted_trigger(|game| {
+                game.record_location_hook(lane, "on_card_added");
+                hook(game, lane, card)
+            });
         }
         self.emit(Event::CardAdded { card, lane });
     }
@@ -3592,10 +3719,10 @@ impl<'a> Game<'a> {
             && self.spawns_allowed()
             && !self.lane_locked(lane)
             && (!self.location_abilities_active(lane)
-                || self.lanes[lane]
-                    .def
-                    .allows_addition
-                    .is_none_or(|test| test(self, lane, card, lane, seat)))
+                || self.lanes[lane].def.allows_addition.is_none_or(|test| {
+                    self.record_location_hook(lane, "allows_addition");
+                    test(self, lane, card, lane, seat)
+                }))
     }
 
     pub fn add_card(
@@ -3744,7 +3871,13 @@ impl<'a> Game<'a> {
             if self.card_triggers_allowed(observer)
                 && let Some(hook) = self.cards[observer].default_ability().on_hand_added
             {
-                let _ = self.counted_trigger(|game| hook(game, observer, seat));
+                let _ = self.counted_trigger(|game| {
+                    game.record_card_hook(
+                        game.cards[observer].default_ability().id,
+                        "on_hand_added",
+                    );
+                    hook(game, observer, seat)
+                });
             }
         }
     }
@@ -3768,7 +3901,13 @@ impl<'a> Game<'a> {
                     && let Some(hook) = self.cards[observer].default_ability().on_hand_added
                 {
                     for _ in 0..count {
-                        let _ = self.counted_trigger(|game| hook(game, observer, seat));
+                        let _ = self.counted_trigger(|game| {
+                            game.record_card_hook(
+                                game.cards[observer].default_ability().id,
+                                "on_hand_added",
+                            );
+                            hook(game, observer, seat)
+                        });
                     }
                 }
             }
@@ -3842,7 +3981,10 @@ impl<'a> Game<'a> {
         });
         self.players[seat].graveyard_order.push(card);
         if let Some(hook) = self.cards[card].default_ability().on_discard {
-            let _ = self.counted_trigger(|game| hook(game, card));
+            let _ = self.counted_trigger(|game| {
+                game.record_card_hook(game.cards[card].default_ability().id, "on_discard");
+                hook(game, card)
+            });
         } else {
             self.push_discard(seat, card);
         }
@@ -3982,9 +4124,10 @@ impl<'a> Game<'a> {
                         .ongoing_guard_abilities()
                         .filter(|a| a.supports(AbilityKind::Ongoing))
                         .any(|a| {
-                            a.def
-                                .destroy_guard
-                                .is_some_and(|guard| !guard(self, source, card))
+                            a.def.destroy_guard.is_some_and(|guard| {
+                                self.record_card_hook(a.def.id, "destroy_guard");
+                                !guard(self, source, card)
+                            })
                         })
             })
         {
@@ -4015,7 +4158,10 @@ impl<'a> Game<'a> {
             && !self.cards[card].abilities_removed
             && let Some(hook) = self.cards[card].default_ability().on_destroy
         {
-            let _ = self.counted_trigger(|game| hook(game, card));
+            let _ = self.counted_trigger(|game| {
+                game.record_card_hook(game.cards[card].default_ability().id, "on_destroy");
+                hook(game, card)
+            });
         }
         self.emit(Event::CardDestroyed { card, lane });
         if !self.lanes[lane].destroyed {
@@ -4112,7 +4258,10 @@ impl<'a> Game<'a> {
                 if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.on_turn_start
                 {
-                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "on_turn_start");
+                        hook(game, lane)
+                    });
                     self.ongoing();
                 }
             }
@@ -4128,7 +4277,10 @@ impl<'a> Game<'a> {
                 if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.on_turn_start
                 {
-                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "on_turn_start");
+                        hook(game, lane)
+                    });
                     self.ongoing();
                 }
             }
@@ -4151,15 +4303,26 @@ impl<'a> Game<'a> {
                 .composed_abilities
                 .iter()
                 .filter(|ability| ability.kind == AbilityKind::Trigger)
-                .filter_map(|ability| ability.def.start_turn.map(|hook| (ability.id, hook)))
+                .filter_map(|ability| {
+                    ability
+                        .def
+                        .start_turn
+                        .map(|hook| (ability.id, ability.def.id, hook))
+                })
                 .collect();
             if !self.cards[id].abilities_removed
                 && let Some(hook) = default.start_turn
             {
-                self.execute_default_ability(id, hook);
+                self.execute_default_ability(id, |game, card| {
+                    game.record_card_hook(default.id, "start_turn");
+                    hook(game, card)
+                });
             }
-            for (instance, hook) in attached {
-                self.execute_ability(id, instance, hook);
+            for (instance, def_id, hook) in attached {
+                self.execute_ability(id, instance, |game, card| {
+                    game.record_card_hook(def_id, "start_turn");
+                    hook(game, card)
+                });
             }
         }
         for seat in 0..2 {
@@ -4167,6 +4330,7 @@ impl<'a> Game<'a> {
                 if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.energy_bonus
                 {
+                    self.record_location_hook(lane, "energy_bonus");
                     let energy = self.players[seat].energy + hook(self, lane, seat);
                     self.set_energy(seat, energy);
                 }
@@ -4187,7 +4351,10 @@ impl<'a> Game<'a> {
                 && !self.cards[id].abilities_removed
                 && let Some(hook) = self.cards[id].default_ability().post_start_turn
             {
-                let _ = self.counted_trigger(|game| hook(game, id));
+                let _ = self.counted_trigger(|game| {
+                    game.record_card_hook(game.cards[id].default_ability().id, "post_start_turn");
+                    hook(game, id)
+                });
             }
         }
         self.emit(Event::TurnStart);
@@ -4412,6 +4579,8 @@ impl<'a> Game<'a> {
             card,
             instance,
             hook,
+            def_id,
+            kind,
             runs,
             hand,
         } = scheduled;
@@ -4435,6 +4604,7 @@ impl<'a> Game<'a> {
         for _ in 0..runs {
             let mut action_result = false;
             let action = |game: &mut Self, card| {
+                game.record_card_hook(def_id, kind);
                 action_result = match hook {
                     ScheduledOngoingHook::Ordinary(hook) => {
                         hook(game, card);
@@ -4469,24 +4639,37 @@ impl<'a> Game<'a> {
             .filter(|ability| ability.supports(AbilityKind::Ongoing))
             .filter(|ability| ability.id.is_some() || !self.cards[card].abilities_removed)
             .filter_map(|ability| {
-                let hook = if hand {
+                let (hook, kind) = if hand {
                     ability
                         .def
                         .conditional_in_hand_ongoing
-                        .map(ScheduledOngoingHook::Conditional)
+                        .map(|hook| {
+                            (
+                                ScheduledOngoingHook::Conditional(hook),
+                                "conditional_in_hand_ongoing",
+                            )
+                        })
                         .or_else(|| {
-                            ability
-                                .def
-                                .in_hand_ongoing
-                                .or(ability.def.late_in_hand_ongoing)
-                                .map(ScheduledOngoingHook::Ordinary)
+                            ability.def.in_hand_ongoing.map(|hook| {
+                                (ScheduledOngoingHook::Ordinary(hook), "in_hand_ongoing")
+                            })
+                        })
+                        .or_else(|| {
+                            ability.def.late_in_hand_ongoing.map(|hook| {
+                                (ScheduledOngoingHook::Ordinary(hook), "late_in_hand_ongoing")
+                            })
                         })
                 } else {
                     ability
                         .def
                         .late_ongoing
-                        .map(ScheduledOngoingHook::Conditional)
-                        .or_else(|| ability.def.ongoing.map(ScheduledOngoingHook::Ordinary))
+                        .map(|hook| (ScheduledOngoingHook::Conditional(hook), "late_ongoing"))
+                        .or_else(|| {
+                            ability
+                                .def
+                                .ongoing
+                                .map(|hook| (ScheduledOngoingHook::Ordinary(hook), "ongoing"))
+                        })
                 }?;
                 let metadata = Self::client_ongoing_metadata(ability.def, hand);
                 let staged_play = self.players.iter().any(|player| {
@@ -4503,6 +4686,8 @@ impl<'a> Game<'a> {
                         card,
                         instance: ability.id,
                         hook,
+                        def_id: ability.def.id,
+                        kind,
                         runs,
                         hand,
                     })
@@ -4585,7 +4770,13 @@ impl<'a> Game<'a> {
                     && (self.cards[id].revealed || self.cards[id].turn_played > 0)
                     && let Some(hook) = self.cards[id].default_ability().objective_update
                 {
-                    self.execute_default_ability(id, hook);
+                    self.execute_default_ability(id, |game, card| {
+                        game.record_card_hook(
+                            game.cards[card].default_ability().id,
+                            "objective_update",
+                        );
+                        hook(game, card)
+                    });
                 }
             }
         }
@@ -4713,6 +4904,7 @@ impl<'a> Game<'a> {
                         for index in 0..self.players[seat].hand.len() {
                             let card = self.players[seat].hand[index];
                             let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
+                            self.record_location_hook(lane, "modify_cost");
                             let next = hook(self, lane, card, cost);
                             self.add_ongoing_cost(card, next - cost, seat);
                         }
@@ -4728,11 +4920,17 @@ impl<'a> Game<'a> {
                     }
                 }
                 if let Some(hook) = location.ongoing {
-                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "ongoing");
+                        hook(game, lane)
+                    });
                 }
                 if let Some(hook) = location.conditional_ongoing
                     && !self
-                        .counted_trigger(|game| hook(game, lane))
+                        .counted_trigger(|game| {
+                            game.record_location_hook(lane, "conditional_ongoing");
+                            hook(game, lane)
+                        })
                         .unwrap_or(false)
                 {
                     pending.push(PendingConditional::Location { lane, hook });
@@ -4868,7 +5066,10 @@ impl<'a> Game<'a> {
                                     .current_ongoing_source
                                     .replace(OngoingSource::Location { lane });
                                 let result = self
-                                    .counted_trigger(|game| hook(game, lane))
+                                    .counted_trigger(|game| {
+                                        game.record_location_hook(lane, "conditional_ongoing");
+                                        hook(game, lane)
+                                    })
                                     .unwrap_or(false);
                                 self.current_ongoing_source = old;
                                 result
@@ -4917,7 +5118,13 @@ impl<'a> Game<'a> {
                 if !self.cards[card].abilities_removed
                     && let Some(hook) = self.cards[card].default_ability().in_hand_ongoing
                 {
-                    let _ = self.counted_trigger(|game| hook(game, card));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(
+                            game.cards[card].default_ability().id,
+                            "in_hand_ongoing",
+                        );
+                        hook(game, card)
+                    });
                 }
             }
         }
@@ -4946,7 +5153,10 @@ impl<'a> Game<'a> {
                     let runs = base + extra[self.cards[id].owner]
                         - base * usize::from(self.cards[id].default_ability().extra_ongoing_runs);
                     for _ in 0..runs {
-                        let _ = self.counted_trigger(|game| hook(game, id));
+                        let _ = self.counted_trigger(|game| {
+                            game.record_card_hook(game.cards[id].default_ability().id, "ongoing");
+                            hook(game, id)
+                        });
                     }
                 }
             }
@@ -4964,10 +5174,16 @@ impl<'a> Game<'a> {
                     }
                 }
                 if let Some(hook) = self.lanes[lane].def.ongoing {
-                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "ongoing");
+                        hook(game, lane)
+                    });
                 }
                 if let Some(hook) = self.lanes[lane].def.conditional_ongoing {
-                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "conditional_ongoing");
+                        hook(game, lane)
+                    });
                 }
             }
         }
@@ -5012,7 +5228,13 @@ impl<'a> Game<'a> {
                     let runs = base + extra[self.cards[id].owner]
                         - base * usize::from(self.cards[id].default_ability().extra_ongoing_runs);
                     for _ in 0..runs {
-                        let _ = self.counted_trigger(|game| hook(game, id));
+                        let _ = self.counted_trigger(|game| {
+                            game.record_card_hook(
+                                game.cards[id].default_ability().id,
+                                "late_ongoing",
+                            );
+                            hook(game, id)
+                        });
                     }
                 }
             }
@@ -5023,14 +5245,26 @@ impl<'a> Game<'a> {
                 if !self.cards[card].abilities_removed
                     && let Some(hook) = self.cards[card].default_ability().late_in_hand_ongoing
                 {
-                    let _ = self.counted_trigger(|game| hook(game, card));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(
+                            game.cards[card].default_ability().id,
+                            "late_in_hand_ongoing",
+                        );
+                        hook(game, card)
+                    });
                 }
                 if !self.cards[card].abilities_removed
                     && let Some(hook) = self.cards[card]
                         .default_ability()
                         .conditional_in_hand_ongoing
                 {
-                    let _ = self.counted_trigger(|game| hook(game, card));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(
+                            game.cards[card].default_ability().id,
+                            "conditional_in_hand_ongoing",
+                        );
+                        hook(game, card)
+                    });
                 }
             }
         }
@@ -5041,7 +5275,13 @@ impl<'a> Game<'a> {
                     && (self.cards[id].revealed || self.cards[id].turn_played > 0)
                     && let Some(hook) = self.cards[id].default_ability().objective_update
                 {
-                    self.execute_default_ability(id, hook);
+                    self.execute_default_ability(id, |game, card| {
+                        game.record_card_hook(
+                            game.cards[card].default_ability().id,
+                            "objective_update",
+                        );
+                        hook(game, card)
+                    });
                 }
             }
         }
@@ -5072,16 +5312,17 @@ impl<'a> Game<'a> {
                 ability
                     .def
                     .reveal
-                    .map(|hook| (ability.id, hook, ability.hidden))
+                    .map(|hook| (ability.id, ability.def.id, hook, ability.hidden))
             })
             .collect();
         self.trigger_text_reveal(card);
-        for (instance, hook, hidden) in attached {
+        for (instance, def_id, hook, hidden) in attached {
             self.execute_ability(card, instance, |game, card| {
                 game.trigger_reveal_hook_inner(
                     card,
                     hook,
                     !hidden || cards::reference_rules_enabled(),
+                    def_id,
                 )
             });
         }
@@ -5096,15 +5337,26 @@ impl<'a> Game<'a> {
                 .unwrap()
                 .resolve_reentrant(&self.cards[card]);
             self.execute_default_resolve(card, reentrant, |game, card| {
-                game.trigger_reveal_hook(card, hook)
+                game.trigger_reveal_hook(card, hook, game.cards[card].default_ability().id)
             });
         }
     }
-    pub(crate) fn trigger_reveal_hook(&mut self, card: usize, hook: cards::CardHook) {
-        self.trigger_reveal_hook_inner(card, hook, true);
+    pub(crate) fn trigger_reveal_hook(
+        &mut self,
+        card: usize,
+        hook: cards::CardHook,
+        def_id: &'static str,
+    ) {
+        self.trigger_reveal_hook_inner(card, hook, true, def_id);
     }
 
-    fn trigger_reveal_hook_inner(&mut self, card: usize, hook: cards::CardHook, repeat: bool) {
+    fn trigger_reveal_hook_inner(
+        &mut self,
+        card: usize,
+        hook: cards::CardHook,
+        repeat: bool,
+        def_id: &'static str,
+    ) {
         let Some(lane) = self.cards[card].lane else {
             return;
         };
@@ -5136,11 +5388,12 @@ impl<'a> Game<'a> {
             if !self.cards[source].revealed || !self.ongoing_active(source) {
                 continue;
             }
-            for repetitions in self.cards[source]
+            for (def_id, repetitions) in self.cards[source]
                 .ongoing_guard_abilities()
                 .filter(|a| a.supports(AbilityKind::Ongoing))
-                .filter_map(|a| a.def.reveal_repetitions)
+                .filter_map(|a| a.def.reveal_repetitions.map(|hook| (a.def.id, hook)))
             {
+                self.record_card_hook(def_id, "reveal_repetitions");
                 let additional = usize::from(repetitions(self, source, card));
                 let extra: usize = self.lanes[lane]
                     .cards
@@ -5164,6 +5417,7 @@ impl<'a> Game<'a> {
         }
         let original = self.cards[card].def.id;
         for _ in 0..runs {
+            self.record_card_hook(def_id, "reveal");
             hook(self, card);
             if self.cards[card].lane.is_none() || self.cards[card].def.id != original {
                 break;
@@ -5237,7 +5491,10 @@ impl<'a> Game<'a> {
         if self.location_abilities_active(lane)
             && let Some(hook) = self.lanes[lane].def.before_card_reveal
         {
-            let _ = self.counted_trigger(|game| hook(game, lane, id));
+            let _ = self.counted_trigger(|game| {
+                game.record_location_hook(lane, "before_card_reveal");
+                hook(game, lane, id)
+            });
             if self.cards[id].lane.is_none() {
                 self.ongoing();
                 return;
@@ -5321,7 +5578,10 @@ impl<'a> Game<'a> {
                 if self.card_triggers_allowed(other)
                     && let Some(hook) = self.cards[other].default_ability().on_play
                 {
-                    let _ = self.counted_trigger(|game| hook(game, other, id));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(game.cards[other].default_ability().id, "on_play");
+                        hook(game, other, id)
+                    });
                 }
             }
         }
@@ -5397,7 +5657,10 @@ impl<'a> Game<'a> {
             && self.location_abilities_active(lane)
             && let Some(hook) = self.lanes[lane].def.after_card_play
         {
-            let _ = self.counted_trigger(|game| hook(game, lane, id));
+            let _ = self.counted_trigger(|game| {
+                game.record_location_hook(lane, "after_card_play");
+                hook(game, lane, id)
+            });
             self.ongoing();
         }
         // SinisterLondon::CreateCopy (0x7d7fe8c) uses CardStaged's
@@ -5410,7 +5673,10 @@ impl<'a> Game<'a> {
             && self.lanes[context.lane].def.id == "SinisterLondon"
             && let Some(hook) = self.lanes[context.lane].def.after_card_play
         {
-            let _ = self.counted_trigger(|game| hook(game, context.lane, id));
+            let _ = self.counted_trigger(|game| {
+                game.record_location_hook(context.lane, "after_card_play");
+                hook(game, context.lane, id)
+            });
             self.ongoing();
         }
         for _ in 0..left_moves {
@@ -6099,7 +6365,10 @@ impl<'a> Game<'a> {
                     && self.card_triggers_allowed(id)
                     && let Some(hook) = self.cards[id].default_ability().pre_end_turn
                 {
-                    let _ = self.counted_trigger(|game| hook(game, id));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(game.cards[id].default_ability().id, "pre_end_turn");
+                        hook(game, id)
+                    });
                 }
             }
         }
@@ -6114,7 +6383,10 @@ impl<'a> Game<'a> {
                     && let Some(hook) = self.cards[id].default_ability().end_turn
                 {
                     for _ in 0..self.end_turn_repetitions(id) {
-                        let _ = self.counted_trigger(|game| hook(game, id));
+                        let _ = self.counted_trigger(|game| {
+                            game.record_card_hook(game.cards[id].default_ability().id, "end_turn");
+                            hook(game, id)
+                        });
                     }
                 }
             }
@@ -6130,7 +6402,10 @@ impl<'a> Game<'a> {
                     && !self.cards[id].abilities_removed
                     && let Some(hook) = self.cards[id].default_ability().end_turn
                 {
-                    let _ = self.counted_trigger(|game| hook(game, id));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_card_hook(game.cards[id].default_ability().id, "end_turn");
+                        hook(game, id)
+                    });
                 }
             }
             self.ongoing();
@@ -6140,11 +6415,17 @@ impl<'a> Game<'a> {
             let lane = self.end_turn_lane_order.unwrap()[original];
             if self.location_abilities_active(lane) {
                 if let Some(hook) = self.lanes[lane].def.on_turn_end {
-                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "on_turn_end");
+                        hook(game, lane)
+                    });
                     self.ongoing();
                 }
                 if !interleave && let Some(hook) = self.lanes[lane].def.on_event {
-                    let _ = self.counted_trigger(|game| hook(game, lane, Event::TurnEnd));
+                    let _ = self.counted_trigger(|game| {
+                        game.record_location_hook(lane, "on_event");
+                        hook(game, lane, Event::TurnEnd)
+                    });
                 }
             }
         }
@@ -6160,7 +6441,13 @@ impl<'a> Game<'a> {
                     && let Some(hook) = self.cards[id].default_ability().end_turn
                 {
                     for _ in 0..self.end_turn_repetitions(id) {
-                        self.execute_default_ability(id, hook);
+                        self.execute_default_ability(id, |game, card| {
+                            game.record_card_hook(
+                                game.cards[card].default_ability().id,
+                                "end_turn",
+                            );
+                            hook(game, card)
+                        });
                     }
                 }
                 let attached: Vec<_> = self.cards[id]
@@ -6171,17 +6458,20 @@ impl<'a> Game<'a> {
                         ability
                             .def
                             .end_turn
-                            .map(|hook| (ability.id, hook, ability.hidden))
+                            .map(|hook| (ability.id, ability.def.id, hook, ability.hidden))
                     })
                     .collect();
-                for (instance, hook, hidden) in attached {
+                for (instance, def_id, hook, hidden) in attached {
                     let repeats = if hidden {
                         1
                     } else {
                         self.end_turn_repetitions(id)
                     };
                     for _ in 0..repeats {
-                        self.execute_ability(id, instance, hook);
+                        self.execute_ability(id, instance, |game, card| {
+                            game.record_card_hook(def_id, "end_turn");
+                            hook(game, card)
+                        });
                     }
                 }
                 self.dispatch_card_event(id, Event::TurnEnd, true, false);
@@ -6198,7 +6488,10 @@ impl<'a> Game<'a> {
                     && self.cards[id].default_ability().end_turn_in_hand
                     && let Some(hook) = self.cards[id].default_ability().end_turn
                 {
-                    self.execute_default_ability(id, hook);
+                    self.execute_default_ability(id, |game, card| {
+                        game.record_card_hook(game.cards[card].default_ability().id, "end_turn");
+                        hook(game, card)
+                    });
                 }
                 self.dispatch_card_event(id, Event::TurnEnd, true, false);
             }
@@ -6214,7 +6507,13 @@ impl<'a> Game<'a> {
                     && !self.cards[id].abilities_removed
                     && let Some(hook) = self.cards[id].default_ability().objective_freeze
                 {
-                    self.execute_default_ability(id, hook);
+                    self.execute_default_ability(id, |game, card| {
+                        game.record_card_hook(
+                            game.cards[card].default_ability().id,
+                            "objective_freeze",
+                        );
+                        hook(game, card)
+                    });
                 }
             }
         }

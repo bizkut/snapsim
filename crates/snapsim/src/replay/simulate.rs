@@ -157,9 +157,9 @@ pub(super) fn simulate(
     frames: &[Frame],
     history: &History,
     local_deck: &[String],
-    trial: (usize, bool),
-) -> Result<Vec<Difference>, String> {
-    let (seed, plays_before_tied_move) = trial;
+    trial: (usize, bool, bool),
+) -> Result<(Vec<Difference>, Option<crate::game::ReplayHooks>), String> {
+    let (seed, plays_before_tied_move, collect_hooks) = trial;
     let mut hidden_rng = PythonRandom::seed(seed as i128);
     let mut game_rng = PythonRandom::seed(seed as i128);
     let mut known = history.seen.clone();
@@ -289,6 +289,7 @@ pub(super) fn simulate(
     let mut game = Game {
         cards: Vec::new(),
         ability_call_depth: 0,
+        replay_hooks: None,
         players: [Player::default(), Player::default()],
         human_seat: Some(0),
         lanes,
@@ -735,6 +736,9 @@ pub(super) fn simulate(
             game.pending_plays[play.card.owner].push((index, play.card.lane));
         }
     }
+    if collect_hooks {
+        game.replay_hooks = Some(RefCell::new(Default::default()));
+    }
     game.is_wait_for_staging = false;
     game.ongoing();
     for play in &staged.plays {
@@ -808,26 +812,32 @@ pub(super) fn simulate(
     game.end_turn_effects();
     if target.terminal {
         if game.total_turns as i64 != start.turn {
-            return Ok(vec![diff(
-                format!(
-                    "game length: simulator {}, observed final turn {}",
-                    game.total_turns, start.turn
-                ),
-                vec![],
-                vec![],
-            )]);
+            return Ok((
+                vec![diff(
+                    format!(
+                        "game length: simulator {}, observed final turn {}",
+                        game.total_turns, start.turn
+                    ),
+                    vec![],
+                    vec![],
+                )],
+                game.replay_hooks.map(RefCell::into_inner),
+            ));
         }
         game.finish_reveals();
     } else {
         if (game.total_turns as i64) < target.turn {
-            return Ok(vec![diff(
-                format!(
-                    "game length: simulator ended on turn {}, observed turn {}",
-                    game.total_turns, target.turn
-                ),
-                vec![],
-                vec![],
-            )]);
+            return Ok((
+                vec![diff(
+                    format!(
+                        "game length: simulator ended on turn {}, observed turn {}",
+                        game.total_turns, target.turn
+                    ),
+                    vec![],
+                    vec![],
+                )],
+                game.replay_hooks.map(RefCell::into_inner),
+            ));
         }
         if target.turn != start.turn && target.turn <= 3 {
             let lane = (target.turn - 1) as usize;
@@ -904,7 +914,10 @@ pub(super) fn simulate(
         game.played = Default::default();
         game.start_turn();
     }
-    Ok(compare(&game, target, &cards))
+    Ok((
+        compare(&game, target, &cards),
+        game.replay_hooks.map(RefCell::into_inner),
+    ))
 }
 
 fn compare(game: &Game<'_>, target: &Frame, cards: &[(Value, usize)]) -> Vec<Difference> {

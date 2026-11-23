@@ -58,10 +58,10 @@ pub(crate) fn sinister_event(game: &mut Game<'_>, event: Event) {
                 if !game.spawns_allowed()
                     || game.lane_locked(lane)
                     || (game.location_abilities_active(lane)
-                        && game.lanes[lane]
-                            .def
-                            .allows_addition
-                            .is_some_and(|test| !test(game, lane, source, lane, seat)))
+                        && game.lanes[lane].def.allows_addition.is_some_and(|test| {
+                            game.record_location_hook(lane, "allows_addition");
+                            !test(game, lane, source, lane, seat)
+                        }))
                 {
                     continue;
                 }

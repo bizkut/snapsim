@@ -77,3 +77,46 @@ fn unlimited_destination_grant_covers_new_cards_and_follows_location() {
         .is_ok()
     );
 }
+
+#[test]
+fn move_grant_condition_records_only_when_executed() {
+    let mut rng = PythonRandom::seed(53);
+    let mut game = super::test_game(&mut rng);
+    let source = game.create_card("Wasp", 0);
+    let card = game.create_card("Hulk", 0);
+    game.add_card(card, 0, 0, false);
+    game.replay_hooks = Some(std::cell::RefCell::new(Default::default()));
+    game.grant_move(MoveGrant {
+        seat: 0,
+        source,
+        card: Some(card),
+        lane: None,
+        destination: None,
+        start_turn: 2,
+        end_turn: 2,
+        remaining: 1,
+        unlimited: false,
+        condition: Some(|_, _, _| true),
+        on_move: None,
+    });
+    game.turn = 1;
+    assert!(!game.can_player_move(card, 1, 0));
+    assert!(
+        game.replay_hooks
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .cards
+            .is_empty()
+    );
+    game.turn = 2;
+    assert!(game.can_player_move(card, 1, 0));
+    assert!(
+        game.replay_hooks
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .cards
+            .contains(&("Wasp", "move_grant_condition"))
+    );
+}

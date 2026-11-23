@@ -10,6 +10,7 @@ pub mod deckcodes;
 mod engine_ext;
 pub mod env;
 pub mod game;
+pub mod hidden_legality;
 mod lane_contributions;
 pub mod locations;
 pub mod policy;

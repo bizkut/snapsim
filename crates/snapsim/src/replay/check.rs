@@ -36,8 +36,81 @@ fn io_error(path: &Path, error: std::io::Error) -> String {
         error.to_string()
     }
 }
+fn observed_evidence(
+    samples: &[&super::Frame],
+    target: Option<&super::Frame>,
+    plays: Option<&[super::Play]>,
+) -> super::ObservedEvidence {
+    let mut evidence = super::ObservedEvidence::default();
+    for frame in samples.iter().copied().chain(target) {
+        evidence.present_cards.extend(
+            frame
+                .board
+                .iter()
+                .filter(|card| card.revealed)
+                .filter_map(|card| card.id.as_str().map(str::to_owned)),
+        );
+        evidence.present_locations.extend(
+            frame
+                .locations
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned)),
+        );
+    }
+    if let Some(plays) = plays {
+        for play in plays {
+            if let Some(id) = play.id.as_str() {
+                *evidence.played_cards.entry(id.to_owned()).or_default() += 1;
+            }
+        }
+    }
+    // Only a newly appended ledger entry on the same already-observed entity
+    // can be assigned to this turn. Missing ledgers are unknown, not empty.
+    if let (Some(before), Some(after)) =
+        (samples.first(), target.or_else(|| samples.last().copied()))
+    {
+        for card in &after.board {
+            let Some(previous) = entity(before, &card.entity) else {
+                continue;
+            };
+            let (Some(old), Some(new)) = (
+                previous.stat_updates.as_array(),
+                card.stat_updates.as_array(),
+            ) else {
+                continue;
+            };
+            let mut remaining = old.clone();
+            for update in new {
+                if let Some(index) = remaining.iter().position(|item| item == update) {
+                    remaining.remove(index);
+                    continue;
+                }
+                if let Some(id) = update["updater_card_id"].as_str() {
+                    evidence.updater_cards.insert(id.to_owned());
+                }
+                if let Some(id) = update["updater_location_id"].as_str() {
+                    evidence.updater_locations.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    evidence
+}
 
 pub fn check_file(path: &Path, seeds: usize) -> Result<Vec<ResultRow>, String> {
+    check_file_impl(path, seeds, false)
+}
+
+/// Check a recording while collecting hook executions for coverage reporting.
+pub fn check_file_with_coverage(path: &Path, seeds: usize) -> Result<Vec<ResultRow>, String> {
+    check_file_impl(path, seeds, true)
+}
+
+fn check_file_impl(
+    path: &Path,
+    seeds: usize,
+    collect_hooks: bool,
+) -> Result<Vec<ResultRow>, String> {
     if seeds == 0 {
         return Err("--seeds must be positive".into());
     }
@@ -74,7 +147,7 @@ pub fn check_file(path: &Path, seeds: usize) -> Result<Vec<ResultRow>, String> {
         };
         observations.push((i + 1, observation));
     }
-    check_observations(observations, &deck, seeds)
+    check_observations_impl(observations, &deck, seeds, collect_hooks)
 }
 
 /// Check line-numbered SNAP observations without reading a recording file.
@@ -82,6 +155,15 @@ pub fn check_observations(
     observations: impl IntoIterator<Item = (usize, Value)>,
     deck: &[String],
     seeds: usize,
+) -> Result<Vec<ResultRow>, String> {
+    check_observations_impl(observations, deck, seeds, false)
+}
+
+fn check_observations_impl(
+    observations: impl IntoIterator<Item = (usize, Value)>,
+    deck: &[String],
+    seeds: usize,
+    collect_hooks: bool,
 ) -> Result<Vec<ResultRow>, String> {
     if seeds == 0 {
         return Err("--seeds must be positive".into());
@@ -493,16 +575,16 @@ pub fn check_observations(
                 let mut last_error = None;
                 for seed in 0..seeds {
                     for order in 0..variants {
-                        let diffs = match super::simulate::simulate(
+                        let (diffs, hooks) = match super::simulate::simulate(
                             start,
                             target,
                             &staged,
                             frames,
                             &history,
                             deck,
-                            (seed, order == 1),
+                            (seed, order == 1, collect_hooks),
                         ) {
-                            Ok(diffs) => diffs,
+                            Ok(result) => result,
                             Err(error) => {
                                 last_error = Some(error);
                                 continue;
@@ -517,6 +599,7 @@ pub fn check_observations(
                                 seed,
                                 seeds,
                             );
+                            row.hooks = hooks;
                             if variants > 1 {
                                 row.order_enumerated = true;
                                 let selected = if order == 0 {
@@ -531,18 +614,20 @@ pub fn check_observations(
                             return Ok(row);
                         }
                         if best.as_ref().is_none_or(
-                            |(_, previous): &(usize, Vec<super::Difference>)| {
-                                diffs.len() < previous.len()
-                            },
+                            |(_, previous, _): &(
+                                usize,
+                                Vec<super::Difference>,
+                                Option<crate::game::ReplayHooks>,
+                            )| { diffs.len() < previous.len() },
                         ) {
-                            best = Some((seed, diffs));
+                            best = Some((seed, diffs, hooks));
                         }
                     }
                 }
                 if let Some(error) = last_error {
                     return Err(error);
                 }
-                let (seed, differences) = best.expect("positive seeds");
+                let (seed, differences, hooks) = best.expect("positive seeds");
                 // With schema-v1 observations an opponent's first revealed
                 // power may include hidden hand buffs or effects already
                 // resolved in the same sample. If trials disagree, a changed
@@ -597,7 +682,7 @@ pub fn check_observations(
                             .filter_map(|&lane| f.locations[lane].as_str().map(str::to_owned))
                     })
                     .collect();
-                Ok(report::inconsistent(
+                let mut row = report::inconsistent(
                     index + 1,
                     turn,
                     (staged.before.line, target.line),
@@ -605,9 +690,11 @@ pub fn check_observations(
                     differences,
                     cards.into_iter().collect(),
                     locations.into_iter().collect(),
-                ))
+                );
+                row.hooks = hooks;
+                Ok(row)
             })();
-            output.push(result.unwrap_or_else(|error| {
+            let mut row = result.unwrap_or_else(|error| {
                 report::uncheckable(
                     index + 1,
                     turn,
@@ -615,7 +702,28 @@ pub fn check_observations(
                     used_samples[used_samples.len() - 1].line,
                     &error,
                 )
-            }));
+            });
+            if collect_hooks {
+                let recovered = if checked.is_none() {
+                    start.zip(target).and_then(|(start, target)| {
+                        let delays =
+                            start.locations.iter().zip(&start.location_turns).any(
+                                |(id, reveal)| id == "Lemuria" && reveal.as_i64() == Some(turn),
+                            );
+                        staging(start, &used_samples, target, frames, delays)
+                            .ok()
+                            .map(|s| s.plays)
+                    })
+                } else {
+                    None
+                };
+                let plays = checked
+                    .as_ref()
+                    .map(|(plays, _)| plays.as_slice())
+                    .or(recovered.as_deref());
+                row.observed = Some(observed_evidence(&used_samples, target, plays));
+            }
+            output.push(row);
             if let Some(start) = start {
                 if let Some((plays, delays)) = &checked {
                     if !delays {
@@ -664,6 +772,50 @@ pub fn check_observations(
 #[cfg(test)]
 mod location_state_tests {
     use super::{order_variants, quantum_unknown, theater_unknown};
+
+    #[test]
+    fn stat_update_evidence_requires_a_new_entry_on_the_same_visible_entity() {
+        use serde_json::json;
+        let observation = |turn, updates| {
+            json!({
+                "schema_version": 2,
+                "game": {
+                    "turn": turn,
+                    "game_key": "one",
+                    "players": [
+                        {"slot": "local", "entity_id": 1},
+                        {"slot": "opponent", "entity_id": 2}
+                    ],
+                    "locations": [
+                        {"location_id": "Ruins", "cards": [{
+                            "entity_id": 9, "owner_entity_id": 1, "card_id": "Hawkeye",
+                            "revealed": true, "stat_updates": updates
+                        }]},
+                        {"location_id": "Ruins", "cards": []},
+                        {"location_id": "Ruins", "cards": []}
+                    ]
+                }
+            })
+        };
+        let update = json!({"updater_card_id": "Okoye", "value": 1});
+        let frames = super::matches(vec![
+            (1, observation(1, json!([]))),
+            (2, observation(2, json!([update]))),
+        ])
+        .unwrap();
+        let evidence = super::observed_evidence(&[&frames[0][0]], Some(&frames[0][1]), None);
+        assert!(evidence.updater_cards.contains("Okoye"));
+        let frames = super::matches(vec![
+            (1, observation(1, serde_json::Value::Null)),
+            (
+                2,
+                observation(2, json!([{"updater_card_id": "Okoye", "value": 1}])),
+            ),
+        ])
+        .unwrap();
+        let evidence = super::observed_evidence(&[&frames[0][0]], Some(&frames[0][1]), None);
+        assert!(evidence.updater_cards.is_empty());
+    }
 
     #[test]
     fn replay_enumerates_one_ambiguous_move_and_play() {

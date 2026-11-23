@@ -24,6 +24,8 @@ pub fn consistent(
         differences: Vec::new(),
         cards: Vec::new(),
         locations: Vec::new(),
+        hooks: None,
+        observed: None,
     }
 }
 
@@ -50,6 +52,8 @@ pub fn inconsistent(
         differences,
         cards,
         locations,
+        hooks: None,
+        observed: None,
     }
 }
 
@@ -70,6 +74,8 @@ pub fn uncheckable(
         differences: Vec::new(),
         cards: Vec::new(),
         locations: Vec::new(),
+        hooks: None,
+        observed: None,
     }
 }
 

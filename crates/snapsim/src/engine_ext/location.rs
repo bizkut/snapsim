@@ -83,10 +83,10 @@ impl Game<'_> {
     pub fn can_retreat(&self, end_turn: bool) -> bool {
         !self.lanes.iter().enumerate().any(|(lane, location)| {
             self.location_abilities_active(lane)
-                && location
-                    .def
-                    .prevents_retreat
-                    .is_some_and(|test| test(self, end_turn))
+                && location.def.prevents_retreat.is_some_and(|test| {
+                    self.record_location_hook(lane, "prevents_retreat");
+                    test(self, end_turn)
+                })
         })
     }
 
@@ -109,7 +109,10 @@ impl Game<'_> {
         self.emit(crate::game::Event::LocationRevealed { lane });
         if self.location_abilities_active(lane) {
             if let Some(hook) = self.lanes[lane].def.on_reveal {
-                let _ = self.counted_trigger(|game| hook(game, lane));
+                let _ = self.counted_trigger(|game| {
+                    game.record_location_hook(lane, "on_reveal");
+                    hook(game, lane)
+                });
             }
             self.set_total_turns(self.total_turns.max(self.lanes[lane].def.minimum_turns));
             for seat in 0..2 {
