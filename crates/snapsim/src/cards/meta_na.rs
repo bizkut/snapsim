@@ -72,6 +72,7 @@ pub(crate) static CARDS: &[CardDef] = &[
         on_event: Some(she_hulk_event),
         initial_state: Some(she_hulk_state),
         end_turn_trigger: true,
+        end_turn_trigger_hidden: true,
         ..CardDef::vanilla("SheHulk")
     },
     CardDef {

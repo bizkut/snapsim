@@ -1620,6 +1620,39 @@ mod tests {
     }
 
     #[test]
+    fn juggernaut_does_not_move_a_play_that_already_left() {
+        let mut rng = PythonRandom::seed(7);
+        let deck = [
+            "Abomination",
+            "Cyclops",
+            "Hulk",
+            "MistyKnight",
+            "Shocker",
+            "TheThing",
+            "Wasp",
+            "Quicksilver",
+            "Medusa",
+            "Sentinel",
+            "IronMan",
+            "Hawkeye",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let source = game.create_card("Juggernaut", 0);
+        let target = game.create_card("Hulk", 1);
+        game.cards[source].lane = Some(0);
+        game.cards[source].revealed = true;
+        game.lanes[0].cards.push(source);
+        game.cards[target].lane = Some(1);
+        game.cards[target].turn_played = 1;
+        game.lanes[1].cards.push(target);
+        game.pending_plays[1].push((target, 0));
+        juggernaut(&mut game, source);
+        assert_eq!(game.cards[target].lane, Some(1));
+    }
+
+    #[test]
     fn elsa_buffs_the_card_resolving_in_last_slot() {
         let mut rng = PythonRandom::seed(5);
         let deck = [

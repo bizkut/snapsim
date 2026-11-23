@@ -322,7 +322,8 @@ pub(super) fn simulate(
         score_overrides: [None; 2],
         current_ongoing_source: None,
         merge_batches: Vec::new(),
-        rng: RefCell::new(&mut game_rng),
+        staging_order: None,
+        rng: RefCell::new(crate::game::GameRandom::Borrowed(&mut game_rng)),
     };
     // CaveOfTheDragonBehavior::AddCard (0x7d45454) makes one random
     // selection per player. A visible new card with this exact provenance

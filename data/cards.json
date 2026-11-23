@@ -246,7 +246,7 @@
     "name": "Ant Man Doomsday",
     "cost": 1,
     "power": 1,
-    "ability": "Each turn this is in hand, randomize this card's stats from 0-3 Cost and 1-8 Power.",
+    "ability": "Each turn this is in hand, randomize its Cost from 0-3 and Power from 1-8.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -380,7 +380,7 @@
     "power": 4,
     "ability": "On Reveal: Pull Excalibur free to here.",
     "status": "released",
-    "source": "None",
+    "source": "Season Pass",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -539,6 +539,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "BetaRayBillMech",
+    "name": "Beta Ray Bill Mech of Asgard",
+    "cost": 7,
+    "power": 5,
+    "ability": "!Costs 1 less for each On Reveal card you've played this game. On Reveal: Add Mecha Stormbreaker here.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "Bishop",
     "name": "Bishop",
     "cost": 3,
@@ -609,7 +620,7 @@
     "name": "Black Panther Doomsday",
     "cost": 7,
     "power": 5,
-    "ability": "!On Reveal: Triple this card's Power.",
+    "ability": "On Reveal: Triple this card's Power.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -752,7 +763,7 @@
     "name": "Bucky Barnes Doomsday",
     "cost": 2,
     "power": 2,
-    "ability": "!On Reveal: Give 2 cards in your hand +1 Power. If you're winning here after next turn, give cards in your hand +1 Power.",
+    "ability": "On Reveal: Give 2 cards in your hand +1 Power. If you're winning here after next turn, give your whole hand +1 Power.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -1001,6 +1012,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "ClintBartonRonin",
+    "name": "Clint Barton Ronin",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "Cloak",
     "name": "Cloak",
     "cost": 2,
@@ -1196,6 +1218,17 @@
     "status": "released",
     "source": "Series 4",
     "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "DanceOfShadows",
+    "name": "Dance of Shadows",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Skill",
     "random_pool_excluded": false
   },
   {
@@ -1454,9 +1487,9 @@
   {
     "carddefid": "DoomGuard",
     "name": "Doom Guard",
-    "cost": 2,
-    "power": 2,
-    "ability": "!Start of Turn: +1 Energy.",
+    "cost": 4,
+    "power": 3,
+    "ability": "On Reveal: Add Doctor Doom to your hand with +1 Power for each game in a row you've won. (+0)",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -1510,7 +1543,7 @@
     "carddefid": "DrDoomDoomsday",
     "name": "Doctor Doom Doomsday",
     "cost": 6,
-    "power": 6,
+    "power": 7,
     "ability": "On Reveal: Copy the text of the highest-Cost other ally with an On Reveal, then repeat for Ongoing.",
     "status": "unreleased",
     "source": "None",
@@ -1765,8 +1798,8 @@
     "cost": 9,
     "power": 12,
     "ability": "Costs 1 less for each ally with increased Power.",
-    "status": "unreleased",
-    "source": "None",
+    "status": "released",
+    "source": "Series 5",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -1789,6 +1822,17 @@
     "ability": "On Reveal: Destroy a 1-Cost enemy here.",
     "status": "released",
     "source": "Series 1",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "ElektraTheShadow",
+    "name": "Elektra the Shadow",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -2596,6 +2640,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "HeimdallMech",
+    "name": "Heimdall Mech of Asgard",
+    "cost": 4,
+    "power": 2,
+    "ability": "!End of Turn: +2 Power for each of your cards that moved this turn.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "Hela",
     "name": "Hela",
     "cost": 6,
@@ -2605,6 +2660,50 @@
     "source": "Series 3",
     "type": "Character",
     "random_pool_excluded": false
+  },
+  {
+    "carddefid": "HelaHelm",
+    "name": "Hela's Helm",
+    "cost": 1,
+    "power": 3,
+    "ability": "!End of Turn: If all of Hela's Relics are in play, recombine them.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": true
+  },
+  {
+    "carddefid": "HelaMech",
+    "name": "Hela Mech of Asgard",
+    "cost": 8,
+    "power": 17,
+    "ability": "!Game Start: Shuffle Hela's Relics into your deck. On Reveal: Discard a card from your opponent's hand. This gains Power equal to that card's Power.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "HelaPauldrons",
+    "name": "Hela's Pauldrons",
+    "cost": 3,
+    "power": 6,
+    "ability": "!On Reveal: Draw the next Relic.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": true
+  },
+  {
+    "carddefid": "HelaSword",
+    "name": "Hela's Sword",
+    "cost": 4,
+    "power": 8,
+    "ability": "!On Reveal: Draw the next Relic.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": true
   },
   {
     "carddefid": "Helicarrier",
@@ -2951,7 +3050,7 @@
     "carddefid": "InvisibleWomanAndNamor",
     "name": "Invisible Woman & Namor Doomsday",
     "cost": 3,
-    "power": 4,
+    "power": 3,
     "ability": "Frontline | Ongoing: Your opponent can only play 2 cards per turn. Backline | Ongoing: +2 Power for each location where you have the highest-Cost card.",
     "status": "unreleased",
     "source": "None",
@@ -3410,6 +3509,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "KirigiTheUndying",
+    "name": "Kirigi the Undying",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "KittyPryde",
     "name": "Kitty Pryde",
     "cost": 1,
@@ -3448,8 +3558,8 @@
     "cost": 2,
     "power": 0,
     "ability": "On Reveal: Give a 4-Cost or more character in your hand -1 Cost and a 3-Cost or less one +3 Power.",
-    "status": "unreleased",
-    "source": "None",
+    "status": "released",
+    "source": "Series 4",
     "type": "Skill",
     "random_pool_excluded": false
   },
@@ -3498,6 +3608,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "Kwannon",
+    "name": "Kwannon",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "LadyBullseye",
     "name": "Lady Bullseye",
     "cost": 2,
@@ -3531,6 +3652,17 @@
     "random_pool_excluded": true
   },
   {
+    "carddefid": "LadySamurai",
+    "name": "Lady Samurai",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "LadySif",
     "name": "Lady Sif",
     "cost": 3,
@@ -3538,6 +3670,17 @@
     "ability": "On Reveal: Discard the card that costs the most from your hand.",
     "status": "released",
     "source": "Series 1",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "LadySifMech",
+    "name": "Lady Sif Mech of Asgard",
+    "cost": 5,
+    "power": 13,
+    "ability": "!On Reveal: Add the highest-Power character from your opponent's hand here.",
+    "status": "unreleased",
+    "source": "None",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -3571,6 +3714,17 @@
     "ability": "On Reveal: Steal 1 Power from each other card here.",
     "status": "released",
     "source": "Series 4",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "LaufeyMech",
+    "name": "Laufey, Frost Giant Mech of Asgard",
+    "cost": 2,
+    "power": 1,
+    "ability": "!End of Turn: If you merged a card this turn, steal 2 Power from an enemy here.",
+    "status": "unreleased",
+    "source": "None",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -3685,6 +3839,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "LokiMech",
+    "name": "Loki Mech of Asgard",
+    "cost": 3,
+    "power": 5,
+    "ability": "",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "LukeCage",
     "name": "Luke Cage",
     "cost": 2,
@@ -3722,7 +3887,7 @@
     "name": "M'Baku & The Thing Doomsday",
     "cost": 4,
     "power": 2,
-    "ability": "!Frontline | On Reveal: Add a Vibranium to each other location. Backline | On Reveal: +2 Power for each of your backline cards in play.",
+    "ability": "Frontline | On Reveal: Add a Vibranium to each other location. Backline | Ongoing: +2 Power for each backline ally.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -3982,6 +4147,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "MechaStormbreaker",
+    "name": "Mecha Stormbreaker",
+    "cost": 0,
+    "power": 2,
+    "ability": "!Moveable End of Turn: Give your highest-Power card here +2 Power.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": true
+  },
+  {
     "carddefid": "Medusa",
     "name": "Medusa",
     "cost": 2,
@@ -4140,7 +4316,7 @@
     "name": "Mjolnir Doomsday",
     "cost": 1,
     "power": 0,
-    "ability": "On Reveal: Give {card.ModifiedCardCount} other allies here +1 Power.",
+    "ability": "On Reveal: Give 2 other allies here +1 Power.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -4307,7 +4483,7 @@
     "power": 4,
     "ability": "Ongoing: +2 Power for each higher-Cost card here.",
     "status": "released",
-    "source": "None",
+    "source": "Series 4",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -4708,6 +4884,28 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "OdinMech",
+    "name": "Odin Mech of Asgard",
+    "cost": 6,
+    "power": 8,
+    "ability": "!On Reveal: Merge a card here with an On Reveal into this. Use it twice.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "Ogun",
+    "name": "Ogun",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "Okoye",
     "name": "Okoye",
     "cost": 2,
@@ -4767,7 +4965,7 @@
     "name": "Optic Blast",
     "cost": 3,
     "power": 0,
-    "ability": "On Reveal: Afflict an enemy here with -8 Power.",
+    "ability": "On Reveal: Afflict an enemy here with -7 Power.",
     "status": "unreleased",
     "source": "None",
     "type": "Skill",
@@ -4953,7 +5151,7 @@
     "carddefid": "ProfessorXDoomsday",
     "name": "Professor X Doomsday",
     "cost": 3,
-    "power": 4,
+    "power": 5,
     "ability": "Start of Turn: Give +1 Power to each character in your hand with less Power than this.",
     "status": "unreleased",
     "source": "None",
@@ -5482,7 +5680,7 @@
     "name": "Sam Wilson & Nightcrawler Doomsday",
     "cost": 3,
     "power": 4,
-    "ability": "!Frontline | Moveable Backline | End of Turn: Give the card in front of this +1 Power and move it away.",
+    "ability": "Frontline | Moveable Backline | End of Turn: Give the ally in front of this +1 Power and move it away.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -5529,6 +5727,17 @@
     "ability": "On Reveal: Remove the abilities from all Ongoing cards in your deck.",
     "status": "released",
     "source": "Series 3",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "ScarletSamurai",
+    "name": "Scarlet Samurai",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -5819,6 +6028,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "ShinHaradaSilverSamurai",
+    "name": "Shin Harada Silver Samurai",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "Shocker",
     "name": "Shocker",
     "cost": 2,
@@ -5848,6 +6068,17 @@
     "ability": "On Reveal: If you play your next card at this location, double its Power.",
     "status": "released",
     "source": "Series 3",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "Shuriken",
+    "name": "Shuriken",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -6534,6 +6765,17 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "Spiral",
+    "name": "Spiral",
+    "cost": 0,
+    "power": 0,
+    "ability": "!none",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "Squirrel",
     "name": "Squirrel",
     "cost": 1,
@@ -6647,8 +6889,8 @@
     "carddefid": "SteveRogersDoomsday",
     "name": "Steve Rogers Doomsday",
     "cost": 2,
-    "power": 1,
-    "ability": "!On Reveal: Add Mjolnir Doomsday here. Start of Turn: Return it to your hand.",
+    "power": 2,
+    "ability": "On Reveal: Add Mjolnir Doomsday here. Start of Turn: Return it to your hand.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -6703,7 +6945,7 @@
     "name": "Stormbreaker Doomsday",
     "cost": 0,
     "power": 1,
-    "ability": "!On Reveal: Double Thor Doomsday's Power.",
+    "ability": "On Reveal: Double Thor Doomsday's Power.",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -6871,6 +7113,17 @@
     "ability": "After you play a card with 10 or more Power, this gains +2 Power.",
     "status": "released",
     "source": "Series 5",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
+    "carddefid": "SurturMech",
+    "name": "Surtur Mech of Asgard",
+    "cost": 3,
+    "power": 6,
+    "ability": "!After you play a weaker card here, merge it into this.",
+    "status": "unreleased",
+    "source": "None",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -7242,7 +7495,7 @@
     "name": "Thor Doomsday",
     "cost": 3,
     "power": 5,
-    "ability": "!On Reveal: Shuffle Stormbreaker Doomsday into your deck. Objective: Your cards in play have at least 10 increased Power Add the lowest-Cost card from your deck to here. (0/10)",
+    "ability": "On Reveal: Shuffle Stormbreaker Doomsday into your deck. Objective: Have 10 increased Power in play Add the lowest-Cost card from your deck here. (0/10)",
     "status": "unreleased",
     "source": "None",
     "type": "Character",
@@ -7524,13 +7777,24 @@
     "random_pool_excluded": false
   },
   {
+    "carddefid": "ValkyrieMech",
+    "name": "Valkyrie Mech of Asgard",
+    "cost": 6,
+    "power": 6,
+    "ability": "!On Reveal: Set your cards' Power here to mine.",
+    "status": "unreleased",
+    "source": "None",
+    "type": "Character",
+    "random_pool_excluded": false
+  },
+  {
     "carddefid": "VampireAmericaChavez",
     "name": "Vampire America Chavez",
     "cost": 3,
     "power": 4,
     "ability": "On Reveal: For each location you're winning, steal 1 Power from the top character of your opponent's deck.",
     "status": "released",
-    "source": "None",
+    "source": "Series 4",
     "type": "Character",
     "random_pool_excluded": false
   },
@@ -8033,7 +8297,7 @@
     "carddefid": "YelenaBelovaDoomsday",
     "name": "Yelena Belova Doomsday",
     "cost": 2,
-    "power": 2,
+    "power": 3,
     "ability": "End of Turn: If you played (exactly) 2 cards, give them +1 Power.",
     "status": "unreleased",
     "source": "None",

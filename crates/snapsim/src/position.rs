@@ -1346,7 +1346,8 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         destroyed: None,
         score_overrides: [None; 2],
         merge_batches: Vec::new(),
-        rng: RefCell::new(rng),
+        staging_order: None,
+        rng: RefCell::new(crate::game::GameRandom::Borrowed(rng)),
     };
     if let Some(list) = &position.opponent.deck_list {
         game.players[1].starting_deck = list

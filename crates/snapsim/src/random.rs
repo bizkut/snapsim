@@ -6,7 +6,7 @@ const M: usize = 397;
 /// Random operations consumed by game rules and policies.
 ///
 /// Implementations define their own stream; parity uses `PythonRandom`.
-pub trait GameRng {
+pub trait GameRng: Send {
     fn getrandbits(&mut self, bits: u32) -> u128;
     /// Clone the generator state for an independent simulation.
     fn clone_rng(&self) -> Box<dyn GameRng>;

@@ -23,6 +23,7 @@ mod meta_comp5;
 mod meta_d;
 mod meta_e1;
 mod meta_e2;
+mod meta_elder_dragon;
 mod meta_evolved;
 mod meta_f1;
 mod meta_f2;
@@ -266,6 +267,8 @@ pub struct CardDef {
     pub end_turn_in_hand: bool,
     /// An End-of-Turn trigger implemented through the event hook.
     pub end_turn_trigger: bool,
+    /// The End-of-Turn trigger is hidden and cannot be repeated.
+    pub end_turn_trigger_hidden: bool,
     pub on_move_here: Option<PlayHook>,
     pub on_move: Option<PlayHook>,
     pub on_destroy: Option<CardHook>,
@@ -334,6 +337,7 @@ impl CardDef {
             end_turn: None,
             end_turn_in_hand: false,
             end_turn_trigger: false,
+            end_turn_trigger_hidden: false,
             blocks_reveal: false,
             conceals_owner_cards: false,
             prevents_destroy: false,
@@ -473,6 +477,7 @@ static GROUPS: &[&[CardDef]] = &[
     meta_d::CARDS,
     meta_e1::CARDS,
     meta_e2::CARDS,
+    meta_elder_dragon::CARDS,
     meta_f1::CARDS,
     meta_f2::CARDS,
     meta_f3::CARDS,

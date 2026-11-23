@@ -17,6 +17,52 @@ The simulator has no HTTP server or web API. Use it as:
 * the `snapsim` command line and the separate tools in `crates/snapsim/src/bin` (for example `snapsim-replaycheck`);
 * the Python module `snapsim_py` (see "Advisor and Python binding"), which Snapper-Assist loads in-process. Snapper-Assist hosts the web page and its own HTTP API.
 
+The Rust `env::Env` exposes seeded two-seat games with action-at-a-time staging:
+`reset`, `legal_mask`, `step`, and seat-relative `observation`. Action IDs 0–20
+play a hand slot to a lane, 21–56 move a board slot to a lane, 57–68 activate a
+board slot, and 69–72 end the turn, snap, retreat now, or retreat later. Board slots are four per
+lane. `phase` returns the phase kind (including the ordered index and count),
+seats due, their private observations and masks;
+`step_phase` atomically submits one action for each due seat. Normal staging is
+simultaneous; Daredevil queues ordered phases, revealing completed staged cards
+only to the next acting seat. Two Daredevils can produce four phases. Terminal
+steps return signed cube results.
+
+Stake requests are buffered until the phase commits: unlike the client, a snap
+cannot be observed and answered mid-phase. Simultaneous requests use seeded
+ordering from the compare model; this random ordering is not proven client
+behavior. Observations otherwise exclude opposing hand/deck identities, hidden
+cards, unrevealed locations, and the random stream.
+
+`snapsim_py.VecEnv(decks, seeds, recruit=False, threads=1)` runs one game per
+pair of 12-card ID lists in `decks`, using independent integer seeds and a
+private Rayon pool. `reset(indices, seeds)` replaces selected games; indices
+must be distinct. `observe(phase, due, obs, masks)` writes caller-owned NumPy
+arrays: `int32[N,3]`, `uint8[N,2]`, `int32[N,2,4096]`, and `uint8[N,2,73]`,
+respectively. Phase rows are `[kind, index, total]`, where kind is 0 for
+simultaneous, 1 for ordered (zero-based index and phase count), and 2 for
+terminal; index and total are zero otherwise. A
+non-due seat has all-zero observation and mask. The first observation integer
+is the used payload length; the remaining unused integers are zero. Payload:
+turn, total turns, energy, own deck count, opponent hand and deck counts,
+current and next cubes, own and opponent snapped flags, own ended flag; then
+three location strings, hand count and cards, then for each lane the opposing
+face-down count and own and opponent board lists, then staged-opponent count and
+entries. Each list starts with its count; a card is ID string, cost, power;
+a staged entry is ID string, lane. Strings are UTF-8 byte length followed by
+one integer per byte; empty location strings denote unrevealed locations.
+Oversized observations raise rather than truncate.
+
+`step(actions, rewards, terminal, rejected)` takes `int64[N,2]` action IDs
+or `ENV_NOOP` (-1) for seats not due, and writes signed cube results to
+`int64[N,2]`, terminal flags to `uint8[N]`, and rejection flags to
+`uint8[N,2]`. Its return value contains per-seat rejection reasons or `None`;
+a rejected environment remains unchanged. Terminal games remain terminal
+until reset. `ENV_ACTION_COUNT` and `ENV_OBS_SIZE` expose the array dimensions.
+Stepping releases the GIL and parallelises across games; seed trajectories do
+not depend on the thread count. NumPy is required at runtime; the extension
+retains its Python 3.9 stable ABI.
+
 Write work files (benchmarks, replay reports, recorded cases) under a persistent folder such as `~/.cache/snapsim-work`, not `/tmp`. The examples below use `WORK="${WORK:-$HOME/.cache/snapsim-work}"`.
 
 ## Environment
@@ -297,7 +343,9 @@ Two kinds of record are reported rather than compared:
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
 * Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of an engine change is listed with its exact first-divergence path and values in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. A changed card keeps the reference's version in `cards/reference_rules.rs`, which the gates switch to with `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`; live play never does. The `replay-client` gate then checks the client rules, these changes included, against every real recording. The changes:
   * Ongoing stat effects use the 59.15.1 client's Init → modifiers → Default → ConditionalCard → ConditionalLocation → PostConditional ordering, with player effects before locations and cards. Staging preserves non-staging contributions; conditional abilities that fail are retried after later successes. Reference rules retain the frozen ordering.
+  * Revealed card trigger observers, including start-of-turn and post-start hooks, run in latest-resolution order (`Game::GetAllCardsForActivatingTriggerAbility`, `0x7dacfcc`); reference rules retain board order.
   * Morph completion and copied-text activation run only the selected default text's resolve ability (`Card::ActivateTextResolveAbility`, `0x7cbb424`), not foreign attached resolves. Reference rules retain the earlier all-resolves dispatch.
+  * Repetition effects do not repeat hidden ability instances; normal resolution still executes them once. Reference rules retain the earlier repetition behavior.
   * Nested ability dispatch uses the client's 32-active-ability limit (`Ability::CanActivate`, `0x7c8a6e0`).
   * Horde grows every owned Zombie Horde (`ZombieHordeAbilityDef::GrowZombieHorde`), not just the first; it changes one spread game. A new Horde is placed before it grows, so the growth triggers in play.
   * Sinister London copies a staged Skill after it resolves even though the Skill has already been banished (`SinisterLondonBehavior::CreateCopy`, `0x7d7fe8c`). Reference rules retain the earlier lane-based behavior.

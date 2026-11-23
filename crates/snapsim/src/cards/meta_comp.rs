@@ -514,6 +514,22 @@ mod tests {
         assert!(game.destroy_card(facedown));
         assert_eq!(game.cards[hair].permanent, before + 1);
     }
+
+    #[test]
+    fn firehair_copies_nicos_seventh_spell() {
+        let mut rng = PythonRandom::seed(44);
+        let mut game = game(&mut rng);
+        let hair = place(&mut game, "Firehair", 0, 0);
+        let nico = place(&mut game, "NicoMinoru", 0, 1);
+        game.cards[nico].override_ability = Some(super::super::get("Spell07NicoMinoru").unwrap());
+        let before = game.cards[hair].power();
+        assert!(game.destroy_card(nico));
+        let mut effect = game.players[0].pending_effects.remove(0);
+        assert_eq!(effect.source, hair);
+        let target = place(&mut game, "Wasp", 0, 2);
+        assert!((effect.apply)(&mut game, &mut effect, Some(target)));
+        assert_eq!(game.cards[hair].power(), before * 2);
+    }
     #[test]
     fn firehair_skips_hidden_resolve_and_keeps_context_independent() {
         fn count(game: &mut Game<'_>, card: usize) {

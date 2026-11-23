@@ -938,6 +938,66 @@ mod tests {
     }
 
     #[test]
+    fn first_steps_does_not_repeat_hidden_end_turn_effects() {
+        fn count(game: &mut Game<'_>, card: usize, event: Event) {
+            if matches!(event, Event::TurnEnd) {
+                game.cards[card].permanent += 1;
+            }
+        }
+        static COUNTER: CardDef = CardDef {
+            on_event: Some(count),
+            end_turn_trigger: true,
+            ..CardDef::vanilla("TestEndTurn")
+        };
+        let mut rng = PythonRandom::seed(10);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let source = game.create_card("InvisibleWomanFirstSteps", 0);
+        let she_hulk = game.create_card("SheHulk", 0);
+        let wong = game.create_card("Wong", 0);
+        let target = game.create_card("Wasp", 0);
+        game.add_card(source, 0, 0, true);
+        game.add_card(she_hulk, 0, 0, true);
+        game.add_card(wong, 0, 0, true);
+        game.add_card(target, 1, 0, true);
+        for hidden in [true, false] {
+            game.cards[target]
+                .composed_abilities
+                .push(crate::game::AbilityInstance::new(
+                    &COUNTER,
+                    crate::game::AbilityKind::Trigger,
+                    None,
+                    hidden,
+                    true,
+                    None,
+                ));
+        }
+        game.players[0].energy = 2;
+        let before = game.cards[target].permanent;
+        invisible_woman_first_steps(&mut game, source);
+        game.end_turn_effects();
+        assert_eq!(game.cards[target].permanent, before + 3);
+        assert!(game.return_board_card_to_hand(she_hulk));
+        game.ongoing();
+        assert_eq!(game.card_cost(she_hulk), 4);
+    }
+
+    #[test]
     fn jean_first_play_candidate_ignores_energy_without_recursing() {
         let mut rng = PythonRandom::seed(10);
         let deck = [

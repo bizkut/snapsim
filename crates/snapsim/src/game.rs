@@ -15,13 +15,13 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-pub trait CardState: std::any::Any {
+pub trait CardState: std::any::Any + Send {
     fn clone_box(&self) -> Box<dyn CardState>;
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
-impl<T: std::any::Any + Clone> CardState for T {
+impl<T: std::any::Any + Clone + Send> CardState for T {
     fn clone_box(&self) -> Box<dyn CardState> {
         Box::new(self.clone())
     }
@@ -983,6 +983,32 @@ impl Stakes {
     }
 }
 
+/// A game may borrow its caller's stream or own an independent stream.
+pub enum GameRandom<'a> {
+    Borrowed(&'a mut dyn GameRng),
+    Owned(Box<dyn GameRng>),
+}
+
+impl<'a> std::ops::Deref for GameRandom<'a> {
+    type Target = dyn GameRng + 'a;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(rng) => &**rng,
+            Self::Owned(rng) => &**rng,
+        }
+    }
+}
+
+impl<'a> std::ops::DerefMut for GameRandom<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Borrowed(rng) => &mut **rng,
+            Self::Owned(rng) => &mut **rng,
+        }
+    }
+}
+
 pub struct Game<'a> {
     pub cards: Vec<Card>,
     pub players: [Player; 2],
@@ -1017,7 +1043,8 @@ pub struct Game<'a> {
     pub(crate) current_ongoing_source: Option<OngoingSource>,
     pub(crate) ability_call_depth: u8,
     pub(crate) merge_batches: Vec<Vec<usize>>,
-    pub rng: RefCell<&'a mut dyn GameRng>,
+    pub(crate) staging_order: Option<Vec<usize>>,
+    pub rng: RefCell<GameRandom<'a>>,
 }
 
 static CATALOG: LazyLock<HashMap<String, data::CardData>> = LazyLock::new(|| {
@@ -1049,6 +1076,10 @@ impl<'a> Game<'a> {
 
     /// Clone all simulation state against a separately cloned RNG stream.
     pub fn fork<'b>(&self, rng: &'b mut dyn GameRng) -> Game<'b> {
+        self.fork_with_rng(GameRandom::Borrowed(rng))
+    }
+
+    fn fork_with_rng<'b>(&self, rng: GameRandom<'b>) -> Game<'b> {
         Game {
             cards: self.cards.clone(),
             ability_call_depth: self.ability_call_depth,
@@ -1078,7 +1109,24 @@ impl<'a> Game<'a> {
             score_overrides: self.score_overrides,
             current_ongoing_source: self.current_ongoing_source,
             merge_batches: self.merge_batches.clone(),
+            staging_order: self.staging_order.clone(),
             rng: RefCell::new(rng),
+        }
+    }
+
+    /// Clone a game and its random stream into an independently owned game.
+    pub fn fork_owned(&self) -> Game<'static> {
+        self.fork_with_rng(GameRandom::Owned(self.fork_rng()))
+    }
+    /// Detach a borrowed stream without cloning the rest of the game state.
+    pub fn into_owned(self) -> Game<'static> {
+        let rng = match self.rng.into_inner() {
+            GameRandom::Borrowed(rng) => rng.clone_rng(),
+            GameRandom::Owned(rng) => rng,
+        };
+        Game {
+            rng: RefCell::new(GameRandom::Owned(rng)),
+            ..self
         }
     }
 
@@ -1095,7 +1143,7 @@ impl<'a> Game<'a> {
 
     // DeepSpaceBehavior::PreventCardAbilities 0x7d4e4dc disables card
     // trigger and activate abilities here, but not player-owned effects.
-    fn card_triggers_allowed(&self, card: usize) -> bool {
+    pub(crate) fn card_triggers_allowed(&self, card: usize) -> bool {
         self.cards[card].lane.is_none_or(|lane| {
             if cards::reference_rules_enabled() {
                 !self.lanes[lane].revealed || self.lanes[lane].def.id != "DeepSpace"
@@ -1116,7 +1164,7 @@ impl<'a> Game<'a> {
         if !*HAS_EVENT_HOOKS {
             return;
         }
-        let observers: Vec<_> = self
+        let mut observers: Vec<_> = self
             .lanes
             .iter()
             .flat_map(|lane| lane.cards.iter().copied())
@@ -1125,6 +1173,18 @@ impl<'a> Game<'a> {
                     && self.cards[id].has_event_ability(true, !self.cards[id].revealed)
             })
             .collect();
+        if !cards::reference_rules_enabled() {
+            // GetAllCardsForActivatingTriggerAbility (0x7dacfcc) starts
+            // with revealed cards in latest-resolution order, then face-down cards.
+            observers.sort_by_key(|&id| {
+                (
+                    !self.cards[id].revealed,
+                    self.cards[id]
+                        .revealed
+                        .then_some(self.cards[id].latest_resolution_order),
+                )
+            });
+        }
         // Game::ActivateTriggerAbility @ 0x7da93a0 dispatches locations
         // before card abilities for PostCardResolvedTrigger.
         if matches!(event, Event::CardResolved { .. }) {
@@ -2031,7 +2091,8 @@ impl<'a> Game<'a> {
             score_overrides: [None; 2],
             current_ongoing_source: None,
             merge_batches: Vec::new(),
-            rng: RefCell::new(rng),
+            staging_order: None,
+            rng: RefCell::new(GameRandom::Borrowed(rng)),
         };
         if pre_start {
             // Game::GetAllCardsForActivatingTriggerAbility (0x7dacfcc)
@@ -3985,6 +4046,9 @@ impl<'a> Game<'a> {
         self.draw_from_deck(seat, seat);
     }
     pub fn start_turn(&mut self) {
+        if let Some(queue) = &mut self.staging_order {
+            queue.clear();
+        }
         if !cards::reference_rules_enabled() {
             self.is_wait_for_staging = false;
         }
@@ -4069,12 +4133,15 @@ impl<'a> Game<'a> {
                 }
             }
         }
-        let observers: Vec<_> = self
-            .lanes
-            .iter()
-            .flat_map(|lane| lane.cards.iter().copied())
-            .filter(|&id| self.cards[id].revealed)
-            .collect();
+        let observers: Vec<_> = if cards::reference_rules_enabled() {
+            self.lanes
+                .iter()
+                .flat_map(|lane| lane.cards.iter().copied())
+                .filter(|&id| self.cards[id].revealed)
+                .collect()
+        } else {
+            self.revealed_cards_in_resolution_order()
+        };
         for id in observers {
             if !self.card_triggers_allowed(id) {
                 continue;
@@ -4105,15 +4172,15 @@ impl<'a> Game<'a> {
                 }
             }
         }
-        let observers: Vec<_> = self
-            .lanes
-            .iter()
-            .flat_map(|lane| lane.cards.iter().copied())
-            .filter(|&id| {
-                self.cards[id].revealed
-                    && self.cards[id].default_ability().post_start_turn.is_some()
-            })
-            .collect();
+        let observers: Vec<_> = if cards::reference_rules_enabled() {
+            self.lanes
+                .iter()
+                .flat_map(|lane| lane.cards.iter().copied())
+                .filter(|&id| self.cards[id].revealed)
+                .collect()
+        } else {
+            self.revealed_cards_in_resolution_order()
+        };
         for id in observers {
             if self.cards[id].lane.is_some()
                 && self.cards[id].revealed
@@ -4988,16 +5055,34 @@ impl<'a> Game<'a> {
     }
 
     pub fn trigger_on_reveal(&mut self, card: usize) {
+        self.trigger_reveal_abilities(card, false);
+    }
+
+    // Card::<ActivateTextResolveAbility>b__474_0 (0x7cbefdc) selects
+    // ThisCardResolvedTrigger definitions only when IsHidden is false.
+    fn trigger_reveal_abilities(&mut self, card: usize, initial: bool) {
         let attached: Vec<_> = self.cards[card]
             .composed_abilities
             .iter()
-            .filter(|ability| ability.kind == AbilityKind::Reveal)
-            .filter_map(|ability| ability.def.reveal.map(|hook| (ability.id, hook)))
+            .filter(|ability| {
+                ability.kind == AbilityKind::Reveal
+                    && (initial || !ability.hidden || cards::reference_rules_enabled())
+            })
+            .filter_map(|ability| {
+                ability
+                    .def
+                    .reveal
+                    .map(|hook| (ability.id, hook, ability.hidden))
+            })
             .collect();
         self.trigger_text_reveal(card);
-        for (instance, hook) in attached {
+        for (instance, hook, hidden) in attached {
             self.execute_ability(card, instance, |game, card| {
-                game.trigger_reveal_hook(card, hook)
+                game.trigger_reveal_hook_inner(
+                    card,
+                    hook,
+                    !hidden || cards::reference_rules_enabled(),
+                )
             });
         }
     }
@@ -5016,6 +5101,10 @@ impl<'a> Game<'a> {
         }
     }
     pub(crate) fn trigger_reveal_hook(&mut self, card: usize, hook: cards::CardHook) {
+        self.trigger_reveal_hook_inner(card, hook, true);
+    }
+
+    fn trigger_reveal_hook_inner(&mut self, card: usize, hook: cards::CardHook, repeat: bool) {
         let Some(lane) = self.cards[card].lane else {
             return;
         };
@@ -5069,6 +5158,9 @@ impl<'a> Game<'a> {
                     .sum();
                 runs += additional * ongoing_base * (1 + extra);
             }
+        }
+        if !repeat {
+            runs = 1;
         }
         let original = self.cards[card].def.id;
         for _ in 0..runs {
@@ -5206,7 +5298,7 @@ impl<'a> Game<'a> {
         let post_resolve_start = self.post_resolve_plays.len();
         self.cards[id].latest_resolution_order = self.next_resolution_order;
         self.next_resolution_order += 1;
-        self.trigger_on_reveal(id);
+        self.trigger_reveal_abilities(id, true);
         // Card::ResolveForPlay 0x7cb9d90 calls TrackCardsPlayedStats
         // 0x7cba364 after the reveal, even when the card left its location.
         if was_played && self.cards[id].has_resolve_trigger() {
@@ -5340,7 +5432,7 @@ impl<'a> Game<'a> {
         }
     }
     /// Start the next turn: clear last turn's plays and draw, reveal and refresh.
-    fn begin_turn(&mut self) {
+    pub(crate) fn begin_turn(&mut self) {
         self.played = Default::default();
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
@@ -5350,7 +5442,7 @@ impl<'a> Game<'a> {
         });
         self.start_turn();
     }
-    fn action_priority(&self, priority: Option<usize>) -> usize {
+    pub(crate) fn action_priority(&self, priority: Option<usize>) -> usize {
         priority.unwrap_or_else(|| {
             let winner = self.winner();
             if winner == 2 {
@@ -5361,10 +5453,29 @@ impl<'a> Game<'a> {
         })
     }
 
-    fn resolve_action_plans(
+    pub(crate) fn resolve_action_plans(
         &mut self,
         plans: [Vec<Action>; 2],
         priority: usize,
+    ) -> Result<TurnTrace, String> {
+        self.resolve_action_plans_state(plans, priority, false)
+    }
+
+    /// Resolve actions staged by ordered phases (EndSinglePlayerStaging::OnEnter
+    /// 0x7e08b20) without applying their stage-time effects a second time.
+    pub(crate) fn resolve_already_staged(
+        &mut self,
+        plans: [Vec<Action>; 2],
+        priority: usize,
+    ) -> Result<TurnTrace, String> {
+        self.resolve_action_plans_state(plans, priority, true)
+    }
+
+    fn resolve_action_plans_state(
+        &mut self,
+        plans: [Vec<Action>; 2],
+        priority: usize,
+        already_staged: bool,
     ) -> Result<TurnTrace, String> {
         let plays = std::array::from_fn(|seat| {
             let mut staged = Vec::new();
@@ -5391,19 +5502,20 @@ impl<'a> Game<'a> {
         // (0x7cb9a24) evaluate a player's own staging state. Validate each
         // plan on a separate copy, before the opponent's hidden staging can
         // move ongoing effects or otherwise change those checks.
-        let mut costs: [Vec<i32>; 2] = std::array::from_fn(|_| Vec::new());
-        for seat in 0..2 {
-            let mut rng = self.fork_rng();
-            let mut view = self.fork(rng.as_mut());
-            for &action in &plans[seat] {
-                let cost = match action {
-                    Action::Play { card, .. } => view.card_cost(card),
-                    Action::Activate { card } => view
-                        .activation_definition(card, seat)
-                        .map_or(0, |def| def.activate_cost),
-                    Action::Move { .. } | Action::Return { .. } => 0,
-                };
-                view.stage_action(seat, action).map_err(|error| {
+        if !already_staged {
+            let mut costs: [Vec<i32>; 2] = std::array::from_fn(|_| Vec::new());
+            for seat in 0..2 {
+                let mut rng = self.fork_rng();
+                let mut view = self.fork(rng.as_mut());
+                for &action in &plans[seat] {
+                    let cost = match action {
+                        Action::Play { card, .. } => view.card_cost(card),
+                        Action::Activate { card } => view
+                            .activation_definition(card, seat)
+                            .map_or(0, |def| def.activate_cost),
+                        Action::Move { .. } | Action::Return { .. } => 0,
+                    };
+                    view.stage_action(seat, action).map_err(|error| {
                     let lanes: Vec<_> = view.lanes.iter().enumerate().map(|(lane, loc)| {
                         (if loc.revealed { loc.def.id } else { "<hidden>" }, loc.revealed, loc.destroyed, view.lane_slot_capacity(lane),
                          loc.cards.iter().map(|&id| {
@@ -5416,16 +5528,20 @@ impl<'a> Game<'a> {
                         (view.human_seat == Some(seat)).then_some(cost),
                         view.players[seat].hand.iter().map(|&id| if view.human_seat == Some(seat) { view.cards[id].def.id } else { "<hidden>" }).collect::<Vec<_>>())
                 })?;
-                costs[seat].push(cost);
+                    costs[seat].push(cost);
+                }
+            }
+            if !crate::cards::reference_rules_enabled() {
+                self.reveal_priority = Some(priority);
+            }
+            for (seat, plan) in plans.iter().enumerate() {
+                for (&action, &cost) in plan.iter().zip(&costs[seat]) {
+                    self.apply_staged_action(seat, action, cost);
+                }
             }
         }
-        if !crate::cards::reference_rules_enabled() {
+        if already_staged && !crate::cards::reference_rules_enabled() {
             self.reveal_priority = Some(priority);
-        }
-        for (seat, plan) in plans.into_iter().enumerate() {
-            for (action, cost) in plan.into_iter().zip(costs[seat].iter().copied()) {
-                self.apply_staged_action(seat, action, cost);
-            }
         }
         self.ongoing();
         self.resolve_staged_actions(priority);
@@ -6051,10 +6167,20 @@ impl<'a> Game<'a> {
                     .composed_abilities
                     .iter()
                     .filter(|ability| ability.kind == AbilityKind::Trigger)
-                    .filter_map(|ability| ability.def.end_turn.map(|hook| (ability.id, hook)))
+                    .filter_map(|ability| {
+                        ability
+                            .def
+                            .end_turn
+                            .map(|hook| (ability.id, hook, ability.hidden))
+                    })
                     .collect();
-                for (instance, hook) in attached {
-                    for _ in 0..self.end_turn_repetitions(id) {
+                for (instance, hook, hidden) in attached {
+                    let repeats = if hidden {
+                        1
+                    } else {
+                        self.end_turn_repetitions(id)
+                    };
+                    for _ in 0..repeats {
                         self.execute_ability(id, instance, hook);
                     }
                 }
@@ -6595,6 +6721,75 @@ mod staging_tests {
                 .downcast_ref::<u32>(),
             Some(&4)
         );
+    }
+
+    #[test]
+    fn start_turn_triggers_follow_latest_resolution_order() {
+        fn add(game: &mut Game<'_>, _: usize) {
+            game.players[0].energy += 1;
+        }
+        fn double(game: &mut Game<'_>, _: usize) {
+            game.players[0].energy *= 2;
+        }
+        static ADD: CardDef = CardDef {
+            start_turn: Some(add),
+            ..CardDef::vanilla("StartOrderAdd")
+        };
+        static DOUBLE: CardDef = CardDef {
+            start_turn: Some(double),
+            ..CardDef::vanilla("StartOrderDouble")
+        };
+        for (add_order, double_order, expected) in [(1, 2, 4), (2, 1, 3)] {
+            let mut rng = PythonRandom::seed(19);
+            let mut game = game(&mut rng);
+            let add_card = place(&mut game, "Wasp", 0, 0);
+            let double_card = place(&mut game, "Wasp", 0, 1);
+            game.cards[add_card].override_ability = Some(&ADD);
+            game.cards[double_card].override_ability = Some(&DOUBLE);
+            game.cards[add_card].latest_resolution_order = add_order;
+            game.cards[double_card].latest_resolution_order = double_order;
+            game.turn = 1;
+            game.start_turn();
+            assert_eq!(game.players[0].energy, expected);
+        }
+    }
+
+    #[test]
+    fn draw_observers_follow_latest_resolution_order() {
+        fn add(game: &mut Game<'_>, _: usize, event: Event) {
+            if matches!(event, Event::CardDrawn { .. }) {
+                game.players[0].energy += 1;
+            }
+        }
+        fn double(game: &mut Game<'_>, _: usize, event: Event) {
+            if matches!(event, Event::CardDrawn { .. }) {
+                game.players[0].energy *= 2;
+            }
+        }
+        static ADD: CardDef = CardDef {
+            on_event: Some(add),
+            ..CardDef::vanilla("DrawOrderAdd")
+        };
+        static DOUBLE: CardDef = CardDef {
+            on_event: Some(double),
+            ..CardDef::vanilla("DrawOrderDouble")
+        };
+        for (add_order, double_order, expected) in [(1, 2, 4), (2, 1, 3)] {
+            let mut rng = PythonRandom::seed(20);
+            let mut game = game(&mut rng);
+            let add_card = place(&mut game, "Wasp", 0, 0);
+            let double_card = place(&mut game, "Wasp", 0, 1);
+            game.cards[add_card].override_ability = Some(&ADD);
+            game.cards[double_card].override_ability = Some(&DOUBLE);
+            game.cards[add_card].latest_resolution_order = add_order;
+            game.cards[double_card].latest_resolution_order = double_order;
+            game.players[0].energy = 1;
+            game.emit(Event::CardDrawn {
+                card: add_card,
+                seat: 0,
+            });
+            assert_eq!(game.players[0].energy, expected);
+        }
     }
 
     #[test]

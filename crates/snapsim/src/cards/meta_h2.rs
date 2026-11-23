@@ -7,7 +7,10 @@ pub(crate) static CARDS: &[CardDef] = &[
         on_move: Some(dagger),
         ..CardDef::vanilla("Dagger")
     },
-    CardDef::vanilla("Daredevil"),
+    CardDef {
+        start_turn: Some(daredevil),
+        ..CardDef::vanilla("Daredevil")
+    },
     CardDef {
         reveal: Some(green_goblin),
         ..CardDef::vanilla("GreenGoblin")
@@ -24,6 +27,16 @@ pub(crate) static CARDS: &[CardDef] = &[
         ..CardDef::vanilla("JuggernautHorseman")
     },
 ];
+
+// DaredevilBehavior::ForceOpponentToStageFirst @ 0x7e87de0.
+fn daredevil(game: &mut Game<'_>, card: usize) {
+    if game.turn == 5 && game.cards[card].lane.is_some() {
+        let owner = game.cards[card].owner;
+        if let Some(queue) = &mut game.staging_order {
+            queue.extend([1 - owner, owner]);
+        }
+    }
+}
 
 // DaggerBehavior::BuffOthers @ 0x7e86cb4 counts all opposing cards, including
 // face-down cards, at the destination.

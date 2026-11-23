@@ -520,6 +520,14 @@
     "difficulty": "Advanced"
   },
   {
+    "carddefid": "HandCompound",
+    "name": "Hand Compound",
+    "ability": "",
+    "status": "unreleased",
+    "rarity": "common",
+    "difficulty": "Standard"
+  },
+  {
     "carddefid": "HellfireClub",
     "name": "Hellfire Club",
     "ability": "Cards that cost 1 can't be played here.",
@@ -598,6 +606,14 @@
     "status": "released",
     "rarity": "uncommon",
     "difficulty": "Advanced"
+  },
+  {
+    "carddefid": "JotunheimFoundry",
+    "name": "Jotunheim Foundry",
+    "ability": "After you play a card here, set its Power to 6.",
+    "status": "unreleased",
+    "rarity": "common",
+    "difficulty": "Standard"
   },
   {
     "carddefid": "KamarTaj",
@@ -900,6 +916,14 @@
     "name": "Nidavellir",
     "ability": "Cards here have +5 Power.",
     "status": "released",
+    "rarity": "common",
+    "difficulty": "Standard"
+  },
+  {
+    "carddefid": "NidavellirStarforge",
+    "name": "Nidavellir Starforge",
+    "ability": "Draw an On Reveal card.",
+    "status": "unreleased",
     "rarity": "common",
     "difficulty": "Standard"
   },

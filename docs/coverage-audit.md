@@ -6,7 +6,7 @@ Rows marked `text-only` retain provisional classifications from ability text and
 
 ## Current status
 
-The current `snapsim coverage` registry contains all 560 distinct released Character IDs and all 182 distinct released location IDs with an ID in the current catalog; none are unregistered. The historical stage-1 tables contain 314 card and 62 location rows, now registered with client RVA references. All 61 mode variants are registered, including all 21 Champion skills. Mephisto's board behavior is implemented; its client-unavailable payout rule is gated from cube outputs. Restored positions remain subject to the individual coverage gates noted below. Counts describe registration, not proof of exact behavior.
+The current `snapsim coverage` registry contains all 561 distinct released Character IDs and all 182 distinct released location IDs with an ID in the refreshed catalog; none are unregistered. The historical stage-1 tables contain 314 card and 62 location rows, now registered with client RVA references. All 61 mode variants are registered, including all 21 Champion skills. Mephisto's board behavior is implemented; its client-unavailable payout rule is gated from cube outputs. Restored positions remain subject to the individual coverage gates noted below. Counts describe registration, not proof of exact behavior.
 
 ## Summary
 
@@ -109,6 +109,7 @@ Gates per wave as in PLAN.md M14.
 | Dracula | 4/2 | other(end-of-game), discard, hand-manipulation, power-buff | implemented — random hand discard at game end | sampled opponent hand | L | 0 | client-method | DiscardCardAndBuffSelf 0x7e91548 snapshots random hand card's Power, discards it, then adds that Power on success. |
 | DragonOfTheMoon | 3/4 | on-reveal, afflict, hand-manipulation, power-buff | implemented — steal from even-cost power-bearing cards in both hands | opponent hand sampled | L | 0 | client-method | DrainFromHand 0x7e92288 and predicates 0x7e928e4, 0x7e92950 batch theft from both hands. |
 | EbonyMaw | 1/7 | ongoing, other(play-requirement) | yes — play requirement and owner-only lane guard | none | M | 0 | client-method | CanPlay 0x7e9612c limits plays to turn 3 or earlier; LimitPlay 0x7e95ec4 blocks its owner's plays here. |
+| ElderDragonOfTheMoon | 9/12 | in-hand ongoing, cost-change | implemented — discount per revealed ally with increased Power | none | S | 0 | client-method | DiscountSelf 0x7e9dfe4; IsInHand and RevealedPlayerCardsSelector filtered by WithIncreasedPower 0x7d29874; ConditionalLocation priority. |
 | Electro | 3/5 | on-reveal, ongoing, turn-change | implemented — permanent energy and owner-wide ongoing play restriction | prior permanent energy gated when not exported | S | 1 | client-method | AddPermanentEnergy 0x7e9e3d8 persists after removal; CanPlayOnlyOneCard 0x7e9e4b4 applies player-wide. |
 | Elixir | 2/3 | on-reveal, destroy, location-interaction | implemented — resurrect a card destroyed last turn | historical destruction events and instances gated | M | 1 | client-method | ReviveCandidates 0x7e9fb08 and ReviveDestroyedCard 0x7e9fc44 select a last-turn destruction still in the graveyard. |
 | ElsaBloodstone | 3/5 | power-buff, rows | implemented — pre-resolve last-slot bonus | none | M | 0 | client-method | BuffPlayedCard 0x7ea03e4 compares resolving allied card zone position with the final slot, then adds 2. |

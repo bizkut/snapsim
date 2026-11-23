@@ -1294,6 +1294,86 @@ mod tests {
         id
     }
     #[test]
+    fn gorr_and_galactus_coexist_with_zombie_blade_and_vampire_killmonger() {
+        use crate::game::Action;
+        for source_name in ["Gorr", "GalactusFirstSteps"] {
+            for (other_name, other_owner) in [
+                ("ZombieBlade", 0),
+                ("ZombieBlade", 1),
+                ("VampireKillmonger", 1),
+            ] {
+                let mut rng = PythonRandom::seed(51);
+                let mut game = fixture(&mut rng);
+                for player in &mut game.players {
+                    player.hand.clear();
+                    player.energy = 20;
+                }
+                let herald = game.create_card("Medusa", 0);
+                let source = game.create_card(source_name, 0);
+                let other = game.create_card(other_name, other_owner);
+                let victim = game.create_card("Hulk", 1 - other_owner);
+                game.players[0].hand.extend([herald, source]);
+                game.players[other_owner].hand.push(other);
+                game.players[1 - other_owner].hand.push(victim);
+                game.stage_action(
+                    0,
+                    Action::Play {
+                        card: herald,
+                        lane: 2,
+                    },
+                )
+                .unwrap();
+                game.stage_action(
+                    0,
+                    Action::Play {
+                        card: source,
+                        lane: 0,
+                    },
+                )
+                .unwrap();
+                game.stage_action(
+                    other_owner,
+                    Action::Play {
+                        card: other,
+                        lane: 1,
+                    },
+                )
+                .unwrap();
+                game.resolve_staged_actions(0);
+                assert!(game.cards[source].revealed);
+                assert!(game.cards[other].revealed);
+                if source_name == "Gorr" {
+                    assert_eq!(game.cards[source].ongoing, 2);
+                }
+                let source_before = game.cards[source].permanent;
+                game.played_on_reveal[other_owner] = true;
+                game.players[other_owner]
+                    .energy_history
+                    .push((game.turn, 0, true));
+                game.end_turn_effects();
+                if source_name == "GalactusFirstSteps" {
+                    assert_eq!(game.cards[source].permanent, source_before + 2);
+                }
+                if other_name == "ZombieBlade" {
+                    assert!(
+                        game.lanes
+                            .iter()
+                            .flat_map(|lane| &lane.cards)
+                            .any(|&id| game.cards[id].def.id == "ZombieHorde"
+                                && game.cards[id].owner == other_owner)
+                    );
+                } else {
+                    assert!(
+                        game.players[other_owner]
+                            .hand
+                            .iter()
+                            .any(|&id| game.cards[id].def.id == "VampiricSpear")
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn galactus_follows_herald_in_batch_merge() {
         let mut rng = PythonRandom::seed(5);
         let mut g = fixture(&mut rng);
@@ -1370,6 +1450,28 @@ mod tests {
         ritual_three(&mut g, third);
         assert_eq!(g.cards[a].lane, Some(1));
         assert_eq!(g.cards[b].lane, Some(1));
+    }
+    #[test]
+    fn ritual_merges_destroyed_card_into_dormammu() {
+        let mut rng = PythonRandom::seed(22);
+        let mut g = fixture(&mut rng);
+        g.players[0].hand.clear();
+        let source = place(&mut g, "Dormammu", 0, 0);
+        let ritual = place(&mut g, "SummoningRitual01Dormammu", 0, 0);
+        g.cards[ritual].state = Some(Box::new(source));
+        let victim = place(&mut g, "Hulk", 0, 1);
+        let expected = g.cards[source].permanent + g.cards[victim].permanent;
+        assert!(g.destroy_card(victim));
+        ritual_one(&mut g, ritual);
+        assert_eq!(g.cards[source].permanent, expected);
+        assert_eq!(g.cards[victim].merged_to, Some(source));
+        assert!(!g.players[0].graveyard.iter().any(|&(id, _)| id == victim));
+        assert!(
+            g.players[0]
+                .hand
+                .iter()
+                .any(|&id| g.cards[id].def.id == "SummoningRitual02Dormammu")
+        );
     }
     #[test]
     fn borrowed_ritual_keeps_source_context() {

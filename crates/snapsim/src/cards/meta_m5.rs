@@ -290,7 +290,7 @@ mod tests {
         bruce_banner(&mut game, card);
         assert_eq!(game.cards[card].def.id, "BruceBanner");
         game.players[0].energy = 1;
-        *game.rng.borrow_mut() = &mut roll_rng;
+        *game.rng.borrow_mut() = crate::game::GameRandom::Borrowed(&mut roll_rng);
         bruce_banner(&mut game, card);
         assert_eq!(game.cards[card].def.id, "BannerHulk");
     }

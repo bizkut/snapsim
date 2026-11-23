@@ -8,6 +8,7 @@ pub mod data;
 pub mod deckbuild;
 pub mod deckcodes;
 mod engine_ext;
+pub mod env;
 pub mod game;
 mod lane_contributions;
 pub mod locations;

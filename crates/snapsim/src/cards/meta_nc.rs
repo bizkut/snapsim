@@ -318,6 +318,25 @@ mod tests {
         assert!(game.players[0].deck.is_empty());
     }
     #[test]
+    fn blob_empowers_per_merge_before_man_spider_doubles() {
+        let mut rng = PythonRandom::seed(31);
+        let mut game = fixture(&mut rng);
+        place(&mut game, "Venus", 1);
+        let blob_id = place(&mut game, "Blob", 0);
+        let spider = game.create_card("ManSpider", 0);
+        let hulk = game.create_card("Hulk", 0);
+        game.players[0].deck = vec![spider, hulk];
+        let expected = (game.cards[blob_id].permanent
+            + game.cards[spider].permanent
+            + game.cards[hulk].permanent
+            + 2)
+            * 2
+            + 1;
+        blob(&mut game, blob_id);
+        assert_eq!(game.cards[blob_id].permanent, expected);
+        assert!(game.players[0].deck.is_empty());
+    }
+    #[test]
     fn peni_spdr_gives_energy_and_next_turn_movement() {
         let mut rng = PythonRandom::seed(4);
         let mut game = fixture(&mut rng);

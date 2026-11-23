@@ -900,6 +900,9 @@ mod tests {
         archangel_freeze(&mut game, source);
         archangel_complete(&mut game, source, Event::AfterTurnEnd);
         assert_eq!(game.lanes[0].cards.len(), 2);
+        let revived = game.lanes[0].cards[1];
+        assert_eq!(game.cards[revived].def.id, "Hulk");
+        assert_eq!(game.cards[revived].power(), 19);
         assert_eq!(game.players[0].graveyard.len(), 3);
     }
     #[test]

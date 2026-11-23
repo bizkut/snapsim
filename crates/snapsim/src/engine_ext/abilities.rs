@@ -438,6 +438,8 @@ impl Game<'_> {
     }
 
     /// Dispatch a snapshot of trigger instances with their own contexts.
+    /// TriggerAbility::Activate (0x7c93fd8) returns for a hidden definition
+    /// only when the activation is a repeat.
     pub(crate) fn dispatch_card_event(
         &mut self,
         card: usize,
@@ -460,14 +462,21 @@ impl Game<'_> {
                     && (!face_down || ability.def.event_active_when_unrevealed)
             })
             .filter_map(|ability| {
-                ability
-                    .def
-                    .on_event
-                    .map(|hook| (ability.id, hook, ability.def.end_turn_trigger))
+                ability.def.on_event.map(|hook| {
+                    (
+                        ability.id,
+                        hook,
+                        ability.def.end_turn_trigger,
+                        ability.hidden || ability.def.end_turn_trigger_hidden,
+                    )
+                })
             })
             .collect();
         if let Some(hook) = default_hook {
-            let repeats = if matches!(event, Event::TurnEnd) && default.end_turn_trigger {
+            let repeats = if matches!(event, Event::TurnEnd)
+                && default.end_turn_trigger
+                && (!default.end_turn_trigger_hidden || crate::cards::reference_rules_enabled())
+            {
                 self.end_turn_repetitions(card)
             } else {
                 1
@@ -476,8 +485,11 @@ impl Game<'_> {
                 self.execute_default_ability(card, |game, card| hook(game, card, event));
             }
         }
-        for (id, hook, end_turn_trigger) in attached {
-            let repeats = if matches!(event, Event::TurnEnd) && end_turn_trigger {
+        for (id, hook, end_turn_trigger, hidden) in attached {
+            let repeats = if matches!(event, Event::TurnEnd)
+                && end_turn_trigger
+                && (!hidden || crate::cards::reference_rules_enabled())
+            {
                 self.end_turn_repetitions(card)
             } else {
                 1
@@ -646,6 +658,52 @@ mod tests {
             })
             .collect();
         assert_eq!(states, [4, 11]);
+    }
+
+    #[test]
+    fn hidden_reveal_runs_once_under_wong_and_is_skipped_by_retrigger() {
+        fn hidden(game: &mut Game<'_>, card: usize) {
+            game.cards[card].permanent += 1;
+        }
+        fn visible(game: &mut Game<'_>, card: usize) {
+            game.cards[card].permanent += 10;
+        }
+        static HIDDEN: crate::cards::CardDef = crate::cards::CardDef {
+            reveal: Some(hidden),
+            ..crate::cards::CardDef::vanilla("TestHidden")
+        };
+        static VISIBLE: crate::cards::CardDef = crate::cards::CardDef {
+            reveal: Some(visible),
+            ..crate::cards::CardDef::vanilla("TestVisible")
+        };
+        let mut rng = PythonRandom::seed(34);
+        let mut game = super::super::test_game(&mut rng);
+        let wong = game.create_card("Wong", 0);
+        let target = game.create_card("Wasp", 0);
+        for id in [wong, target] {
+            game.cards[id].lane = Some(0);
+            game.lanes[0].cards.push(id);
+        }
+        game.cards[wong].revealed = true;
+        game.lanes[0].revealed = true;
+        for (def, hidden) in [(&HIDDEN, true), (&VISIBLE, false)] {
+            game.cards[target]
+                .composed_abilities
+                .push(AbilityInstance::new(
+                    def,
+                    AbilityKind::Reveal,
+                    None,
+                    hidden,
+                    true,
+                    None,
+                ));
+        }
+        game.ongoing();
+        let before = game.cards[target].permanent;
+        game.reveal(target);
+        assert_eq!(game.cards[target].permanent, before + 21);
+        game.trigger_on_reveal(target);
+        assert_eq!(game.cards[target].permanent, before + 41);
     }
 
     #[test]
