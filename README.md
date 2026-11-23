@@ -363,7 +363,7 @@ The advisor corpus has 898 records, of which the gate compares 834 and identifie
 | Deck builder | `SNAPSIM_PY_PATH=MODULE parity/deckbuild_compare.py`; again with `SNAPSIM_COMPLETE_ONLY=1` | 12 cancellation cut-offs and 1 complete run identical |
 | Command line | `SNAPSIM_BIN=snapsim parity/cli_compare.py`, `cli_deckbuild.py`, `cli_snap.py` | 7 + 1 + 2 cases |
 | Replay checker | `parity/replay_compare.py --python PY --reference REF --rust snapsim-replaycheck RECORDINGS` | 10 recordings byte-identical, one at a time and together |
-| Client rules on real matches | `snapsim-replaycheck RECORDINGS` without the reference variables | frozen corpus `~/.cache/snapsim-oracles/corpus-2026-11-23` (60 Snapper-Assist recordings and 4 SNAP snapshots, checksums in `SHA256SUMS`) at `1d55d61cb6`: 249 consistent (3 order-enumerated), 0 inconsistent, 99 not checkable turns; at `f11e147dda` it was 243 / 0 / 105, and every changed turn is attributed to a newly implemented card or a named missing-state reason |
+| Client rules on real matches | `snapsim-replaycheck RECORDINGS` without the reference variables | private frozen corpus (60 Snapper-Assist recordings and 4 SNAP snapshots from 2026-11-23, not distributed; checksums kept with it) at `cab9770713`: 249 consistent (3 order-enumerated), 0 inconsistent, 99 not checkable turns; at `a70e5cc681` it was 243 / 0 / 105, and every changed turn is attributed to a newly implemented card or a named missing-state reason |
 
 The Python suite of the frozen checkout (360 tests) also passes against this module.
 
