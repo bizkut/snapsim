@@ -4253,16 +4253,14 @@ impl<'a> Game<'a> {
     ) -> &'static cards::ongoing_priorities::OngoingMetadata {
         // The client commonly labels the stat-changing hand ability "Ongoing";
         // a second "InHandOngoing" on the same card may only produce VFX.
-        cards::ongoing_priorities::ONGOING_PRIORITIES
-            .iter()
-            .find(|row| row.0 == def.id && row.2 == "Ongoing")
+        let rows = cards::ongoing_priorities::ONGOING_PRIORITIES;
+        let start = rows.partition_point(|row| row.0 < def.id);
+        let matching = || rows[start..].iter().take_while(|row| row.0 == def.id);
+        matching()
+            .find(|row| row.2 == "Ongoing")
             .or_else(|| {
-                hand.then(|| {
-                    cards::ongoing_priorities::ONGOING_PRIORITIES
-                        .iter()
-                        .find(|row| row.0 == def.id && row.2 == "InHandOngoing")
-                })
-                .flatten()
+                hand.then(|| matching().find(|row| row.2 == "InHandOngoing"))
+                    .flatten()
             })
             .unwrap_or_else(|| panic!("missing ongoing stat priority for {}", def.id))
     }
@@ -4452,9 +4450,93 @@ impl<'a> Game<'a> {
         }
     }
 
+    /// Whether the staging updater can change a scheduled contribution or
+    /// regenerate copied Ongoing abilities. This is deliberately conservative.
+    fn staging_refresh_needed(&self) -> bool {
+        if self.players.iter().any(|player| {
+            player
+                .cost_effects
+                .iter()
+                .any(|effect| effect.kind.ongoing_schedule().1)
+        }) || self.lanes.iter().any(|lane| {
+            locations::ongoing_stat_schedule(lane.def.id).is_some_and(|(_, active, _, _)| active)
+        }) || self.cards.iter().any(|card| {
+            !card.copied_ongoing_guards.is_empty()
+                || !card.virtual_ongoing_ids.is_empty()
+                || card
+                    .composed_abilities
+                    .iter()
+                    .any(|ability| ability.parent.is_some())
+        }) {
+            return true;
+        }
+        let scheduled = |card: usize, hand: bool| {
+            if !hand
+                && matches!(
+                    self.cards[card].default_ability().id,
+                    "Moonstone" | "SuperSkrull"
+                )
+            {
+                return true;
+            }
+            self.cards[card]
+                .abilities()
+                .filter(|ability| ability.supports(AbilityKind::Ongoing))
+                .filter(|ability| ability.id.is_some() || !self.cards[card].abilities_removed)
+                .any(|ability| {
+                    if !hand
+                        && matches!(ability.def.id, "Moonstone" | "SuperSkrull" | "RedOnslaught")
+                    {
+                        return true;
+                    }
+                    let def = ability.def;
+                    let hook = if hand {
+                        def.conditional_in_hand_ongoing.is_some()
+                            || def.in_hand_ongoing.is_some()
+                            || def.late_in_hand_ongoing.is_some()
+                    } else {
+                        def.late_ongoing.is_some() || def.ongoing.is_some()
+                    };
+                    hook && Self::client_ongoing_metadata(def, hand).4
+                })
+        };
+        self.players
+            .iter()
+            .any(|player| player.hand.iter().any(|&card| scheduled(card, true)))
+            || self.lanes.iter().any(|lane| {
+                lane.cards
+                    .iter()
+                    .any(|&card| self.cards[card].revealed && scheduled(card, false))
+            })
+    }
+
+    fn finish_client_ongoing(&mut self) {
+        for lane in 0..3 {
+            for index in 0..self.lanes[lane].cards.len() {
+                let id = self.lanes[lane].cards[index];
+                if !self.cards[id].abilities_removed
+                    && (self.cards[id].revealed || self.cards[id].turn_played > 0)
+                    && let Some(hook) = self.cards[id].default_ability().objective_update
+                {
+                    self.execute_default_ability(id, hook);
+                }
+            }
+        }
+        self.emit(Event::Ongoing);
+    }
+
     // AbilitySystem::UpdateOngoingStats 0x7c94474: Init, modifiers,
     // Default, ConditionalCard, ConditionalLocation, PostConditional.
     fn client_ongoing(&mut self) {
+        let staging = self.is_wait_for_staging;
+        if staging && !self.staging_refresh_needed() {
+            self.finish_client_ongoing();
+            return;
+        }
+        self.client_ongoing_scheduled();
+    }
+
+    fn client_ongoing_scheduled(&mut self) {
         let staging = self.is_wait_for_staging;
         // Card::ClearOngoingStatsWhileStaging 0x7cb4cec clears only
         // movement/play restriction caches. Those guards are evaluated on
@@ -4739,18 +4821,7 @@ impl<'a> Game<'a> {
             }
         }
         self.finish_copied_ongoing(&copied);
-        for lane in 0..3 {
-            for index in 0..self.lanes[lane].cards.len() {
-                let id = self.lanes[lane].cards[index];
-                if !self.cards[id].abilities_removed
-                    && (self.cards[id].revealed || self.cards[id].turn_played > 0)
-                    && let Some(hook) = self.cards[id].default_ability().objective_update
-                {
-                    self.execute_default_ability(id, hook);
-                }
-            }
-        }
-        self.emit(Event::Ongoing);
+        self.finish_client_ongoing();
     }
 
     pub fn ongoing(&mut self) {
@@ -6321,6 +6392,66 @@ mod staging_tests {
     }
 
     #[test]
+    fn ongoing_metadata_lookup_matches_original_order_and_fallback() {
+        let rows = crate::cards::ongoing_priorities::ONGOING_PRIORITIES;
+        assert!(rows.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        for def in crate::cards::registry() {
+            for hand in [false, true] {
+                let expected = rows
+                    .iter()
+                    .find(|row| row.0 == def.id && row.2 == "Ongoing")
+                    .or_else(|| {
+                        hand.then(|| {
+                            rows.iter()
+                                .find(|row| row.0 == def.id && row.2 == "InHandOngoing")
+                        })
+                        .flatten()
+                    });
+                if let Some(expected) = expected {
+                    assert_eq!(Game::client_ongoing_metadata(def, hand), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_staging_refresh_matches_full_scheduler() {
+        let mut rng = PythonRandom::seed(400);
+        let mut source = game(&mut rng);
+        source.lanes[0].def = crate::locations::get("Elysium").unwrap();
+        let blue = source.create_card("BlueMarvel", 0);
+        let target = source.create_card("Hulk", 0);
+        assert!(source.add_card(blue, 1, 0, false));
+        assert!(source.add_card(target, 2, 0, false));
+        source.is_wait_for_staging = false;
+        source.ongoing();
+        source.is_wait_for_staging = true;
+        assert!(!source.staging_refresh_needed());
+        let mut fast_rng = source.fork_rng();
+        let mut full_rng = source.fork_rng();
+        let mut fast = source.fork(fast_rng.as_mut());
+        let mut full = source.fork(full_rng.as_mut());
+        fast.client_ongoing();
+        full.client_ongoing_scheduled();
+        assert_eq!(
+            crate::position::state_json(&fast),
+            crate::position::state_json(&full)
+        );
+        for id in 0..fast.cards.len() {
+            assert_eq!(fast.card_cost(id), full.card_cost(id));
+            assert_eq!(fast.cards[id].power(), full.cards[id].power());
+            assert_eq!(
+                format!("{:?}", fast.cards[id].stat_updates),
+                format!("{:?}", full.cards[id].stat_updates)
+            );
+        }
+        assert_eq!(
+            fast.rng.borrow_mut().getrandbits(64),
+            full.rng.borrow_mut().getrandbits(64)
+        );
+    }
+
+    #[test]
     fn staging_preserves_non_staging_power_and_cost_contributions() {
         let mut rng = PythonRandom::seed(401);
         let mut game = game(&mut rng);
@@ -6365,6 +6496,7 @@ mod staging_tests {
         game.ongoing();
         game.turn = 2;
         game.is_wait_for_staging = true;
+        assert!(game.staging_refresh_needed());
         game.ongoing();
         let power = game.cards[card].power();
         let cost = game.card_cost(card);

@@ -58,6 +58,9 @@ pub struct AdviseOptions {
     /// Independent cube-policy samples per scenario; zero preserves legacy advice.
     #[serde(default)]
     pub stake_rollouts: u32,
+    /// Minimum samples for the chosen plan behind each stake-policy estimate.
+    #[serde(default = "default_stake_policy_rollouts")]
+    pub stake_policy_rollouts: usize,
     pub max_plans: usize,
     pub time_limit: Option<f64>,
     #[serde(default)]
@@ -67,6 +70,10 @@ pub struct AdviseOptions {
     #[serde(default)]
     pub plays_only: bool,
     pub workers: usize,
+}
+
+fn default_stake_policy_rollouts() -> usize {
+    32
 }
 
 #[derive(Clone)]
@@ -383,7 +390,7 @@ pub fn advise(
     options: &AdviseOptions,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Value, String> {
-    advise_with_game(position, options, cancel, None)
+    advise_with_game(position, options, cancel, None, 0)
 }
 
 pub(crate) fn advise_with_game(
@@ -391,9 +398,13 @@ pub(crate) fn advise_with_game(
     options: &AdviseOptions,
     cancel: &(dyn Fn() -> bool + Sync),
     authority: Option<(&Game<'_>, usize)>,
+    min_plan_samples: usize,
 ) -> Result<Value, String> {
     if options.rollouts == 0 || options.max_plans == 0 || options.workers == 0 {
         return Err("rollouts, max_plans and workers must be positive".into());
+    }
+    if options.stake_rollouts > 0 && options.stake_policy_rollouts == 0 {
+        return Err("stake_policy_rollouts must be positive when stake_rollouts is enabled".into());
     }
     if options
         .time_limit
@@ -486,6 +497,7 @@ pub(crate) fn advise_with_game(
             .chain(selected.into_iter().map(|i| legal[i + 1].clone()))
             .collect();
     }
+    let candidate_plans = legal.len();
     let mut active: Vec<_> = legal.into_iter().map(Candidate::new).collect();
     let keep = options.max_plans.min(active.len());
     let mut remaining = options.rollouts;
@@ -510,7 +522,9 @@ pub(crate) fn advise_with_game(
         let mut interrupted = false;
         while cursor < size {
             let first = remaining == options.rollouts;
-            if !first && stopped() {
+            // An enclosing cancellation must also stop the mandatory first
+            // rollout; the local time budget still permits that first sample.
+            if stopped() && (!first || cancel()) {
                 interrupted = true;
                 break;
             }
@@ -584,14 +598,28 @@ pub(crate) fn advise_with_game(
     }
     active.retain(|candidate| candidate.samples > 0);
     active.sort_by(Candidate::cmp_rank);
+    let mut extra_samples = 0;
+    if let Some(best) = active.first_mut() {
+        while best.samples < min_plan_samples && !stopped() {
+            let seed = rng.getrandbits(64) as u64;
+            let mut sample_rng = PythonRandom::seed(seed as i128);
+            let mut game = build_game(position, &mut sample_rng)?;
+            let winner = play_out(&mut game, position, &best.plays, policy, options.plays_only)?;
+            best.record(winner);
+            extra_samples += 1;
+        }
+    }
     let plans: Vec<_> = active
         .iter()
         .take(options.max_plans)
         .map(|c| c.result(position, options.plays_only))
         .collect();
     let mut result = json!({"engine": "simulator-rollout", "status": status,
-        "rollouts": options.rollouts - remaining, "plans": plans,
+        "rollouts": options.rollouts - remaining + extra_samples, "plans": plans,
         "unsupported": unsupported, "priors": priors});
+    if min_plan_samples > 0 {
+        result["policy_estimate_diagnostics"] = json!({"candidate_plans": candidate_plans});
+    }
     if !crate::cards::reference_rules_enabled() {
         result["retreat_available"] = json!(retreat_available);
     }
@@ -636,6 +664,7 @@ pub(crate) fn advise_with_game(
         result["stake_rollouts"] = crate::compare::stake_position_sweep(
             position,
             options.stake_rollouts,
+            options.stake_policy_rollouts,
             options.seed,
             &stake_stopped,
         )?;
@@ -646,6 +675,34 @@ pub(crate) fn advise_with_game(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stake_advice_respects_outer_time_limit() {
+        let position: Position =
+            serde_json::from_str(include_str!("../tests/fixtures/stakes-kyln.json")).unwrap();
+        let options: AdviseOptions = serde_json::from_value(json!({
+            "rollouts": 8, "position_rollouts": 1, "stake_rollouts": 8,
+            "stake_policy_rollouts": 64, "seed": 20261123, "max_plans": 1,
+            "time_limit": 0.1, "approximate": true, "playout": "spread", "workers": 1
+        }))
+        .unwrap();
+        let start = Instant::now();
+        let result = advise_with_game(&position, &options, &|| false, None, 0).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(
+            result["stake_rollouts"]["scenarios"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|scenario| {
+                    scenario["values"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .any(|value| value["reason"] == "not_enough_time")
+                })
+        );
+    }
 
     #[test]
     fn unregistered_cards_in_discarded_zones_are_declined() {
@@ -699,6 +756,11 @@ mod tests {
             "approximate": true, "playout": "spread", "workers": 1
         });
         let default = advise_json(&position, &options.to_string()).unwrap();
+        options["stake_policy_rollouts"] = json!(73);
+        assert_eq!(
+            default,
+            advise_json(&position, &options.to_string()).unwrap()
+        );
         options["position_rollouts"] = json!(0);
         assert_eq!(
             default,
@@ -720,6 +782,38 @@ mod tests {
             .sum::<f64>();
         assert!((total - 1.0).abs() < 1e-12);
         assert_eq!(enabled, serde_json::from_str::<Value>(&default).unwrap());
+    }
+
+    #[test]
+    fn policy_estimate_refines_the_selected_plan_to_requested_samples() {
+        let position = Position::from_json(
+            &json!({
+                "turn": 3, "energy": 3,
+                "hand": [{"id":"Wasp"}, {"id":"Medusa"}], "deck": [],
+                "locations": [
+                    {"id":"Ruins", "mine":[], "theirs":[]},
+                    {"id":"Ruins", "mine":[], "theirs":[]},
+                    {"id":"Ruins", "mine":[], "theirs":[]}
+                ],
+                "opponent": {"hand":0, "deck":0}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let options: AdviseOptions = serde_json::from_value(json!({
+            "rollouts":32,"seed":42,"max_plans":1,"time_limit":null,
+            "approximate":true,"playout":"spread","workers":1
+        }))
+        .unwrap();
+        assert_eq!(options.stake_policy_rollouts, 32);
+        let result = advise_with_game(&position, &options, &|| false, None, 32).unwrap();
+        assert_eq!(result["plans"][0]["samples"], 32);
+        assert!(
+            result["policy_estimate_diagnostics"]["candidate_plans"]
+                .as_u64()
+                .unwrap()
+                > 1
+        );
     }
 
     #[test]
@@ -905,5 +999,24 @@ mod tests {
         game.players[0].energy = 0;
         assert!(!game.cards[receiver].has_ongoing(true));
         assert!(!plan_contains_move(&game, receiver));
+    }
+    #[test]
+    fn zero_cost_staging_keeps_all_ordered_plans() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 1, "energy": 0,
+            "hand": [{"id":"Wasp"}, {"id":"Wasp"}, {"id":"Wasp"}],
+            "deck": [], "opponent": {"hand":0, "deck":0},
+            "locations": [
+                {"id":"Ruins", "mine":[], "theirs":[]},
+                {"id":"Xandar", "mine":[], "theirs":[]},
+                {"id":"KamarTaj", "mine":[], "theirs":[]}
+            ]
+        }))
+        .unwrap();
+        let mut rng = PythonRandom::seed(123);
+        let game = build_game(&position, &mut rng).unwrap();
+        let plans = legal_action_plans(&game, None, &|| false);
+        // Empty plan plus P(3,k) * 3^k for k=1..3.
+        assert_eq!(plans.len(), 226);
     }
 }

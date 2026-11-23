@@ -70,10 +70,17 @@ The JSON advisor accepts `stake_rollouts` (default 0), alongside
 separate scenarios for observed or assumed local snap eligibility and six
 opponent threshold policies. Values use simulated play and stake decisions for
 both seats; they are policy sensitivity estimates, not fitted probabilities.
+`stake_policy_rollouts` controls the minimum chosen-plan samples behind each
+seat's stake decision (default 32). Search first shares this budget across
+candidates using the normal advisor, then samples its chosen plan until that
+minimum is met. The result includes histograms of candidate-plan counts and
+chosen-plan samples; they describe the simulated policy, not calibration.
 The simulator assumes an eight-cube cap if unobserved, standard final doubling,
 and opponent eligibility if unknown; it omits scenarios whose displayed
-current/next values cannot uniquely establish the pending multiplier. Deadline
-or cancellation may leave individual scenarios without samples.
+current/next values cannot uniquely establish the pending multiplier. The outer
+deadline and cancellation also stop nested stake-policy searches. An interrupted
+scenario is reported as `not_enough_time` rather than a partial estimate; work
+already inside an individual game operation can still finish after the deadline.
 Mephisto's extra winnings are server-side, with no client behavior definition:
 stake advice declines when he is observed in play or exceeds 5% of sampled
 end states. Otherwise it reports unknown sample counts and estimates from known

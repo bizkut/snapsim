@@ -6,7 +6,7 @@ use crate::{
     random::PythonRandom,
 };
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Collision-free pairing of a signed root seed and an episode index.
 pub fn episode_seed(seed: i128, index: usize, held_out: bool) -> i128 {
@@ -230,6 +230,29 @@ pub fn search_plan(
     seed: i128,
     time_limit: Option<f64>,
 ) -> Result<Vec<Action>, String> {
+    search_plan_with_stop(
+        game,
+        seat,
+        priority,
+        mode,
+        options,
+        seed,
+        time_limit,
+        &|| false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_plan_with_stop(
+    game: &Game<'_>,
+    seat: usize,
+    priority: Option<usize>,
+    mode: Option<&str>,
+    options: &Value,
+    seed: i128,
+    time_limit: Option<f64>,
+    stopped: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Action>, String> {
     let prior = options
         .get("prior")
         .and_then(Value::as_str)
@@ -243,6 +266,7 @@ pub fn search_plan(
         seed,
         position_rollouts: 0,
         stake_rollouts: 0,
+        stake_policy_rollouts: 32,
         max_plans: 1,
         time_limit,
         approximate: true,
@@ -257,7 +281,46 @@ pub fn search_plan(
             .and_then(Value::as_bool)
             .unwrap_or(false),
     };
-    let result = advise::advise_with_game(&position, &options, &|| false, Some((game, seat)))?;
+    // Release builds contain no probe. In debug builds the environment variable
+    // is read once; only enabled runs allocate or start a watchdog.
+    #[cfg(debug_assertions)]
+    let slow_probe = {
+        use std::sync::{
+            LazyLock,
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        static DIRECTORY: LazyLock<Option<std::ffi::OsString>> =
+            LazyLock::new(|| std::env::var_os("SNAPSIM_SLOW_PLAN_DUMP_DIR"));
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        DIRECTORY.as_ref().map(|directory| {
+                let filename = format!("slow-plan-{}-{}.json", std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed));
+                let path = std::path::PathBuf::from(directory).join(filename);
+                let payload = json!({"position": position, "seed": seed.to_string(),
+                    "turn": game.turn, "seat": seat, "priority": priority, "mode": mode,
+                    "rollouts": options.rollouts, "playout": options.playout,
+                    "plays_only": options.plays_only,
+                    "hand_cost_basis": position.hand.iter().map(|card| card.cost_basis).collect::<Vec<_>>()});
+                let (done, receiver) = mpsc::channel::<()>();
+                std::thread::spawn(move || {
+                    if matches!(receiver.recv_timeout(Duration::from_secs(30)), Err(mpsc::RecvTimeoutError::Timeout))
+                        && let Err(error) = std::fs::write(&path, payload.to_string())
+                    {
+                        eprintln!("cannot write slow-plan dump {}: {error}", path.display());
+                    }
+                });
+                done
+            })
+    };
+    let result = advise::advise_with_game(&position, &options, stopped, Some((game, seat)), 0);
+    #[cfg(debug_assertions)]
+    drop(slow_probe);
+    if stopped() {
+        return Err("stake search interrupted".into());
+    }
+    let result = result?;
     let plan = result["plans"]
         .as_array()
         .and_then(|p| p.first())
@@ -653,12 +716,22 @@ fn apply_stake_decisions(
     Ok(None)
 }
 
+#[derive(Default)]
+struct PolicyEstimateStats {
+    candidates: BTreeMap<usize, usize>,
+    samples: BTreeMap<usize, usize>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn stake_estimate(
     game: &Game<'_>,
     player: usize,
     mode: Option<&str>,
     rollouts: usize,
     seed: i128,
+    min_plan_samples: usize,
+    stats: Option<&mut PolicyEstimateStats>,
+    stopped: &(dyn Fn() -> bool + Sync),
 ) -> Result<f64, String> {
     let mut position = search_position(game, player, None, mode, None);
     // The opponent's pending power may not be visible to this player.
@@ -667,6 +740,7 @@ fn stake_estimate(
         rollouts,
         position_rollouts: 0,
         stake_rollouts: 0,
+        stake_policy_rollouts: 32,
         seed,
         max_plans: 1,
         time_limit: None,
@@ -675,11 +749,26 @@ fn stake_estimate(
         workers: 1,
         plays_only: false,
     };
-    let result = advise::advise(&position, &options, &|| false)?;
-    result["plans"]
+    let result = advise::advise_with_game(&position, &options, stopped, None, min_plan_samples)?;
+    if stopped() {
+        return Err("stake estimate interrupted".into());
+    }
+    let plan = result["plans"]
         .as_array()
         .and_then(|plans| plans.first())
-        .and_then(|plan| plan["win"].as_f64())
+        .ok_or_else(|| "stake estimate unavailable".to_owned())?;
+    if let Some(stats) = stats {
+        let candidates = result["policy_estimate_diagnostics"]["candidate_plans"]
+            .as_u64()
+            .ok_or("missing stake candidate diagnostics")? as usize;
+        let samples = plan["samples"]
+            .as_u64()
+            .ok_or("missing stake sample diagnostics")? as usize;
+        *stats.candidates.entry(candidates).or_default() += 1;
+        *stats.samples.entry(samples).or_default() += 1;
+    }
+    plan["win"]
+        .as_f64()
         .ok_or_else(|| "stake estimate unavailable".to_owned())
 }
 
@@ -748,13 +837,20 @@ fn stake_outcome(game: &Game<'_>, value: i64) -> StakeOutcome {
 }
 
 /// One stand-in policy game from a visible planning position.
+#[allow(clippy::too_many_arguments)]
 fn stake_position_game(
     position: &Position,
     initial: StakeDecision,
     local_can_raise: bool,
     opponent: ThresholdStakePolicy,
     seed: i128,
+    policy_rollouts: usize,
+    stats: &mut PolicyEstimateStats,
+    stopped: &(dyn Fn() -> bool + Sync),
 ) -> Result<StakeOutcome, String> {
+    if stopped() {
+        return Err("stake continuation interrupted".into());
+    }
     let Some(stakes) = restored_stakes(position, local_can_raise) else {
         return Ok(StakeOutcome::Unavailable);
     };
@@ -775,8 +871,17 @@ fn stake_position_game(
     )? {
         return Ok(stake_outcome(&game, result[0]));
     }
-    let estimate = stake_estimate(&game, 1, position.mode.as_deref(), 4, seed ^ 1)
-        .map_err(|error| format!("opponent stake estimate: {error}"))?;
+    let estimate = stake_estimate(
+        &game,
+        1,
+        position.mode.as_deref(),
+        policy_rollouts,
+        seed ^ 1,
+        policy_rollouts,
+        Some(stats),
+        stopped,
+    )
+    .map_err(|error| format!("opponent stake estimate: {error}"))?;
     let response = opponent.decide(estimate, game.stakes.as_ref().unwrap().snapped[1]);
     if let Some(result) = apply_stake_decisions(
         &mut game,
@@ -799,6 +904,9 @@ fn stake_position_game(
     while game.turn <= game.total_turns {
         let turn = game.turn;
         let mut retreat = None;
+        if stopped() {
+            return Err("stake continuation interrupted".into());
+        }
         let played = game
             .play_turn_with_stakes(
                 |game| {
@@ -808,8 +916,11 @@ fn stake_position_game(
                             game,
                             seat,
                             position.mode.as_deref(),
-                            4,
+                            policy_rollouts,
                             seed.wrapping_add(i128::from(turn) * 2 + seat as i128),
+                            policy_rollouts,
+                            Some(stats),
+                            stopped,
                         )
                         .map_err(|error| {
                             format!("turn {turn}, seat {seat} stake estimate: {error}")
@@ -827,7 +938,7 @@ fn stake_position_game(
                     Ok(true)
                 },
                 |game, seat, priority| {
-                    search_plan(
+                    search_plan_with_stop(
                         game,
                         seat,
                         Some(priority),
@@ -835,6 +946,7 @@ fn stake_position_game(
                         &json!({"rollouts": 4, "playout": "spread"}),
                         seed,
                         None,
+                        stopped,
                     )
                 },
             )
@@ -874,6 +986,7 @@ fn stake_sample_value(total: i64, count: u32, unknown: u32, available: bool) -> 
 pub(crate) fn stake_position_sweep(
     position: &Position,
     samples: u32,
+    policy_rollouts: usize,
     seed: i128,
     stopped: &(dyn Fn() -> bool + Sync),
 ) -> Result<Value, String> {
@@ -906,6 +1019,7 @@ pub(crate) fn stake_position_sweep(
     let mut totals = [[[0_i64; 3]; 6]; 2];
     let mut counts = [[[0_u32; 3]; 6]; 2];
     let mut unknown = [[[0_u32; 3]; 6]; 2];
+    let mut estimate_stats = PolicyEstimateStats::default();
     let mut available = [[[true; 3]; 6]; 2];
     for policy in &mut available[1] {
         policy[0] = false;
@@ -926,10 +1040,24 @@ pub(crate) fn stake_position_sweep(
                     if stopped() {
                         break 'sampling;
                     }
-                    match stake_position_game(position, action, eligible, policy,
-                        seed.wrapping_add(i128::from(index))).map_err(|error| format!(
-                            "stake rollout sample {index}, eligibility {eligible}, policy {policy_index}, action {action:?}: {error}"
-                        ))? {
+                    let outcome = stake_position_game(
+                        position,
+                        action,
+                        eligible,
+                        policy,
+                        seed.wrapping_add(i128::from(index)),
+                        policy_rollouts,
+                        &mut estimate_stats,
+                        stopped,
+                    );
+                    if stopped() {
+                        counts[seat_case][policy_index][action_index] = 0;
+                        unknown[seat_case][policy_index][action_index] = 0;
+                        break 'sampling;
+                    }
+                    match outcome.map_err(|error| format!(
+                        "stake rollout sample {index}, eligibility {eligible}, policy {policy_index}, action {action:?}: {error}"
+                    ))? {
                         StakeOutcome::Known(value) => {
                             totals[seat_case][policy_index][action_index] += value;
                             counts[seat_case][policy_index][action_index] += 1;
@@ -958,7 +1086,10 @@ pub(crate) fn stake_position_sweep(
                     available[seat_case][policy_index][action_index],
                 ) else {
                     return Ok(json!({"declined": MEPHISTO_STAKE_REASON,
-                        "unknown_samples": unknown_count, "known_samples": count}));
+                        "unknown_samples": unknown_count, "known_samples": count,
+                        "policy_estimate_diagnostics": {"target_min_samples": policy_rollouts,
+                            "candidate_plans": estimate_stats.candidates,
+                            "chosen_plan_samples": estimate_stats.samples}}));
                 };
                 values.insert(action.into(), value);
             }
@@ -966,9 +1097,10 @@ pub(crate) fn stake_position_sweep(
                 .push(json!({"you_can_snap": eligible, "opponent_policy": name, "values": values}));
         }
     }
-    Ok(
-        json!({"scenarios": scenarios, "basis": "provisional policy sweep; opponent eligibility assumed when unobserved; 4-rollout threshold estimates; immediate retreat uses displayed current cubes"}),
-    )
+    Ok(json!({"scenarios": scenarios,
+        "policy_estimate_diagnostics": {"target_min_samples": policy_rollouts,
+            "candidate_plans": estimate_stats.candidates, "chosen_plan_samples": estimate_stats.samples},
+        "basis": "provisional policy sweep; opponent eligibility assumed when unobserved; immediate retreat uses displayed current cubes"}))
 }
 
 /// Whether snaps may raise the stake. In the owner's recordings RankedRecruit matches stayed at
@@ -1052,6 +1184,9 @@ fn stake_game(
                         mode,
                         rollouts,
                         seed.wrapping_add(i128::from(turn) * 2),
+                        0,
+                        None,
+                        &|| false,
                     )?,
                     stake_estimate(
                         game,
@@ -1059,6 +1194,9 @@ fn stake_game(
                         mode,
                         rollouts,
                         seed.wrapping_add(i128::from(turn) * 2 + 1),
+                        0,
+                        None,
+                        &|| false,
                     )?,
                 ];
                 let stakes = game.stakes.as_ref().ok_or("missing stakes")?;
@@ -1651,12 +1789,102 @@ mod tests {
     }
 
     #[test]
+    fn stake_sweep_stops_inside_expensive_continuations() {
+        let position: crate::position::Position =
+            serde_json::from_str(include_str!("../tests/fixtures/stakes-kyln.json")).unwrap();
+        let start = std::time::Instant::now();
+        let limit = std::time::Duration::from_millis(100);
+        let result =
+            super::stake_position_sweep(&position, 8, 64, 20_261_123, &|| start.elapsed() >= limit)
+                .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        let scenarios = result["scenarios"].as_array().unwrap();
+        assert!(scenarios.iter().any(|scenario| {
+            scenario["values"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|value| value["reason"] == "not_enough_time")
+        }));
+    }
+
+    #[test]
+    fn nested_stake_searches_honour_cancellation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let position: crate::position::Position =
+            serde_json::from_str(include_str!("../tests/fixtures/stakes-kyln.json")).unwrap();
+        let mut rng = crate::random::PythonRandom::seed(20_261_123);
+        let game = crate::position::build_game(&position, &mut rng).unwrap();
+        let calls = AtomicUsize::new(0);
+        let stopped = || calls.fetch_add(1, Ordering::Relaxed) >= 3;
+        assert!(
+            super::stake_estimate(
+                &game,
+                0,
+                position.mode.as_deref(),
+                64,
+                20_261_123,
+                64,
+                None,
+                &stopped,
+            )
+            .is_err()
+        );
+        calls.store(0, Ordering::Relaxed);
+        assert!(
+            super::search_plan_with_stop(
+                &game,
+                0,
+                None,
+                position.mode.as_deref(),
+                &json!({"rollouts": 4}),
+                20_261_123,
+                None,
+                &stopped,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn policy_estimate_records_plan_and_sample_distributions() {
+        let position = crate::position::Position::from_json(
+            &json!({
+                "turn": 6, "energy": 6, "hand": [{"id":"Wasp"},{"id":"Medusa"}], "deck": [],
+                "locations": [
+                    {"id":"Ruins","mine":[],"theirs":[]},
+                    {"id":"Ruins","mine":[],"theirs":[]},
+                    {"id":"Ruins","mine":[],"theirs":[]}
+                ], "opponent":{"hand":0,"deck":0}, "mode":"recruit"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut rng = crate::random::PythonRandom::seed(4);
+        let game = crate::position::build_game(&position, &mut rng).unwrap();
+        let mut stats = super::PolicyEstimateStats::default();
+        super::stake_estimate(
+            &game,
+            0,
+            Some("recruit"),
+            32,
+            4,
+            32,
+            Some(&mut stats),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(stats.samples.get(&32), Some(&1));
+        assert_eq!(stats.candidates.values().sum::<usize>(), 1);
+    }
+
+    #[test]
     fn mephisto_stake_outcomes_are_declined_or_counted() {
         let mut position = crate::position::Position::default();
         position.locations[0]
             .mine
             .push(serde_json::from_value(json!({"id":"Mephisto"})).unwrap());
-        let result = super::stake_position_sweep(&position, 1, 1, &|| false).unwrap();
+        let result = super::stake_position_sweep(&position, 1, 32, 1, &|| false).unwrap();
         assert_eq!(result["declined"], super::MEPHISTO_STAKE_REASON);
         assert_eq!(
             super::stake_sample_value(12, 19, 1, true).unwrap(),
@@ -1796,12 +2024,16 @@ mod tests {
             (include_str!("../tests/fixtures/stakes-kyln.json"), 21),
         ] {
             let position: crate::position::Position = serde_json::from_str(fixture).unwrap();
+            let mut stats = super::PolicyEstimateStats::default();
             let outcome = super::stake_position_game(
                 &position,
                 super::StakeDecision::Snap,
                 true,
                 opponent,
                 20_261_123 + sample,
+                4,
+                &mut stats,
+                &|| false,
             )
             .unwrap();
             assert!(matches!(

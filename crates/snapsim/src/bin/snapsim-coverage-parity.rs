@@ -15,6 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seed: 0,
         position_rollouts: 0,
         stake_rollouts: 0,
+        stake_policy_rollouts: 32,
         max_plans: 1,
         time_limit: None,
         approximate: false,

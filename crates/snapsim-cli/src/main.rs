@@ -272,6 +272,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 seed: a.seed as i128,
                 position_rollouts: 0,
                 stake_rollouts: 0,
+                stake_policy_rollouts: 32,
                 max_plans: a.max_plans,
                 time_limit: a.time_limit,
                 approximate: a.approximate,
