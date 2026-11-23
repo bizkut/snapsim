@@ -2,6 +2,8 @@
 
 The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (158 deck cards and 34 tokens, skills and spells) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; the cards added since come from the game client's own rule definitions, and every card in the nine SnapComplete decks of November 2026 (`decks/snapcomplete-2026-11.txt`) is supported. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
+See [Card and engine technicalities](docs/card-technicalities.md) for timing, mechanics, client evidence and restored-position limits.
+
 ## Command line
 
 Build with `cargo build --release -p snapsim-cli`; run `target/release/snapsim --help` or add `--help` to any subcommand for the complete argument list.
