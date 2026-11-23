@@ -1,8 +1,23 @@
 # snapsim
 
-The MARVEL SNAP simulator behind Snapper-Assist: rules for every implemented card (158 deck cards and 34 tokens, skills and spells) and location (84), the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; the cards added since come from the game client's own rule definitions, and every card in the nine SnapComplete decks of November 2026 (`decks/snapcomplete-2026-11.txt`) is supported. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
+The MARVEL SNAP simulator behind Snapper-Assist: card and location rules, the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; everything added since comes from the game client's own rule definitions (Android 59.15.1), and every card in the nine SnapComplete decks of November 2026 (`decks/snapcomplete-2026-11.txt`) is supported. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
-See [Card and engine technicalities](docs/card-technicalities.md) for timing, mechanics, client evidence and restored-position limits.
+Coverage (`snapsim coverage`, simulator `1d55d61cb6`): 694 card definitions, of which 572 are deck-eligible and the rest tokens, skills, spells and created cards, and 186 locations. That includes every released character (560, including the 61 team and Champion variants and their skills) and every released location with an ID (182) in the catalog. Unreleased catalog entries are not all implemented. Mephisto's board behaviour is exact, but his extra winnings are applied server-side, so stake estimates decline when he may be in play.
+
+Documentation:
+
+* [Card and engine technicalities](docs/card-technicalities.md): timing, mechanics, client evidence and restored-position limits.
+* [Coverage audit](docs/coverage-audit.md): per-card and per-location status with client method addresses, approximations and the unexported state behind each restored-position gate.
+
+## Interfaces
+
+The simulator has no HTTP server or web API. Use it as:
+
+* the Rust library (`crates/snapsim`);
+* the `snapsim` command line and the separate tools in `crates/snapsim/src/bin` (for example `snapsim-replaycheck`);
+* the Python module `snapsim_py` (see "Advisor and Python binding"), which Snapper-Assist loads in-process. Snapper-Assist hosts the web page and its own HTTP API.
+
+Write work files (benchmarks, replay reports, recorded cases) under a persistent folder such as `~/.cache/snapsim-work`, not `/tmp`. The examples below use `WORK="${WORK:-$HOME/.cache/snapsim-work}"`.
 
 ## Command line
 
@@ -103,7 +118,7 @@ When Stryfe uses a card's On Reveal, the borrowed reveal has its own temporary c
 Known approximations of client rules:
 
 * Random choices use the client's candidate set and number and order of rolls, but draw from `game.rng`; the client's own random stream is not reproduced.
-* Effects that create random cards or locations draw only from implemented ones; the client draws from its full pools. Scarlet Witch Queen of Chaos's own pool is complete (13 curated and 11 collectible skills), so she matches the client's skill choice.
+* Effects that create random cards or locations draw only from implemented ones; the client draws from its full pools. Every released card and location is implemented, so this only matters for unreleased entries in the client's pools. Scarlet Witch Queen of Chaos's own pool is complete (13 curated and 11 collectible skills), so she matches the client's skill choice. Rama-Tut's pool is the client's hard-coded 107-card list (`data/past_years_pool.rs`).
 * Nico Minoru's location spell and Omniversal Presence pick locations uniformly, while the client weights the pick (`GetRandomLocationDefId`). Merging of power from the same source, the order of conditional Ongoing effects that depend on each other, and gaps left by cards that cannot shift are not modelled.
 * Visual-only abilities the client attaches (Tao Mandala, Zombie Galacti) are not modelled. `ReplacedCardDefId` follows the client's copy and clear paths, but no implemented card replaces another, so it is always empty.
 * Live positions use the client's `LatestResolutionOrder` when the reader supplies it, and otherwise derive the order from played turn, priority and slot (see "Live state from SNAP observations"). None of the newly exported live fields has been checked against a live match yet.
@@ -126,11 +141,11 @@ It writes `snapsim_py.so` next to the release build (`target/release/`, or `$CAR
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
 ROOT="$PWD"
-cd /tmp
+WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK"; cd "$WORK"
 PYTHONPATH=$SNAPSIM_REFERENCE \
   $SNAPSIM_PYTHON "$ROOT/parity/record_advisor.py" \
-  /tmp/snapsim-advisor.jsonl --runs $SNAPSIM_RUNS
-cargo run --manifest-path "$ROOT/Cargo.toml" --release --bin snapsim-advisor-parity -- /tmp/snapsim-advisor.jsonl
+  "$WORK/snapsim-advisor.jsonl" --runs $SNAPSIM_RUNS
+cargo run --manifest-path "$ROOT/Cargo.toml" --release --bin snapsim-advisor-parity -- "$WORK/snapsim-advisor.jsonl"
 ```
 
 The generator includes approximate positions, preserves watcher state across recording frames, and writes separate records for spread and margin. The gate matched 449 positions per policy (360 seeded SearchAI decisions and 89 real recorded positions), with 24 rollouts per position and one worker. The Python parity test also compares one and four workers.
@@ -196,13 +211,14 @@ cases, and recorded SNAP observations (using `LocationWatch` and `DeckWatch`):
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
+WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK"
 PYTHONPATH=$SNAPSIM_REFERENCE \
   $SNAPSIM_PYTHON \
   parity/position_record.py --games 1 --seeds 20 \
   --recordings $SNAPSIM_RUNS \
-  > /tmp/snapsim-position-cases.jsonl
+  > "$WORK/snapsim-position-cases.jsonl"
 cargo run --release -p snapsim --bin snapsim-position-parity -- \
-  /tmp/snapsim-position-cases.jsonl
+  "$WORK/snapsim-position-cases.jsonl"
 ```
 
 The generator reports unique position counts and rejected positions on stderr;
@@ -216,18 +232,18 @@ difference: integers must also fit the destination Rust field (`u8` turns,
 `i32` power and energy, and `usize` counts). Python integers are unbounded.
 The validation parity gate compares in-range cases to Python and requires
 out-of-range cases to be rejected separately. Generate the two JSONL inputs
-using the position and advisor recipes above, then run from a temporary cwd:
+using the position and advisor recipes above, then run from an empty working directory:
 
 ```sh
 ROOT="$PWD"
-cd "$(mktemp -d)"
+WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK/validation"; cd "$WORK/validation"
 PYTHONPATH=$SNAPSIM_REFERENCE \
   $SNAPSIM_PYTHON \
-  "$ROOT/parity/validation_record.py" /tmp/snapsim-validation.jsonl \
-  --corpus /tmp/snapsim-position-cases.jsonl --corpus /tmp/snapsim-advisor.jsonl \
+  "$ROOT/parity/validation_record.py" "$WORK/snapsim-validation.jsonl" \
+  --corpus "$WORK/snapsim-position-cases.jsonl" --corpus "$WORK/snapsim-advisor.jsonl" \
   --runs $SNAPSIM_RUNS
 cargo run --manifest-path "$ROOT/Cargo.toml" --bin snapsim-validation-parity -- \
-  /tmp/snapsim-validation.jsonl
+  "$WORK/snapsim-validation.jsonl"
 ```
 
 The gate matches 1,000 seeded full games each for spread and margin on `parity/corpus-full-*.json`: all 84 deck cards and all 84 locations, with decks drawn uniformly. It compares initial decks and locations, every turn's plans, reveal priority and lane powers, and the final winner. Merging the earlier per-group corpora exposed one cross-group bug: location cost modifiers were applied to board cards (Elektra at Elysium). `tests/costs.rs` covers it. `parity/corpus-{spread,margin}.json` is the original 25-card representative corpus that the first benchmark used.
@@ -239,15 +255,15 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release --bins
 ROOT="$PWD"
-mkdir -p /tmp/snapsim-bench
+WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK/bench"
 for policy in spread margin; do
-  (cd /tmp/snapsim-bench &&
+  (cd "$WORK/bench" &&
     PYTHONPATH=$SNAPSIM_REFERENCE \
     $SNAPSIM_PYTHON \
       "$ROOT/parity/record.py" "$ROOT/parity/corpus-full-$policy.json" \
-      --games 1000 --seed 20261201 > "/tmp/snapsim-$policy.jsonl")
+      --games 1000 --seed 20261201 > "$WORK/snapsim-$policy.jsonl")
   "$ROOT/target/release/snapsim-parity" "$ROOT/parity/corpus-full-$policy.json" \
-    "/tmp/snapsim-$policy.jsonl"
+    "$WORK/snapsim-$policy.jsonl"
 done
 ```
 
@@ -332,7 +348,7 @@ The advisor corpus has 898 records, of which the gate compares 834 and identifie
 | Deck builder | `SNAPSIM_PY_PATH=MODULE parity/deckbuild_compare.py`; again with `SNAPSIM_COMPLETE_ONLY=1` | 12 cancellation cut-offs and 1 complete run identical |
 | Command line | `SNAPSIM_BIN=snapsim parity/cli_compare.py`, `cli_deckbuild.py`, `cli_snap.py` | 7 + 1 + 2 cases |
 | Replay checker | `parity/replay_compare.py --python PY --reference REF --rust snapsim-replaycheck RECORDINGS` | 10 recordings byte-identical, one at a time and together |
-| Client rules on real matches | `snapsim-replaycheck RECORDINGS` without the reference variables | all 49 Snapper-Assist recordings plus the SNAP snapshots (2026-11-22, 229 cards and 120 locations): 185 consistent, 0 inconsistent, 95 not checkable turns |
+| Client rules on real matches | `snapsim-replaycheck RECORDINGS` without the reference variables | frozen corpus `~/.cache/snapsim-oracles/corpus-2026-11-23` (60 Snapper-Assist recordings and 4 SNAP snapshots, checksums in `SHA256SUMS`) at `1d55d61cb6`: 249 consistent (3 order-enumerated), 0 inconsistent, 99 not checkable turns; at `f11e147dda` it was 243 / 0 / 105, and every changed turn is attributed to a newly implemented card or a named missing-state reason |
 
 The Python suite of the frozen checkout (360 tests) also passes against this module.
 
@@ -351,9 +367,9 @@ Compare the registry with the reference worktree's implemented rules:
 ```sh
 cargo build --release --bin snapsim-inventory
 ROOT="$PWD"
-cd /tmp/snapsim-bench
+WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK/bench"; cd "$WORK/bench"
 PYTHONPATH=$SNAPSIM_REFERENCE \
   $SNAPSIM_PYTHON "$ROOT/parity/inventory.py"
 ```
 
-As of this commit it reports 192 cards (the reference's 94 plus 98 from the client) and 84 locations implemented, none of the reference's remaining. Set `CARGO_TARGET_DIR` if the inventory binary was built elsewhere.
+It lists every card and location the reference implemented and confirms none is missing here; everything else in the registry comes from the client (current totals under "Coverage" above). Set `CARGO_TARGET_DIR` if the inventory binary was built elsewhere.
