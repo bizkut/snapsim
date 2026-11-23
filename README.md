@@ -147,6 +147,10 @@ An accepted mask requires the static hidden-state gate, restored-position
 coverage, and eight matching diagnostic samples. The sample agreement is a
 consistency check, not the proof. Stake masks remain separately invalid when
 stake provenance is insufficient.
+Schema-2 provenance may include a card `zone`: `board` and `hand` are active
+holders, while `graveyard`, `banished`, and `trinkets` provide identities
+without contributing active-effect inventories. An absent zone preserves
+compatibility with older observations.
 
 ```python
 import numpy as np

@@ -562,12 +562,23 @@ pub struct ProvenanceEntity {
     pub entity_id: i64,
     pub card_id: Option<String>,
     pub lane_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     pub abilities: ProvenanceList<ProvenanceAbility>,
     pub movable_components: ProvenanceList<ProvenanceMoveComponent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modifiers: Option<ProvenanceList<ProvenanceModifier>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_requirements: Option<ProvenanceList<ProvenancePlayRequirement>>,
+}
+
+impl ProvenanceEntity {
+    pub(crate) fn is_active_holder(&self) -> bool {
+        !matches!(
+            self.zone.as_deref(),
+            Some("graveyard" | "banished" | "trinkets")
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -722,6 +733,7 @@ impl Position {
                 .iter()
                 .filter(|entity| {
                     entity.kind == "card"
+                        && entity.is_active_holder()
                         && entity.entity_id == id
                         && entity.card_id.as_deref() == Some(card.id.as_str())
                 })
@@ -742,7 +754,7 @@ impl Position {
         provenance
             .entities
             .iter()
-            .filter(|e| e.kind == "card")
+            .filter(|e| e.kind == "card" && e.is_active_holder())
             .all(|entity| {
                 let Some(id) = entity.card_id.as_deref() else {
                     return false;
@@ -767,10 +779,11 @@ impl Position {
                     item.active == Some(false)
                         || item.legality_relevant == Some(false)
                         || item.kind != "ability"
-                        || !provenance
-                            .entities
-                            .iter()
-                            .any(|e| e.kind == "card" && e.entity_id == item.target_entity_id)
+                        || !provenance.entities.iter().any(|e| {
+                            e.kind == "card"
+                                && e.is_active_holder()
+                                && e.entity_id == item.target_entity_id
+                        })
                 })
     }
 
@@ -787,7 +800,7 @@ impl Position {
         provenance
             .entities
             .iter()
-            .filter(|e| e.kind == "card")
+            .filter(|e| e.kind == "card" && e.is_active_holder())
             .all(|entity| {
                 entity.modifiers.as_ref().is_some_and(|group| {
                     group.complete
@@ -815,27 +828,32 @@ impl Position {
         let Some(provenance) = self.legality_inventory() else {
             return false;
         };
-        provenance.entities.iter().all(|entity| {
-            entity.abilities.complete
-                && entity.movable_components.complete
-                && entity.movable_components.items.is_empty()
-                && (entity.kind != "card"
-                    || entity
-                        .play_requirements
-                        .as_ref()
-                        .is_some_and(|group| group.complete && group.items.is_empty()))
-        }) && provenance
-            .ledger
-            .as_ref()
-            .unwrap()
-            .items
+        provenance
+            .entities
             .iter()
-            .all(|item| {
-                item.active == Some(false)
-                    || item.legality_relevant == Some(false)
-                    || matches!(item.kind.as_str(), "power" | "cost")
-                    || self.black_swan_effect(item).is_some()
+            .filter(|entity| entity.is_active_holder())
+            .all(|entity| {
+                entity.abilities.complete
+                    && entity.movable_components.complete
+                    && entity.movable_components.items.is_empty()
+                    && (entity.kind != "card"
+                        || entity
+                            .play_requirements
+                            .as_ref()
+                            .is_some_and(|group| group.complete && group.items.is_empty()))
             })
+            && provenance
+                .ledger
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| {
+                    item.active == Some(false)
+                        || item.legality_relevant == Some(false)
+                        || matches!(item.kind.as_str(), "power" | "cost")
+                        || self.black_swan_effect(item).is_some()
+                })
     }
 
     /// BlackSwanBehavior::AddSetCostAbilityToPlayer 0x7e7386c and its
@@ -868,10 +886,11 @@ impl Position {
             .iter()
             .position(|id| *id == item.target_entity_id)?;
         let provenance = self.provenance.as_ref()?;
-        let mut matches = provenance
-            .entities
-            .iter()
-            .filter(|entity| entity.kind == "player" && entity.entity_id == item.target_entity_id);
+        let mut matches = provenance.entities.iter().filter(|entity| {
+            entity.is_active_holder()
+                && entity.kind == "player"
+                && entity.entity_id == item.target_entity_id
+        });
         let entity = matches.next()?;
         if matches.next().is_some() || !entity.abilities.complete {
             return None;
@@ -919,7 +938,9 @@ impl Position {
         if provenance
             .entities
             .iter()
-            .filter(|entity| entity.kind == "player" && entity.entity_id == local_id)
+            .filter(|entity| {
+                entity.is_active_holder() && entity.kind == "player" && entity.entity_id == local_id
+            })
             .count()
             != 1
         {
@@ -928,7 +949,7 @@ impl Position {
         for entity in provenance
             .entities
             .iter()
-            .filter(|entity| entity.kind == "player")
+            .filter(|entity| entity.is_active_holder() && entity.kind == "player")
         {
             if !entity.abilities.complete {
                 return false;
@@ -978,7 +999,7 @@ impl Position {
         provenance
             .entities
             .iter()
-            .filter(|entity| entity.kind == "player")
+            .filter(|entity| entity.is_active_holder() && entity.kind == "player")
             .all(|entity| {
                 entity
                     .abilities
@@ -1051,6 +1072,7 @@ impl Position {
         }
         let mut entities = provenance.entities.iter().filter(|entity| {
             entity.kind == "card"
+                && entity.is_active_holder()
                 && entity.entity_id == item.target_entity_id
                 && entity.card_id.as_deref() == Some(card.id.as_str())
         });
@@ -1179,6 +1201,7 @@ impl Position {
         if !provenance
             .entities
             .iter()
+            .filter(|entity| entity.is_active_holder())
             .all(|entity| entity.movable_components.complete)
         {
             return false;
@@ -1190,16 +1213,20 @@ impl Position {
         {
             return false;
         }
-        provenance.entities.iter().all(|entity| {
-            entity.movable_components.items.iter().all(|component| {
-                items.clone().any(|item| {
-                    item.target_entity_id == entity.entity_id
-                        && item.creator_entity_id == Some(component.source_entity_id)
-                        && item.ability_index == Some(component.ability_index)
-                        && item.active == Some(true)
+        provenance
+            .entities
+            .iter()
+            .filter(|entity| entity.is_active_holder())
+            .all(|entity| {
+                entity.movable_components.items.iter().all(|component| {
+                    items.clone().any(|item| {
+                        item.target_entity_id == entity.entity_id
+                            && item.creator_entity_id == Some(component.source_entity_id)
+                            && item.ability_index == Some(component.ability_index)
+                            && item.active == Some(true)
+                    })
                 })
             })
-        })
     }
 }
 
@@ -2884,6 +2911,33 @@ mod observed_history_tests {
             ]
         };
         assert_eq!(known(&fixture), [true; 4]);
+        for zone in ["graveyard", "banished", "trinkets"] {
+            let mut v = fixture.clone();
+            v["entities"].as_array_mut().unwrap().push(json!({
+                "kind":"card","entity_id":99,"card_id":"Morph","lane_index":null,"zone":zone,
+                "abilities":{"complete":false,"reasons":[],"items":[{
+                    "ability_def_id":"Foreign","owner_def_type":"Card",
+                    "owner_def_id":"Other","index":0}]},
+                "movable_components":{"complete":false,"reasons":[],"items":[{
+                    "source_entity_id":99,"owner_def_type":"Card","owner_def_id":"Morph",
+                    "ability_index":0,"created_ticks":"1","destination_entity_id":0}]},
+                "modifiers":{"complete":false,"reasons":[],"items":[]},
+                "play_requirements":{"complete":false,"reasons":[],"items":[]}
+            }));
+            assert_eq!(known(&v), [true; 4], "{zone}");
+            let mut p = position.clone();
+            p.provenance = Some(serde_json::from_value(v.clone()).unwrap());
+            assert!(p.move_source_provenance_known(), "{zone}");
+            v["entities"][0]["zone"] = json!(zone);
+            assert_eq!(known(&v), [false; 4], "{zone} cannot cover an active card");
+        }
+        for zone in ["board", "hand"] {
+            let mut v = fixture.clone();
+            v["entities"][0]["zone"] = json!(zone);
+            assert_eq!(known(&v), [true; 4], "{zone}");
+            v["entities"][0]["abilities"]["complete"] = json!(false);
+            assert_eq!(known(&v), [false, false, true, false], "{zone}");
+        }
         for pointer in [
             "/entities_complete",
             "/ledger/complete_for_legality",

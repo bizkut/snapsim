@@ -447,6 +447,7 @@ pub(crate) fn advise_with_game(
         || position.provenance.as_ref().is_some_and(|provenance| {
             provenance.entities.iter().any(|entity| {
                 entity.kind == "card"
+                    && entity.is_active_holder()
                     && entity.card_id.as_deref() != Some("RedOnslaught")
                     && entity
                         .abilities
@@ -1047,6 +1048,47 @@ mod tests {
         .unwrap();
         let result = advise_with_game(&position, &options, &|| false, Some((&game, 0)), 0).unwrap();
         assert_eq!(result["status"], "unsupported");
+        assert!(
+            result["unsupported"]["state"]
+                .to_string()
+                .contains("attached Red Onslaught")
+        );
+    }
+
+    #[test]
+    fn inactive_red_onslaught_abilities_do_not_block_advice() {
+        let mut position: Position = serde_json::from_value(json!({
+            "turn":3,"energy":3,"hand":[],"deck":[],
+            "locations":[
+                {"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]}
+            ],
+            "opponent":{"hand":0,"deck":0},
+            "provenance":{"schema_version":2,"entities_complete":true,
+                "entities":[{"kind":"card","entity_id":42,"card_id":"MistyKnight",
+                    "lane_index":null,"zone":"graveyard",
+                    "abilities":{"complete":false,"reasons":[],"items":[{
+                        "ability_def_id":"RedOnslaughtOngoing","owner_def_type":"Card",
+                        "owner_def_id":"RedOnslaught","index":0}]},
+                    "movable_components":{"complete":false,"reasons":[],"items":[]}}],
+                "ledger":{"complete":true,"complete_for_legality":true,
+                    "match_start_seen":true,"reasons":[],"items":[]}}
+        }))
+        .unwrap();
+        let options: AdviseOptions = serde_json::from_value(json!({
+            "rollouts":1,"seed":1,"max_plans":1,"time_limit":null,
+            "approximate":true,"playout":"spread","workers":1
+        }))
+        .unwrap();
+        let result = advise_with_game(&position, &options, &|| false, None, 0).unwrap();
+        assert!(
+            !result["unsupported"]["state"]
+                .to_string()
+                .contains("attached Red Onslaught")
+        );
+        position.provenance.as_mut().unwrap().entities[0].zone = Some("board".into());
+        let result = advise_with_game(&position, &options, &|| false, None, 0).unwrap();
         assert!(
             result["unsupported"]["state"]
                 .to_string()

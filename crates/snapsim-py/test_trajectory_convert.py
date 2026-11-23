@@ -200,6 +200,15 @@ class ConverterTests(unittest.TestCase):
             return set(sim.snapshot_hidden_mask_gate([], [], [], json.dumps(provenance),
                                                      json.dumps(position)))
         self.assertFalse(categories & gate())
+        inactive = copy.deepcopy(entity)
+        inactive.update(entity_id=99, card_id="Morph")
+        for name in ("abilities", "modifiers", "movable_components", "play_requirements"):
+            inactive[name]["complete"] = False
+        provenance["entities"].append(inactive)
+        for zone in ("graveyard", "banished", "trinkets"):
+            inactive["zone"] = zone
+            self.assertFalse(categories & gate(), zone)
+        provenance["entities"].pop()
         provenance["entities_complete"] = False
         self.assertEqual(categories & gate(), categories)
         provenance["entities_complete"] = True
