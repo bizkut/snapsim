@@ -3331,6 +3331,19 @@ impl<'a> Game<'a> {
                 impact: (0, u8::MAX, 0, None),
             });
         }
+        if self.location_abilities_active(source)
+            && self.lanes[source]
+                .def
+                .grants_move_from
+                .is_some_and(|test| test(self, source, card, destination, seat))
+        {
+            consider(MoveCandidate {
+                source: MoveSource::Passive(self.lanes[source].def.id),
+                priority: location_priority(self.lanes[source].def.id),
+                order_group: 0,
+                impact: (0, u8::MAX, 0, None),
+            });
+        }
         (best.map(|candidate| candidate.source), ambiguous)
     }
 
@@ -3474,6 +3487,11 @@ impl<'a> Game<'a> {
                         self.record_location_hook(destination, "grants_move_to");
                         test(self, destination, card, source, seat)
                     }))
+            || (self.location_abilities_active(source)
+                && self.lanes[source].def.grants_move_from.is_some_and(|test| {
+                    self.record_location_hook(source, "grants_move_from");
+                    test(self, source, card, destination, seat)
+                }))
     }
 
     // Movable ability stacks are consumed by a player move while active.

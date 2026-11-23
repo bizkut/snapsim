@@ -76,6 +76,7 @@ pub struct LocationDef {
     pub allows_move_from: Option<PlayPredicate>,
     pub before_draw: Option<DrawHook>,
     pub grants_move_to: Option<PlayPredicate>,
+    pub grants_move_from: Option<PlayPredicate>,
     pub energy_bonus: Option<EnergyHook>,
     pub modify_cost: Option<CostHook>,
     pub prevents_retreat: Option<fn(&Game<'_>, bool) -> bool>,
@@ -123,6 +124,7 @@ pub(crate) const fn location(
         allows_move_from: None,
         before_draw: None,
         grants_move_to: None,
+        grants_move_from: None,
         energy_bonus: None,
         modify_cost: None,
         prevents_retreat: None,
@@ -227,6 +229,7 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_c::STAR_BRAND_CRATER,
     locations_c::CROWN_CITY,
     locations_c::NEW_YORK,
+    locations_c::JEAN_GREY_SCHOOL,
     locations_c::PYRAMID_OF_RAMA_TUT,
     locations_c::ASTEROID_M,
     // locations_d1 (append below)

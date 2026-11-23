@@ -18,6 +18,11 @@ pub const NEW_YORK: LocationDef = LocationDef {
     ..location("NewYork", 0, 0, 1, false)
 };
 
+pub const JEAN_GREY_SCHOOL: LocationDef = LocationDef {
+    grants_move_from: Some(jean_grey_school),
+    ..location("JeanGreySchool", 0, 0, 1, false)
+};
+
 pub const PYRAMID_OF_RAMA_TUT: LocationDef = LocationDef {
     on_turn_end: Some(pyramid_of_rama_tut),
     ..location("PyramidOfRamaTut", 0, 0, 1, false)
@@ -43,6 +48,13 @@ fn asteroid_m(game: &mut Game<'_>, lane: usize, event: crate::game::Event) {
 // revealed cards movement to this location only on the configured turn.
 fn new_york(game: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
     game.turn == 6
+}
+
+// JeanGreySchoolBehavior::MakeCardsHereMovable 0x7d5b11c grants each
+// revealed card here a move to every other location on turn 5; destination
+// predicate <MakeCardsHereMovable>b__0 0x7d5b888 excludes this location.
+fn jean_grey_school(game: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
+    game.turn == 5
 }
 
 // PyramidOfRamaTutBehavior::AddRock @ 0x7d75c10 and its predicate
@@ -127,6 +139,31 @@ mod tests {
             .push(crate::position::make_card(id, seat).unwrap());
         game.add_card(card, lane, seat, false);
         card
+    }
+
+    #[test]
+    fn jean_grey_school_grants_revealed_cards_movement_only_on_turn_five() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game(&mut rng);
+        game.lanes[0].def = &JEAN_GREY_SCHOOL;
+        game.lanes[0].revealed = true;
+        let card = place(&mut game, "Hawkeye", 0, 0);
+        game.cards[card].revealed = true;
+        game.turn = 4;
+        assert!(!game.can_player_move(card, 1, 0));
+        game.turn = 5;
+        assert!(game.can_player_move(card, 1, 0));
+        assert!(game.can_player_move(card, 2, 0));
+        assert!(!game.can_player_move(card, 0, 0));
+        assert!(!game.can_player_move(card, 1, 1));
+        game.cards[card].revealed = false;
+        assert!(!game.can_player_move(card, 1, 0));
+        game.cards[card].revealed = true;
+        game.turn = 6;
+        assert!(!game.can_player_move(card, 1, 0));
+        game.turn = 5;
+        game.lanes[0].revealed = false;
+        assert!(!game.can_player_move(card, 1, 0));
     }
 
     fn record_resolved(game: &mut Game<'_>, _: usize, event: crate::game::Event) {

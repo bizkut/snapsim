@@ -275,7 +275,7 @@
     "carddefid": "CrimsonCitadel",
     "name": "Crimson Citadel",
     "ability": "Your next play here steals 2 Power from a random enemy.",
-    "status": "unreleased",
+    "status": "released",
     "rarity": "rare",
     "difficulty": "Complex"
   },
@@ -587,7 +587,7 @@
     "carddefid": "JeanGreySchool",
     "name": "Jean Grey School",
     "ability": "On turn 5, cards here are Moveable.",
-    "status": "unreleased",
+    "status": "released",
     "rarity": "uncommon",
     "difficulty": "Advanced"
   },

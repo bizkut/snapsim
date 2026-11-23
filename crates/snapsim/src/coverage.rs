@@ -490,6 +490,9 @@ fn move_source_tie_possible(position: &Position) -> bool {
                     if position.turn == 6 && lane.id.as_deref() == Some("NewYork") {
                         consider(location_priority("NewYork"), (0, u8::MAX, 0, None));
                     }
+                    if position.turn == 5 && source.id.as_deref() == Some("JeanGreySchool") {
+                        consider(location_priority("JeanGreySchool"), (0, u8::MAX, 0, None));
+                    }
                     if conflict {
                         return true;
                     }

@@ -827,6 +827,7 @@ const LOCATION_HOOKS: &[(&str, Classification)] = &[
     ("IslandPrison", Safe),
     ("Kyln", Safe),
     ("MiniaturizedLab", Safe),
+    ("JeanGreySchool", Safe),
     ("NewYork", Safe),
     ("PitOfExile", Safe),
     ("SanctumSanctorum", Safe),
@@ -1318,6 +1319,11 @@ mod tests {
                 assert_eq!(d.allows_move_from.is_some(), *id == "IslandPrison", "{id}");
                 assert_eq!(d.grants_move_to.is_some(), *id == "NewYork", "{id}");
                 assert_eq!(
+                    d.grants_move_from.is_some(),
+                    *id == "JeanGreySchool",
+                    "{id}"
+                );
+                assert_eq!(
                     d.modify_cost.is_some(),
                     matches!(*id, "DreamDimension" | "Elysium" | "Titan" | "Utopia"),
                     "{id}"
@@ -1627,6 +1633,7 @@ mod tests {
                 allows_move_from: _,
                 before_draw: _,
                 grants_move_to: _,
+                grants_move_from: _,
                 energy_bonus: _,
                 modify_cost: _,
                 prevents_retreat: _,
