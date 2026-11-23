@@ -12,8 +12,12 @@ fn sera(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     for index in 0..game.players[owner].hand.len() {
         let target = game.players[owner].hand[index];
-        if game.cards[target].cost + game.cards[target].ongoing_cost > 1 {
+        let cost = game.cards[target].cost + game.cards[target].ongoing_cost;
+        if cost > 1 {
             game.add_ongoing_cost(target, -1, owner);
+        } else {
+            // AddCostWithMin clips to the current cost at zero or one.
+            game.set_ongoing_cost(target, cost, owner);
         }
     }
 }
@@ -64,6 +68,18 @@ mod tests {
                 game.card_cost(six)
             ],
             [0, 1, 5]
+        );
+        assert_eq!(
+            game.cards[zero].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Set
+        );
+        assert_eq!(
+            game.cards[one].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Set
+        );
+        assert_eq!(
+            game.cards[six].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Add
         );
         game.cards[source].abilities_removed = true;
         game.ongoing();

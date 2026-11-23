@@ -13,6 +13,7 @@ pub mod game;
 pub mod hidden_legality;
 mod lane_contributions;
 pub mod locations;
+mod move_priority;
 pub mod policy;
 pub mod position;
 pub mod random;

@@ -614,6 +614,7 @@ fn grant_destination(game: &mut Game<'_>, card: usize, both: bool) {
         game.grant_move(MoveGrant {
             seat,
             source: card,
+            owner_def_id: None,
             card: None,
             lane: None,
             destination: Some(lane),
@@ -715,19 +716,16 @@ fn miek(game: &mut Game<'_>, card: usize, event: Event) {
     }
     game.add_power(card, 1, seat);
     let turn = game.turn.saturating_add(1);
-    game.grant_move(MoveGrant {
-        seat,
-        source: card,
-        card: Some(card),
-        lane: None,
-        destination: None,
-        start_turn: turn,
-        end_turn: turn,
-        remaining: 1,
-        unlimited: false,
-        condition: None,
-        on_move: None,
-    });
+    // MiekBehavior::.cctor 0x7ef8860 constructs a hidden, zero-stack
+    // MovableOngoingAbilityDef attached to Miek, not to the player.
+    game.cards[card]
+        .external_moves
+        .push(crate::engine_ext::merge::CardMoveGrant {
+            origin: card,
+            start: turn,
+            end: turn,
+            remaining: None,
+        });
 }
 // BuffHand 0x7e6d058 requires a resolved player-staged move this turn
 // and picks one movable card in hand for -1 cost and +2 power.
@@ -1094,6 +1092,8 @@ mod tests {
         assert!(!game.can_player_move(card, 1, 0));
         game.turn = 3;
         assert!(game.can_player_move(card, 1, 0));
+        game.replace_location(0, "DeepSpace");
+        assert!(!game.can_player_move(card, 1, 0));
     }
 
     #[test]

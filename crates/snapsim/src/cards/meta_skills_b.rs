@@ -79,7 +79,12 @@ fn thing_discount(game: &mut Game<'_>, card: usize) {
             }
         }
     }
-    game.add_ongoing_cost(card, -(count as i32), owner);
+    if count > 0 {
+        // Skill01TheThingFirstStepsChampionBehavior::DiscountSelf
+        // (0x7d10e40) sets the reduced current cost, clamped to zero.
+        let cost = game.cards[card].cost + game.cards[card].ongoing_cost;
+        game.set_ongoing_cost(card, (cost - count as i32).max(0), owner);
+    }
 }
 
 // AddPower 0x7d11194 looks up the player's champion in any zone.
@@ -390,6 +395,10 @@ mod tests {
         assert_eq!(game.cards[champion].power(), power + 8);
         thing_discount(&mut game, skill);
         assert_eq!(game.card_cost(skill), 4);
+        assert_eq!(
+            game.cards[skill].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Set
+        );
     }
 
     #[test]

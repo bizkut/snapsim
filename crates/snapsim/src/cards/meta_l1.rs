@@ -408,7 +408,11 @@ fn quinjet(game: &mut Game<'_>, card: usize) {
         let target = game.players[owner].hand[index];
         if game.cards[target].created {
             let cost = game.cards[target].cost + game.cards[target].ongoing_cost;
-            game.set_ongoing_cost(target, (cost - 1).max(cost.min(1)), owner);
+            if cost > 1 {
+                game.add_ongoing_cost(target, -1, owner);
+            } else {
+                game.set_ongoing_cost(target, cost, owner);
+            }
         }
     }
 }
@@ -421,7 +425,11 @@ fn ravonna(game: &mut Game<'_>, card: usize) {
         let target = game.players[owner].hand[index];
         if game.is_character(target) && game.cards[target].power() <= 1 {
             let cost = game.cards[target].cost + game.cards[target].ongoing_cost;
-            game.set_ongoing_cost(target, (cost - 1).max(cost.min(1)), owner);
+            if cost > 1 {
+                game.add_ongoing_cost(target, -1, owner);
+            } else {
+                game.set_ongoing_cost(target, cost, owner);
+            }
         }
     }
 }
@@ -469,7 +477,7 @@ fn gorgon(game: &mut Game<'_>, card: usize) {
         let target = game.players[opponent].hand[index];
         let cost = game.cards[target].cost + game.cards[target].ongoing_cost;
         if game.cards[target].created && cost < 6 {
-            game.set_ongoing_cost(target, (cost + 1).min(6), owner);
+            game.add_ongoing_cost(target, 1, owner);
         }
     }
 }
@@ -785,6 +793,10 @@ mod tests {
         game.players[1].hand = vec![created, original, expensive];
         gorgon(&mut game, source);
         assert_eq!(game.cards[created].ongoing_cost, 1);
+        assert_eq!(
+            game.cards[created].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Add
+        );
         assert_eq!(game.cards[original].ongoing_cost, 0);
         assert_eq!(game.cards[expensive].ongoing_cost, 0);
     }
@@ -841,6 +853,14 @@ mod tests {
         assert_eq!(game.cards[low].ongoing_cost, -1);
         assert_eq!(game.cards[high].ongoing_cost, 0);
         assert_eq!(game.cards[zero].cost + game.cards[zero].ongoing_cost, 0);
+        assert_eq!(
+            game.cards[low].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Add
+        );
+        assert_eq!(
+            game.cards[zero].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Set
+        );
     }
 
     #[test]
@@ -861,6 +881,14 @@ mod tests {
         assert_eq!(game.cards[created].ongoing_cost, -1);
         assert_eq!(game.cards[original].ongoing_cost, 0);
         assert_eq!(game.cards[zero].cost + game.cards[zero].ongoing_cost, 0);
+        assert_eq!(
+            game.cards[created].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Add
+        );
+        assert_eq!(
+            game.cards[zero].stat_updates.last().unwrap().operation,
+            crate::game::StatOperation::Set
+        );
     }
 
     #[test]

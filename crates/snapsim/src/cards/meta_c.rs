@@ -542,6 +542,7 @@ mod tests {
         game.grant_move(MoveGrant {
             seat: 0,
             source: skill,
+            owner_def_id: None,
             card: Some(target),
             lane: None,
             destination: None,

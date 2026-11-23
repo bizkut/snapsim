@@ -515,6 +515,30 @@ mod tests {
     }
 
     #[test]
+    fn mordo_cost_setter_requires_target_in_affected_hand() {
+        if crate::cards::reference_rules_enabled() {
+            return;
+        }
+        let mut rng = PythonRandom::seed(64);
+        let mut game = game(&mut rng);
+        let card = game.create_card("Hawkeye", 0);
+        assert!(game.add_hand(0, card, false));
+        game.set_player_card_cost_until(card, 6, 6);
+        game.ongoing();
+        assert_eq!(game.card_cost(card), 6);
+        game.players[0].hand.retain(|&id| id != card);
+        game.cards[card].owner = 1;
+        game.players[1].hand.push(card);
+        game.ongoing();
+        assert_eq!(game.card_cost(card), 1);
+        game.players[1].hand.retain(|&id| id != card);
+        game.cards[card].owner = 0;
+        game.players[0].hand.push(card);
+        game.ongoing();
+        assert_eq!(game.card_cost(card), 6);
+    }
+
+    #[test]
     fn card_cost_setters_follow_attachment_order() {
         for beast_first in [true, false] {
             let mut rng = PythonRandom::seed(65);
@@ -544,7 +568,11 @@ mod tests {
             } else {
                 [
                     crate::game::StatOperation::Set,
-                    crate::game::StatOperation::Add,
+                    if crate::cards::reference_rules_enabled() {
+                        crate::game::StatOperation::Add
+                    } else {
+                        crate::game::StatOperation::Set
+                    },
                 ]
             };
             assert_eq!(updates, expected);

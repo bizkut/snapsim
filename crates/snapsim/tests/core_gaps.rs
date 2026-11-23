@@ -66,6 +66,23 @@ fn colossus_resists_reduction_destruction_and_movement() {
 }
 
 #[test]
+fn colossus_movement_immunity_requires_active_ongoing() {
+    for suppression in ["Enchantress", "IsleOfSilence", "DeepSpace"] {
+        let mut rng = PythonRandom::seed(17);
+        let mut game = game(&mut rng);
+        let card = play(&mut game, "Colossus", 0, 0);
+        assert!(!game.can_move_card(card, 1), "{suppression}");
+        if suppression == "Enchantress" {
+            play(&mut game, "Enchantress", 0, 1);
+        } else {
+            game.replace_location(0, suppression);
+        }
+        assert!(game.can_move_card(card, 1), "{suppression}");
+        assert!(game.move_card(card, 1), "{suppression}");
+    }
+}
+
+#[test]
 fn limbo_replacement_and_ongoing_repetition() {
     let mut rng = PythonRandom::seed(19);
     let mut game = game(&mut rng);

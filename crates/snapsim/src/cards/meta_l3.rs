@@ -787,7 +787,12 @@ fn death(game: &mut Game<'_>, card: usize) {
         .map(|p| p.destruction_history.len())
         .sum::<usize>();
     let owner = game.cards[card].owner;
-    game.add_ongoing_cost(card, -(count as i32), owner);
+    if count != 0 {
+        // DeathBehavior::DiscountSelf (0x7e89764) sets the current cost
+        // minus destructions, clamped at zero, rather than adding a delta.
+        let cost = game.cards[card].cost + game.cards[card].ongoing_cost;
+        game.set_ongoing_cost(card, (cost - count as i32).max(0), owner);
+    }
 }
 
 // MorbiusBehavior::GetPowerChange 0x7f01d3c uses the owner's lifetime
@@ -1377,6 +1382,26 @@ mod tests {
         }
         game.ongoing();
         assert_eq!(game.cards[death].ongoing_cost, -2);
+    }
+
+    #[test]
+    fn death_clamps_discount_before_later_cost_increases() {
+        let mut rng = PythonRandom::seed(1);
+        let mut game = setup(&mut rng);
+        for owner in 0..2 {
+            let target = game.create_card("Hulk", owner);
+            game.cards[target].lane = Some(0);
+            game.cards[target].revealed = true;
+            game.lanes[0].cards.push(target);
+            assert!(game.destroy_card(target));
+        }
+        let card = game.create_card("Death", 0);
+        game.cards[card].cost = 1;
+        game.players[0].hand.push(card);
+        death(&mut game, card);
+        assert_eq!(game.cards[card].cost + game.cards[card].ongoing_cost, 0);
+        game.add_ongoing_cost(card, 1, 0);
+        assert_eq!(game.card_cost(card), 1);
     }
 
     #[test]

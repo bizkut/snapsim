@@ -66,7 +66,12 @@ fn abomination(game: &mut Game<'_>, card: usize) {
                         .any(|m| m.operation == StatOperation::Add && m.value < 0))
         })
         .count() as i32;
-    game.add_ongoing_cost(card, -count, owner);
+    if count > 0 {
+        // EvolvedAbominationBehavior::DiscountSelf (0x7ea2c94) sets
+        // the reduced current cost, clamped to zero.
+        let cost = game.cards[card].cost + game.cards[card].ongoing_cost;
+        game.set_ongoing_cost(card, (cost - count).max(0), owner);
+    }
 }
 
 // ReduceEnemyCardsPower 0x7ea3464 shuffles revealed enemies before taking two.
@@ -192,6 +197,10 @@ mod tests {
         game.add_power(enemy, -1, card);
         abomination(&mut game, card);
         assert_eq!(game.cards[card].ongoing_cost, -1);
+        assert_eq!(
+            game.cards[card].stat_updates.last().unwrap().operation,
+            StatOperation::Set
+        );
     }
     #[test]
     fn evolved_cyclops_needs_energy_and_hits_two() {

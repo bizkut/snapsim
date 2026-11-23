@@ -586,15 +586,7 @@ fn aunt_mays(game: &mut Game<'_>, lane: usize, event: Event) {
         return;
     }
     spent[seat] = true;
-    let mut candidates = [0; 2];
-    let mut count = 0;
-    for destination in 0..3 {
-        if destination != lane && game.can_move_card(card, destination) {
-            candidates[count] = destination;
-            count += 1;
-        }
-    }
-    let destination = (count != 0).then(|| candidates[game.rng.borrow_mut().randbelow(count)]);
+    let destination = game.random_location_to_move_card(card, lane, false);
     game.add_power(card, 3, seat);
     if let Some(destination) = destination {
         game.move_card(card, destination);
@@ -940,6 +932,45 @@ mod tests {
         assert!(game.add_card(card, 0, 0, false));
         assert!(!game.has_space(0, 0, 0));
         assert!(game.has_space(0, 1, 0));
+    }
+
+    #[test]
+    fn unrestricted_play_uses_physical_slots_at_space_throne() {
+        let mut rng = PythonRandom::seed(10);
+        let deck = deck();
+        let locations = ["SpaceThrone", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        game.lanes[0].def = &SPACE_THRONE;
+        game.lanes[0].revealed = true;
+        let occupant = game.create_card("Hawkeye", 0);
+        game.cards[occupant].created = true;
+        assert!(game.add_card(occupant, 0, 0, false));
+        let jeff = game.create_card("JeffTheBabyLandShark", 0);
+        game.players[0].hand.push(jeff);
+        assert!(!game.can_play(jeff, 0, 0, 0, 0));
+        assert!(game.can_play(jeff, 0, 0, 10, 0));
+        assert!(!game.can_play(jeff, 0, 0, 10, 3));
+
+        let normal = game.create_card("Wasp", 0);
+        game.players[0].hand.push(normal);
+        assert!(!game.can_play(normal, 0, 0, 10, 0));
+        let war_machine = game.create_card("WarMachine", 0);
+        assert!(game.add_card(war_machine, 1, 0, true));
+        assert!(game.can_play(normal, 0, 0, 10, 0));
+        game.players[0].energy = 10;
+        assert!(
+            game.stage_action(
+                0,
+                crate::game::Action::Play {
+                    card: normal,
+                    lane: 0
+                }
+            )
+            .is_ok()
+        );
+        assert_eq!(game.lanes[0].cards.len(), 2);
+        game.lanes[0].destroyed = true;
+        assert!(!game.can_play(jeff, 0, 0, 10, 0));
     }
 
     #[test]

@@ -433,6 +433,8 @@ pub struct QueuedReveal {
 pub struct MoveGrant {
     pub seat: usize,
     pub source: usize,
+    /// Definition that owns the granted ability, including copied abilities.
+    pub owner_def_id: Option<&'static str>,
     pub card: Option<usize>,
     pub lane: Option<usize>,
     pub destination: Option<usize>,
@@ -453,6 +455,30 @@ pub enum Action {
     Move { card: usize, lane: usize },
     Activate { card: usize },
     Return { card: usize },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MoveSource {
+    Intrinsic,
+    External(usize),
+    Player(usize),
+    Passive(&'static str),
+}
+
+#[derive(Clone, Copy)]
+struct MoveCandidate {
+    source: MoveSource,
+    priority: i32,
+    // Entries in the same ordered collection retain their creation order.
+    order_group: u8,
+    impact: (u8, u8, u8, Option<usize>),
+}
+
+pub(crate) fn move_source_effects_conflict(
+    left: (u8, u8, u8, Option<usize>),
+    right: (u8, u8, u8, Option<usize>),
+) -> bool {
+    left != right
 }
 
 #[derive(Clone)]
@@ -1054,6 +1080,8 @@ pub struct Game<'a> {
     pub(crate) replay_hooks: Option<RefCell<ReplayHooks>>,
     pub(crate) merge_batches: Vec<Vec<usize>>,
     pub(crate) staging_order: Option<Vec<usize>>,
+    pub(crate) move_provenance_known: bool,
+    pub last_move_source: Option<&'static str>,
     pub rng: RefCell<GameRandom<'a>>,
 }
 
@@ -1136,6 +1164,8 @@ impl<'a> Game<'a> {
             current_ongoing_source: self.current_ongoing_source,
             merge_batches: self.merge_batches.clone(),
             staging_order: self.staging_order.clone(),
+            move_provenance_known: self.move_provenance_known,
+            last_move_source: self.last_move_source,
             rng: RefCell::new(rng),
         }
     }
@@ -1681,12 +1711,21 @@ impl<'a> Game<'a> {
     }
     pub fn add_ongoing_cost(&mut self, card: usize, amount: i32, source: usize) {
         let old = self.cards[card].cost + self.cards[card].ongoing_cost;
-        if self.cost_change_allowed(card, old, old + amount) {
-            self.cards[card].ongoing_cost += amount;
+        // Card::AddCost (0x7cb69e4) uses a zero minimum, and the general
+        // overload (0x7cb6a2c) records a Set if that minimum clips the delta.
+        let raw = old.saturating_add(amount);
+        let clipped = !cards::reference_rules_enabled() && raw < 0;
+        let new = if clipped { 0 } else { raw };
+        if self.cost_change_allowed(card, old, new) {
+            self.cards[card].ongoing_cost = new - self.cards[card].cost;
             self.cards[card].stat_updates.push(CardStatUpdate {
                 stat: Stat::Cost,
-                operation: StatOperation::Add,
-                value: amount,
+                operation: if clipped {
+                    StatOperation::Set
+                } else {
+                    StatOperation::Add
+                },
+                value: if clipped { new } else { amount },
                 source,
                 ongoing: true,
                 ongoing_source: self.current_ongoing_source,
@@ -2130,6 +2169,8 @@ impl<'a> Game<'a> {
             current_ongoing_source: None,
             merge_batches: Vec::new(),
             staging_order: None,
+            move_provenance_known: true,
+            last_move_source: None,
             rng: RefCell::new(GameRandom::Borrowed(rng)),
         };
         if pre_start {
@@ -2835,31 +2876,46 @@ impl<'a> Game<'a> {
         skip_jean: bool,
     ) -> bool {
         let (queued, queued_total) = counts;
-        if self.card_cost(card) > energy || !self.has_space(lane, seat, queued) {
+        if self.card_cost(card) > energy {
             return false;
         }
-        // Jeff's IgnorePlayRestrictionsAction and IgnoreMoveRestrictionsAction
-        // are self-targeted ongoing actions (ExecuteOngoingAction 0x7e0e6f4).
-        if self.thanos_stone_active(card, "SpaceStone") || self.jeff_unrestricted(card) {
-            return true;
+        // Card::IsPlayableByCard (0x7cb0a28) passes the ignore-restrictions
+        // flag to Location::HasEmptyCardSlot (0x7ddb4c0); the latter compares
+        // against the physical maximum of four rather than the location limit.
+        let unrestricted = self.thanos_stone_active(card, "SpaceStone")
+            || self.jeff_unrestricted(card)
+            // WarMachineBehavior::UnrestrictPlay (0x7cee0f0) grants the owner's
+            // hand cards IgnorePlayRestrictions while its ongoing is active.
+            || (self.players[seat].hand.contains(&card)
+                && self
+                    .lanes
+                    .iter()
+                    .flat_map(|location| &location.cards)
+                    .any(|&source| {
+                        self.cards[source].owner == seat
+                            && self.cards[source].revealed
+                            && self.ongoing_active(source)
+                            && self.cards[source].ongoing_guard_abilities().any(|ability| {
+                                ability.supports(AbilityKind::Ongoing)
+                                    && ability.def.grants_unrestricted_hand_plays
+                            })
+                    }));
+        let has_space = if unrestricted && !cards::reference_rules_enabled() {
+            !self.lanes[lane].destroyed
+                && self.lanes[lane]
+                    .cards
+                    .iter()
+                    .filter(|&&id| self.cards[id].owner == seat)
+                    .count()
+                    + queued
+                    < 4
+        } else {
+            self.has_space(lane, seat, queued)
+        };
+        if !has_space {
+            return false;
         }
-        // WarMachineBehavior::UnrestrictPlay (0x7cee0f0) grants the owner's
-        // hand cards IgnorePlayRestrictions while its ongoing is active.
-        if self.players[seat].hand.contains(&card)
-            && self
-                .lanes
-                .iter()
-                .flat_map(|location| &location.cards)
-                .any(|&source| {
-                    self.cards[source].owner == seat
-                        && self.cards[source].revealed
-                        && self.ongoing_active(source)
-                        && self.cards[source].ongoing_guard_abilities().any(|ability| {
-                            ability.supports(AbilityKind::Ongoing)
-                                && ability.def.grants_unrestricted_hand_plays
-                        })
-                })
-        {
+        if unrestricted {
             return true;
         }
         if self.players[seat].hand.contains(&card)
@@ -2984,10 +3040,53 @@ impl<'a> Game<'a> {
         }
         true
     }
+    // Jeff's Init-priority ignore-restrictions ability is hidden and is
+    // inactive while staged for play or movement (client defs.json).
     fn jeff_unrestricted(&self, card: usize) -> bool {
-        !self.cards[card].abilities_removed
-            && self.cards[card].default_ability().id == "JeffTheBabyLandShark"
+        let target = &self.cards[card];
+        !target.abilities_removed
+            && target.default_ability().id == "JeffTheBabyLandShark"
+            && (cards::reference_rules_enabled()
+                || target.lane.is_none_or(|lane| {
+                    target.revealed
+                        && !target.move_staged
+                        && self.lanes[lane].ability_flags.hidden_ongoing
+                }))
     }
+
+    // Location::CanMoveCard passes the ignore-move stat to HasEmptyCardSlot
+    // (0x7ddbb34); true compares against four physical slots.
+    fn has_move_space(&self, card: usize, lane: usize) -> bool {
+        let seat = self.cards[card].owner;
+        if !cards::reference_rules_enabled() && self.jeff_unrestricted(card) {
+            !self.lanes[lane].destroyed
+                && self.lanes[lane]
+                    .cards
+                    .iter()
+                    .filter(|&&id| self.cards[id].owner == seat)
+                    .count()
+                    < 4
+        } else {
+            self.has_space(lane, seat, 0)
+        }
+    }
+    // ColossusBehavior::SetCantBeDestroyedOrMovedOrWeakened (0x7e834e8)
+    // installs an ongoing movement restriction, which disappears when suppressed.
+    fn immune_to_movement(&self, card: usize) -> bool {
+        let target = &self.cards[card];
+        (cards::reference_rules_enabled()
+            || target
+                .lane
+                .is_none_or(|lane| self.lane_ongoing_allowed(lane)))
+            && target.ongoing_guard_abilities().any(|ability| {
+                ability.supports(AbilityKind::Ongoing)
+                    && ability.def.immune_destroy_move
+                    && (cards::reference_rules_enabled()
+                        || ability.id.is_some()
+                        || !target.abilities_removed)
+            })
+    }
+
     fn ongoing_blocks_move(&self, card: usize, source: usize) -> bool {
         !self.jeff_unrestricted(card)
             && self.lanes[source].cards.iter().copied().any(|provider| {
@@ -3010,7 +3109,20 @@ impl<'a> Game<'a> {
     }
 
     /// Install a movement permission without moving or revealing a card.
-    pub fn grant_move(&mut self, grant: MoveGrant) {
+    pub fn grant_move(&mut self, mut grant: MoveGrant) {
+        let source = &self.cards[grant.source];
+        grant.owner_def_id = Some(
+            source
+                .ability_frames
+                .last()
+                .and_then(|frame| {
+                    source
+                        .composed_abilities
+                        .iter()
+                        .find(|ability| ability.id == frame.instance)
+                })
+                .map_or_else(|| source.default_ability().id, |ability| ability.def.id),
+        );
         self.players[grant.seat].move_grants.push(grant);
     }
 
@@ -3036,8 +3148,183 @@ impl<'a> Game<'a> {
         })
     }
 
+    // FindMovableByPlayerSource (0x7c9d9ec): select the lowest priority,
+    // then the earliest component. Only within-vector creation order is retained.
+    fn select_move_source(
+        &self,
+        card: usize,
+        destination: usize,
+        seat: usize,
+    ) -> (Option<MoveSource>, bool) {
+        use crate::move_priority::{card_priority, location_priority};
+        let target = &self.cards[card];
+        let Some(source) = target.lane else {
+            return (None, false);
+        };
+        let mut best: Option<MoveCandidate> = None;
+        let mut ambiguous = false;
+        let mut groups = 0u8;
+        let mut consider = |candidate: MoveCandidate| {
+            let group = 1u8 << candidate.order_group;
+            match best {
+                None => {
+                    best = Some(candidate);
+                    groups = group;
+                }
+                Some(previous) if candidate.priority < previous.priority => {
+                    best = Some(candidate);
+                    groups = group;
+                    ambiguous = false;
+                }
+                Some(previous) if candidate.priority == previous.priority => {
+                    if move_source_effects_conflict(candidate.impact, previous.impact)
+                        && (!self.move_provenance_known
+                            || candidate.order_group == 0
+                            || groups != group)
+                    {
+                        ambiguous = true;
+                    }
+                    groups |= group;
+                }
+                _ => {}
+            }
+        };
+        if !target.abilities_removed
+            && self.lanes[source].ability_flags.hidden_ongoing
+            && (target.player_moves_used < target.default_ability().move_limit
+                || target.default_ability().move_each_turn
+                    && target.player_move_turn != Some(self.turn))
+        {
+            consider(MoveCandidate {
+                source: MoveSource::Intrinsic,
+                priority: card_priority(target.default_ability().id),
+                order_group: 0,
+                impact: (1, u8::MAX, target.default_ability().move_limit, None),
+            });
+        }
+        if self.lanes[source].ability_flags.hidden_ongoing {
+            for (index, grant) in target.external_moves.iter().enumerate() {
+                if grant.start <= self.turn
+                    && self.turn <= grant.end
+                    && grant.remaining.is_none_or(|remaining| remaining > 0)
+                {
+                    consider(MoveCandidate {
+                        source: MoveSource::External(index),
+                        priority: card_priority(self.cards[grant.origin].def.id),
+                        order_group: 1,
+                        impact: (
+                            if grant.remaining.is_some() { 2 } else { 0 },
+                            grant.end,
+                            grant.remaining.unwrap_or(0),
+                            grant.remaining.map(|_| index),
+                        ),
+                    });
+                }
+            }
+        }
+        for (index, grant) in self.players[seat].move_grants.iter().enumerate() {
+            if (grant.unlimited || grant.remaining != 0)
+                && grant.start_turn <= self.turn
+                && self.turn <= grant.end_turn
+                && grant.card.is_none_or(|target| target == card)
+                && grant.lane.is_none_or(|lane| lane == source)
+                && grant.destination.is_none_or(|lane| lane == destination)
+                && grant
+                    .condition
+                    .is_none_or(|test| test(self, grant.source, card))
+            {
+                consider(MoveCandidate {
+                    source: MoveSource::Player(index),
+                    priority: card_priority(
+                        grant
+                            .owner_def_id
+                            .unwrap_or(self.cards[grant.source].default_ability().id),
+                    ),
+                    order_group: 2,
+                    impact: (
+                        if grant.unlimited { 0 } else { 3 },
+                        grant.end_turn,
+                        grant.remaining,
+                        if !grant.unlimited {
+                            Some(index)
+                        } else {
+                            grant.on_move.map(|_| grant.source)
+                        },
+                    ),
+                });
+            }
+        }
+        for (lane, location) in self.lanes.iter().enumerate() {
+            for &provider in &location.cards {
+                if !self.cards[provider].revealed || !self.ongoing_active(provider) {
+                    continue;
+                }
+                for ability in self.cards[provider]
+                    .ongoing_guard_abilities()
+                    .filter(|ability| {
+                        ability.supports(AbilityKind::Ongoing)
+                            && (ability.kind != AbilityKind::Default
+                                || !self.cards[provider].abilities_removed)
+                    })
+                {
+                    let applies = ability
+                        .def
+                        .grants_move_globally
+                        .is_some_and(|test| test(self, provider, card))
+                        || lane == source
+                            && ability
+                                .def
+                                .grants_move_from
+                                .is_some_and(|test| test(self, provider, card));
+                    if applies {
+                        consider(MoveCandidate {
+                            source: MoveSource::Passive(ability.def.id),
+                            priority: card_priority(ability.def.id),
+                            order_group: 0,
+                            impact: (0, u8::MAX, 0, None),
+                        });
+                    }
+                }
+            }
+        }
+        if self.location_abilities_active(destination)
+            && self.lanes[destination]
+                .def
+                .grants_move_to
+                .is_some_and(|test| test(self, destination, card, source, seat))
+        {
+            consider(MoveCandidate {
+                source: MoveSource::Passive(self.lanes[destination].def.id),
+                priority: location_priority(self.lanes[destination].def.id),
+                order_group: 0,
+                impact: (0, u8::MAX, 0, None),
+            });
+        }
+        (best.map(|candidate| candidate.source), ambiguous)
+    }
+
+    pub(crate) fn move_source_tie_unknown(
+        &self,
+        card: usize,
+        destination: usize,
+        seat: usize,
+    ) -> bool {
+        self.select_move_source(card, destination, seat).1
+    }
+
     /// Whether a player can voluntarily move this card to the destination now.
     pub fn can_player_move(&self, card: usize, destination: usize, seat: usize) -> bool {
+        self.can_player_move_without_tie_check(card, destination, seat)
+            && (cards::reference_rules_enabled()
+                || !self.move_source_tie_unknown(card, destination, seat))
+    }
+
+    pub(crate) fn can_player_move_without_tie_check(
+        &self,
+        card: usize,
+        destination: usize,
+        seat: usize,
+    ) -> bool {
         let target = &self.cards[card];
         let Some(source) = target.lane else {
             return false;
@@ -3045,12 +3332,10 @@ impl<'a> Game<'a> {
         if target.owner != seat
             || !target.revealed
             || target.move_staged
-            || target
-                .ongoing_guard_abilities()
-                .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move)
+            || self.immune_to_movement(card)
             || destination >= 3
             || source == destination
-            || !self.has_space(destination, seat, 0)
+            || !self.has_move_space(card, destination)
         {
             return false;
         }
@@ -3083,6 +3368,8 @@ impl<'a> Game<'a> {
         // HasMovesRemainingCondition::Evaluate (0x7d26688): zero stacks are unlimited;
         // Card::IsMovableByPlayer (0x7cb0cac) rejects a card already staged to move.
         (!target.abilities_removed
+            && (cards::reference_rules_enabled()
+                || self.lanes[source].ability_flags.hidden_ongoing)
             && (target.player_moves_used < target.default_ability().move_limit
                 || target.default_ability().move_each_turn
                     && target.player_move_turn != Some(self.turn)))
@@ -3165,31 +3452,69 @@ impl<'a> Game<'a> {
         }
     }
 
+    // MoveSystem::ConsumeMovableSourceStack (0x7c9dcd0) consumes only
+    // the ability identified by the staged movement component.
+    fn consume_move_source(
+        &mut self,
+        card: usize,
+        seat: usize,
+        source: Option<MoveSource>,
+    ) -> Option<MoveGrant> {
+        match source {
+            Some(MoveSource::Intrinsic) => {
+                if self.cards[card].default_ability().move_limit > 0 {
+                    self.cards[card].player_moves_used =
+                        self.cards[card].player_moves_used.saturating_add(1);
+                }
+                if self.cards[card].default_ability().move_each_turn {
+                    self.cards[card].player_move_turn = Some(self.turn);
+                }
+                None
+            }
+            Some(MoveSource::External(index)) => {
+                if let Some(remaining) = &mut self.cards[card].external_moves[index].remaining {
+                    *remaining = remaining.saturating_sub(1);
+                }
+                None
+            }
+            Some(MoveSource::Player(index)) => {
+                let grant = &mut self.players[seat].move_grants[index];
+                if !grant.unlimited {
+                    grant.remaining -= 1;
+                }
+                Some(grant.clone())
+            }
+            Some(MoveSource::Passive(_)) | None => None,
+        }
+    }
+
     /// Resolve one voluntary movement, consuming its intrinsic and granted stacks.
     pub fn move_player_card(&mut self, card: usize, destination: usize, seat: usize) -> bool {
         if !self.can_player_move(card, destination, seat) {
             return false;
         }
-        let grant = self.matching_move_grant(card, seat, Some(destination));
+        let reference = cards::reference_rules_enabled();
+        let (selected, ambiguous) = self.select_move_source(card, destination, seat);
+        if !reference && ambiguous {
+            return false;
+        }
+        let grant = reference
+            .then(|| self.matching_move_grant(card, seat, Some(destination)))
+            .flatten();
         let source = self.cards[card].lane.unwrap();
         if !self.move_card(card, destination) {
             return false;
         }
         self.players[seat].non_play_action_turn = Some(self.turn);
         self.players[seat].move_from_turn[source] = Some(self.turn);
-        self.consume_external_move(card, source);
-        if self.cards[card].default_ability().move_limit > 0 {
-            self.cards[card].player_moves_used =
-                self.cards[card].player_moves_used.saturating_add(1);
-        }
-        if self.cards[card].default_ability().move_each_turn {
-            self.cards[card].player_move_turn = Some(self.turn);
-        }
-        if let Some(index) = grant {
-            let grant = &mut self.players[seat].move_grants[index];
-            if !grant.unlimited {
-                grant.remaining -= 1;
-            }
+        let grant = if reference {
+            self.consume_external_move(card, source);
+            let _ = self.consume_move_source(card, seat, Some(MoveSource::Intrinsic));
+            self.consume_move_source(card, seat, grant.map(MoveSource::Player))
+        } else {
+            self.consume_move_source(card, seat, selected)
+        };
+        if let Some(grant) = grant {
             let source = grant.source;
             let callback = grant.on_move;
             if let Some(hook) = callback {
@@ -3207,13 +3532,22 @@ impl<'a> Game<'a> {
         let Some(source) = target.lane else {
             return false;
         };
-        if destination >= 3
-            || destination == source
-            || (target.revealed
-                && target
-                    .ongoing_guard_abilities()
-                    .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move))
-            || !self.has_space(destination, target.owner, 0)
+        if destination >= 3 || destination == source || self.lanes[destination].destroyed {
+            return false;
+        }
+        // Location::CanMoveCard (0x7ddba50) accepts the latest staged
+        // action's original location before checking capacity or move stats.
+        if !cards::reference_rules_enabled()
+            && self.is_wait_for_staging
+            && matches!(
+                self.staged_undo_option(card, target.owner),
+                Some(crate::engine_ext::autoplay::Undo::Move { lane }) if lane == destination
+            )
+        {
+            return true;
+        }
+        if (target.revealed && self.immune_to_movement(card))
+            || !self.has_move_space(card, destination)
         {
             return false;
         }
@@ -3241,21 +3575,63 @@ impl<'a> Game<'a> {
                 })
     }
 
+    // Game::GetRandomLocationToMoveCard (0x7db2f50): try legal locations
+    // other than the excluded location, then optionally all other locations.
+    pub(crate) fn random_location_to_move_card(
+        &self,
+        card: usize,
+        excluded: usize,
+        fallback_to_any: bool,
+    ) -> Option<usize> {
+        let mut candidates = [0; 3];
+        let mut count = 0;
+        for lane in 0..self.lanes.len() {
+            if lane != excluded && self.can_move_card(card, lane) {
+                candidates[count] = lane;
+                count += 1;
+            }
+        }
+        if count == 0 && fallback_to_any {
+            for lane in 0..self.lanes.len() {
+                if lane != excluded {
+                    candidates[count] = lane;
+                    count += 1;
+                }
+            }
+        }
+        (count != 0).then(|| candidates[self.rng.borrow_mut().randbelow(count)])
+    }
+
     fn activation_definition(&self, card: usize, seat: usize) -> Option<&'static CardDef> {
         let target = &self.cards[card];
         target
             .abilities()
             .filter(|ability| ability.supports(AbilityKind::Activate))
             .filter(|ability| ability.id.is_some() || !target.abilities_removed)
+            // Card::HasActivateAbility (0x7cb36b8) passes includeHidden=false.
+            .filter(|ability| cards::reference_rules_enabled() || !ability.hidden)
             .map(|ability| ability.def)
             .find(|def| {
                 def.on_activate.is_some()
-                    && self.players[seat].energy >= def.activate_cost
-                    && def.can_activate.is_none_or(|test| {
-                        self.record_card_hook(def.id, "can_activate");
-                        test(self, card)
-                    })
+                    && (!cards::reference_rules_enabled()
+                        || (self.players[seat].energy >= def.activate_cost
+                            && def.can_activate.is_none_or(|test| {
+                                self.record_card_hook(def.id, "can_activate");
+                                test(self, card)
+                            })))
             })
+    }
+
+    fn activation_cost(&self, card: usize, seat: usize) -> i32 {
+        if cards::reference_rules_enabled() {
+            self.activation_definition(card, seat)
+                .unwrap()
+                .activate_cost
+        } else {
+            // Card::CanActivate (0x7cb9a24) and StageForActivate
+            // (0x7cb9678) read ActivateCost from the card definition.
+            self.cards[card].def.activate_cost
+        }
     }
 
     pub fn can_activate(&self, card: usize, seat: usize) -> bool {
@@ -3263,7 +3639,7 @@ impl<'a> Game<'a> {
         target.owner == seat
             && target.lane.is_some()
             && target.revealed
-            && self.card_triggers_allowed(card)
+            && (!cards::reference_rules_enabled() || self.card_triggers_allowed(card))
             && !target.activated
             && !target.activate_staged
             && target.observed_can_activate.unwrap_or(true)
@@ -3275,6 +3651,7 @@ impl<'a> Game<'a> {
                 }
             })
             && self.activation_definition(card, seat).is_some()
+            && self.players[seat].energy >= self.activation_cost(card, seat)
     }
 
     /// Resolve an activation and dispatch its post-activation trigger.
@@ -3282,21 +3659,21 @@ impl<'a> Game<'a> {
         if !self.can_activate(card, seat) {
             return false;
         }
-        let cost = self
-            .activation_definition(card, seat)
-            .unwrap()
-            .activate_cost;
+        let cost = self.activation_cost(card, seat);
         self.set_energy(seat, self.players[seat].energy - cost);
         self.players[seat].energy_spent_this_turn += cost;
         self.cards[card].activated = true;
         self.players[seat].non_play_action_turn = Some(self.turn);
         self.ongoing();
-        self.dispatch_card_activation(card);
+        if self.card_triggers_allowed(card) {
+            self.dispatch_card_activation(card);
+        }
         self.emit(Event::CardActivated { card });
         true
     }
     /// Stage a play, move or activation, preserving the player's action order.
     pub fn stage_action(&mut self, seat: usize, action: Action) -> Result<(), String> {
+        self.last_move_source = None;
         let cost = match action {
             Action::Play { card, lane } => {
                 if !self.players[seat].hand.contains(&card)
@@ -3308,6 +3685,12 @@ impl<'a> Game<'a> {
             }
             Action::Move { card, lane } => {
                 if !self.can_player_move(card, lane, seat) {
+                    if !cards::reference_rules_enabled()
+                        && self.can_player_move_without_tie_check(card, lane, seat)
+                        && self.move_source_tie_unknown(card, lane, seat)
+                    {
+                        return Err("move_source_tie_unknown".into());
+                    }
                     return Err("illegal staged move".into());
                 }
                 0
@@ -3316,9 +3699,7 @@ impl<'a> Game<'a> {
                 if !self.can_activate(card, seat) {
                     return Err("illegal staged activation".into());
                 }
-                self.activation_definition(card, seat)
-                    .unwrap()
-                    .activate_cost
+                self.activation_cost(card, seat)
             }
             Action::Return { card } => {
                 if !self.staged_returnable(card, seat) {
@@ -3395,18 +3776,37 @@ impl<'a> Game<'a> {
                 }
             }
             Action::Move { card, lane } => {
+                let reference = cards::reference_rules_enabled();
+                let (selected, _) = self.select_move_source(card, lane, seat);
+                self.last_move_source = selected.map(|source| match source {
+                    MoveSource::Intrinsic => self.cards[card].default_ability().id,
+                    MoveSource::External(index) => {
+                        self.cards[self.cards[card].external_moves[index].origin]
+                            .default_ability()
+                            .id
+                    }
+                    MoveSource::Player(index) => self.players[seat].move_grants[index]
+                        .owner_def_id
+                        .unwrap_or(
+                            self.cards[self.players[seat].move_grants[index].source]
+                                .default_ability()
+                                .id,
+                        ),
+                    MoveSource::Passive(id) => id,
+                });
+                let old_grant = reference
+                    .then(|| self.matching_move_grant(card, seat, Some(lane)))
+                    .flatten();
                 self.players[seat].non_play_action_turn = Some(self.turn);
                 let from = self.cards[card].lane.unwrap();
                 self.players[seat].move_from_turn[from] = Some(self.turn);
-                let grant = self
-                    .matching_move_grant(card, seat, Some(lane))
-                    .map(|index| {
-                        let grant = &mut self.players[seat].move_grants[index];
-                        if !grant.unlimited {
-                            grant.remaining -= 1;
-                        }
-                        grant.clone()
-                    });
+                let grant = if reference {
+                    self.consume_external_move(card, from);
+                    let _ = self.consume_move_source(card, seat, Some(MoveSource::Intrinsic));
+                    self.consume_move_source(card, seat, old_grant.map(MoveSource::Player))
+                } else {
+                    self.consume_move_source(card, seat, selected)
+                };
                 if let Some(grant) = grant
                     && let Some(hook) = grant.on_move
                 {
@@ -3422,14 +3822,6 @@ impl<'a> Game<'a> {
                         },
                     });
                 }
-                if self.cards[card].default_ability().move_limit > 0 {
-                    self.cards[card].player_moves_used =
-                        self.cards[card].player_moves_used.saturating_add(1);
-                }
-                if self.cards[card].default_ability().move_each_turn {
-                    self.cards[card].player_move_turn = Some(self.turn);
-                }
-                self.consume_external_move(card, from);
                 self.cards[card].move_staged = true;
                 self.cards[card].last_lane = Some(from);
                 self.detach_location(from, card);
@@ -3572,13 +3964,10 @@ impl<'a> Game<'a> {
         let Some(source) = self.cards[card].lane else {
             return false;
         };
-        if (self.cards[card].revealed
-            && self.cards[card]
-                .ongoing_guard_abilities()
-                .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move))
+        if (self.cards[card].revealed && self.immune_to_movement(card))
             || destination >= 3
             || source == destination
-            || !self.has_space(destination, self.cards[card].owner, 0)
+            || !self.has_move_space(card, destination)
         {
             return false;
         }
@@ -4839,16 +5228,20 @@ impl<'a> Game<'a> {
                             for hand_index in 0..self.players[seat].hand.len() {
                                 let card = self.players[seat].hand[hand_index];
                                 let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
-                                self.add_ongoing_cost(
-                                    card,
-                                    (cost + 1).min(cost.max(6)) - cost,
-                                    seat,
-                                );
+                                // SandmanBehavior::IncreaseCardCost (0x7f2e084)
+                                // uses AddCostWithMax(+1, max(current, 6)).
+                                if cost < 6 {
+                                    self.add_ongoing_cost(card, 1, seat);
+                                } else {
+                                    self.set_ongoing_cost(card, cost, seat);
+                                }
                             }
                         }
                         PlayerCostEffectKind::BaronMordo { card, until, value }
-                            if self.turn <= until =>
+                            if self.turn <= until && self.players[seat].hand.contains(&card) =>
                         {
+                            // BaronMordoBehavior::SetCardCost (0x7e6ed1c)
+                            // checks that the target is still in this player's hand.
                             self.set_ongoing_cost(card, value, seat);
                         }
                         PlayerCostEffectKind::BlackSwan {
@@ -4877,7 +5270,11 @@ impl<'a> Game<'a> {
                             for hand_index in 0..self.players[seat].hand.len() {
                                 let card = self.players[seat].hand[hand_index];
                                 let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
-                                self.set_ongoing_cost(card, cost.min(4), seat);
+                                // WaveBehavior::SetCardCost (0x7cef16c)
+                                // sets the cap only when current cost exceeds it.
+                                if cost > 4 {
+                                    self.set_ongoing_cost(card, 4, seat);
+                                }
                             }
                         }
                         _ => {}
@@ -5778,7 +6175,7 @@ impl<'a> Game<'a> {
                         Action::Play { card, .. } => view.card_cost(card),
                         Action::Activate { card } => view
                             .activation_definition(card, seat)
-                            .map_or(0, |def| def.activate_cost),
+                            .map_or(0, |_| view.activation_cost(card, seat)),
                         Action::Move { .. } | Action::Return { .. } => 0,
                     };
                     view.stage_action(seat, action).map_err(|error| {
@@ -7146,7 +7543,14 @@ mod staging_tests {
         );
         game.players[0].energy = 2;
         assert!(game.activate_card(card, 0));
-        assert_eq!(game.players[0].energy, 0);
+        assert_eq!(
+            game.players[0].energy,
+            if cards::reference_rules_enabled() {
+                0
+            } else {
+                2
+            }
+        );
         assert_eq!(
             game.cards[card].composed_abilities[1]
                 .state
@@ -7156,6 +7560,75 @@ mod staging_tests {
                 .downcast_ref::<u32>(),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn activation_uses_printed_cost_and_visible_ability() {
+        if cards::reference_rules_enabled() {
+            return;
+        }
+        fn increment(game: &mut Game<'_>, card: usize) {
+            game.cards[card].permanent += 1;
+        }
+        fn no_targets(_: &Game<'_>, _: usize) -> bool {
+            false
+        }
+        static PRINTED: CardDef = CardDef {
+            activate_cost: 2,
+            ..CardDef::vanilla("PrintedActivateCostTest")
+        };
+        static ATTACHED: CardDef = CardDef {
+            on_activate: Some(increment),
+            can_activate: Some(no_targets),
+            ..CardDef::vanilla("AttachedActivateCostTest")
+        };
+        let mut rng = PythonRandom::seed(151);
+        let mut game = game(&mut rng);
+        let card = place(&mut game, "Wasp", 0, 0);
+        let initial_power = game.cards[card].permanent;
+        game.cards[card].def = &PRINTED;
+        game.cards[card]
+            .composed_abilities
+            .push(AbilityInstance::new(
+                &ATTACHED,
+                AbilityKind::Activate,
+                None,
+                true,
+                true,
+                None,
+            ));
+        game.players[0].energy = 2;
+        assert!(!game.can_activate(card, 0));
+        game.cards[card].composed_abilities[0].hidden = false;
+        game.players[0].energy = 1;
+        assert!(!game.can_activate(card, 0));
+        game.players[0].energy = 2;
+        assert!(game.stage_action(0, Action::Activate { card }).is_ok());
+        assert_eq!(game.players[0].energy, 0);
+        assert!(!game.can_activate(card, 0));
+        game.resolve_staged_actions(0);
+        assert!(game.cards[card].activated);
+        assert_eq!(game.cards[card].permanent, initial_power + 1);
+    }
+
+    #[test]
+    fn trigger_suppression_does_not_alone_block_staging_activation() {
+        if cards::reference_rules_enabled() {
+            return;
+        }
+        fn increment(game: &mut Game<'_>, card: usize) {
+            game.cards[card].permanent += 1;
+        }
+        static ACTIVATE: CardDef = CardDef {
+            on_activate: Some(increment),
+            ..CardDef::vanilla("SuppressedActivateTest")
+        };
+        let mut rng = PythonRandom::seed(152);
+        let mut game = game(&mut rng);
+        let card = place(&mut game, "Wasp", 0, 0);
+        game.cards[card].override_ability = Some(&ACTIVATE);
+        game.lanes[0].ability_flags.trigger = false;
+        assert!(game.can_activate(card, 0));
     }
 
     #[test]
@@ -7718,6 +8191,7 @@ mod staging_tests {
         game.grant_move(MoveGrant {
             seat: 0,
             source: professor,
+            owner_def_id: None,
             card: Some(professor),
             lane: None,
             destination: None,

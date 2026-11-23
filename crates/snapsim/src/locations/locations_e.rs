@@ -184,6 +184,12 @@ fn spider_island(game: &mut Game<'_>, lane: usize, event: Event) {
     let Some(from) = game.cards[card].lane else {
         return;
     };
+    if !crate::cards::reference_rules_enabled() {
+        if let Some(target) = game.random_location_to_move_card(card, from, true) {
+            game.move_card(card, target);
+        }
+        return;
+    }
     let mut targets = [0; 2];
     let mut count = 0;
     for target in 0..3 {

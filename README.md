@@ -28,6 +28,11 @@ simultaneous; Daredevil queues ordered phases, revealing completed staged cards
 only to the next acting seat. Two Daredevils can produce four phases. Terminal
 steps return signed cube results.
 
+The action space omits staging undo. The client allows undo of its most recent
+staged play, move, or activation (`Card::IsStageUndoable`, `0x7cb0e74`);
+the same final staging sequence can instead be submitted directly. The lower-level
+game API additionally supports returning the latest staged play to hand.
+
 Stake requests are buffered until the phase commits: unlike the client, a snap
 cannot be observed and answered mid-phase. Simultaneous requests use seeded
 ordering from the compare model; this random ordering is not proven client
@@ -62,6 +67,9 @@ until reset. `ENV_ACTION_COUNT` and `ENV_OBS_SIZE` expose the array dimensions.
 Stepping releases the GIL and parallelises across games; seed trajectories do
 not depend on the thread count. NumPy is required at runtime; the extension
 retains its Python 3.9 stable ABI.
+When movement-source ordering is unknown, only the ambiguous move is omitted
+from the mask. `VecEnv.omitted_tie_moves()` reports cumulative omitted mask
+entries per environment since reset; repeated observations count again.
 
 `Env::from_sampled_position` constructs a planning view from a position and
 explicit stakes, sampling unobserved cards and locations. It does not restore
@@ -72,6 +80,9 @@ validated legality labels. Agreement across samples is not proof of invariance:
 callers must independently establish phase and stake state, reconstruction
 coverage and the absence of hidden-state reads in every applicable legality
 hook before using a mask for training.
+Restored positions with potentially conflicting equal-priority movement sources
+are marked `move_source_tie_unknown`: the reader does not export
+`MovableByPlayerComponent.CreatedTimestamp`, which the client uses to break ties.
 
 ### Visible-recording trajectories
 
@@ -424,11 +435,20 @@ Two kinds of record are reported rather than compared:
 
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
 * Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of an engine change is listed with its exact first-divergence path and values in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. A changed card keeps the reference's version in `cards/reference_rules.rs`, which the gates switch to with `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`; live play never does. The `replay-client` gate then checks the client rules, these changes included, against every real recording. The changes:
+  * Colossus's movement immunity requires its Ongoing ability to be active (`ColossusBehavior::SetCantBeDestroyedOrMovedOrWeakened`, `0x7e834e8`); reference rules retain the unconditional movement guard.
+  * Player movement consumes only its client-priority source (`MoveSystem::FindMovableByPlayerSource`, `0x7c9d9ec`); reference rules retain the earlier all-sources consumption.
+  * Intrinsic hidden Ongoing movement is suppressed where hidden Ongoing abilities are disabled (`MovableOngoingAbilityDef::.ctor`, `0x7e0c8e4`); reference rules retain the earlier unconditional movement permission.
+  * Jeff's hidden ignore-restrictions ability is inactive when hidden Ongoing effects are suppressed or Jeff is staged; while active it permits moving into Space Throne up to its four physical slots (`Location::CanMoveCard`, `0x7ddba50`; `IgnoreMoveRestrictionsAction::ExecuteOnTarget`, `0x7d2324c`). Reference rules retain the previous override and capacity checks.
+  * During staging, the latest staged move can return to its original location before capacity or movement restrictions are checked (`Location::CanMoveCard`, `0x7ddba50`); reference rules retain the previous check.
+  * Strange Academy moves only revealed cards, and it and Spider Island use full movement legality followed by the client's random-location fallback (`StrangeAcademyBehavior::MoveAllCards`, `0x7d84854`; `Game::GetRandomLocationToMoveCard`, `0x7db2f50`). Reference rules retain their previous enumeration and destination selection.
   * Ongoing stat effects use the 59.15.1 client's Init → modifiers → Default → ConditionalCard → ConditionalLocation → PostConditional ordering, with player effects before locations and cards. Staging preserves non-staging contributions; conditional abilities that fail are retried after later successes. Reference rules retain the frozen ordering.
   * Revealed card trigger observers, including start-of-turn and post-start hooks, run in latest-resolution order (`Game::GetAllCardsForActivatingTriggerAbility`, `0x7dacfcc`); reference rules retain board order.
   * Morph completion and copied-text activation run only the selected default text's resolve ability (`Card::ActivateTextResolveAbility`, `0x7cbb424`), not foreign attached resolves. Reference rules retain the earlier all-resolves dispatch.
   * Repetition effects do not repeat hidden ability instances; normal resolution still executes them once. Reference rules retain the earlier repetition behavior.
   * Nested ability dispatch uses the client's 32-active-ability limit (`Ability::CanActivate`, `0x7c8a6e0`).
+  * Activate staging checks visible activation abilities and the card definition's activation cost, rather than the attached ability's cost or its target availability (`Card::HasActivateAbility`, `0x7cb36b8`; `Card::CanActivate`, `0x7cb9a24`). Reference rules retain the previous checks.
+  * Cards that ignore play restrictions can use up to four physical slots at Space Throne, rather than its normal one-slot limit (`Card::IsPlayableByCard`, `0x7cb0a28`; `Location::GetNumberOfEmptyCardSlots`, `0x7ddb4d8`). Reference rules retain the previous capacity check.
+  * Each ongoing additive cost update clamps to zero before subsequent cost effects (`Card::AddCost`, `0x7cb69e4` and `0x7cb6a2c`); reference rules retain unbounded intermediate values.
   * Horde grows every owned Zombie Horde (`ZombieHordeAbilityDef::GrowZombieHorde`), not just the first; it changes one spread game. A new Horde is placed before it grows, so the growth triggers in play.
   * Sinister London copies a staged Skill after it resolves even though the Skill has already been banished (`SinisterLondonBehavior::CreateCopy`, `0x7d7fe8c`). Reference rules retain the earlier lane-based behavior.
   * Wolfsbane counts every other card its owner has at its location, face-down ones included (`WolfsbaneBehavior::GetTargets` over `Location::GetAllCards`); the reference counted revealed cards only. Reference rules: `cards/reference_rules.rs`.

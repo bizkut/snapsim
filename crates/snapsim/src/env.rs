@@ -1,6 +1,7 @@
 //! Action-at-a-time, two-seat environment for independent self-play games.
 use crate::game::{Action, Game, Stakes};
 use crate::random::PythonRandom;
+use std::cell::Cell;
 
 /// Play: 0..21 (hand slot × lane); move: 21..57 (board slot × lane);
 /// activate: 57..69 (board slot); end, snap, retreat and retreat later: 69..73.
@@ -59,6 +60,7 @@ pub struct Env {
     queue_index: usize,
     visible_actions: [usize; 2],
     pending_stakes: [Option<StakeRequest>; 2],
+    omitted_tie_moves: Cell<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +125,7 @@ impl Env {
             queue_index: 0,
             visible_actions: [0; 2],
             pending_stakes: [None; 2],
+            omitted_tie_moves: Cell::new(0),
             outcome: None,
         })
     }
@@ -160,6 +163,7 @@ impl Env {
             queue_index: 0,
             visible_actions: [0; 2],
             pending_stakes: [None; 2],
+            omitted_tie_moves: Cell::new(0),
             outcome: None,
         })
     }
@@ -255,6 +259,7 @@ impl Env {
             queue_index: self.queue_index,
             visible_actions: self.visible_actions,
             pending_stakes: self.pending_stakes,
+            omitted_tie_moves: Cell::new(self.omitted_tie_moves.get()),
         }
     }
 
@@ -298,7 +303,48 @@ impl Env {
             return Err("invalid seat".into());
         }
         let view = self.view(seat)?;
-        Ok(self.mask_for_view(seat, view))
+        let mask = self.mask_for_view(seat, view);
+        if !crate::cards::reference_rules_enabled()
+            && self.seats_due()[seat]
+            && view.autoplay_controller(seat).is_none()
+            && !self
+                .game
+                .stakes
+                .as_ref()
+                .expect("environment stakes")
+                .pending_retreat[seat]
+            && !matches!(
+                self.pending_stakes[seat],
+                Some(StakeRequest::Retreat | StakeRequest::RetreatLater)
+            )
+        {
+            let omitted = (21..57)
+                .filter(|&id| {
+                    !mask[id]
+                        && matches!(
+                            Self::action(view, seat, id),
+                            Some(Action::Move { card, lane })
+                                if view.can_player_move_without_tie_check(card, lane, seat)
+                                    && view.move_source_tie_unknown(card, lane, seat)
+                        )
+                })
+                .count() as u64;
+            self.omitted_tie_moves
+                .set(self.omitted_tie_moves.get().saturating_add(omitted));
+        }
+        Ok(mask)
+    }
+
+    /// Number of otherwise legal move actions omitted from requested masks
+    /// because their source creation order was unknown. Repeated mask requests
+    /// count again; resetting the environment resets the counter.
+    pub fn omitted_tie_moves(&self) -> u64 {
+        self.omitted_tie_moves.get()
+    }
+
+    /// Definition ID of the selected source in this seat's latest staged move.
+    pub fn selected_move_source(&self, seat: usize) -> Option<&'static str> {
+        self.views.get(seat).and_then(|view| view.last_move_source)
     }
 
     fn mask_for_view(&self, seat: usize, view: &Game<'_>) -> [bool; ACTION_COUNT] {
@@ -676,6 +722,41 @@ mod tests {
         assert!(env.seats_due()[0]);
         assert_eq!(env.observation(0).unwrap().hand[0].id, "AntMan");
         assert!(env.legal_mask(0).unwrap()[END_TURN]);
+    }
+
+    #[test]
+    fn unknown_move_source_order_omits_only_the_ambiguous_move() {
+        let position: crate::position::Position = serde_json::from_value(serde_json::json!({
+            "turn": 6, "energy": 6, "hand": [], "deck": [], "deck_count": 0,
+            "locations": [
+                {"id": "Mojoworld", "mine": [{"id": "Vision", "revealed": true}], "theirs": []},
+                {"id": "NewYork", "mine": [], "theirs": []},
+                {"id": "Mojoworld", "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        }))
+        .unwrap();
+        let stakes = Stakes {
+            current: 1,
+            next: 1,
+            maximum: 8,
+            can_raise: true,
+            player_multiplier: [1; 2],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
+        };
+        let env = Env::from_sampled_position(&position, stakes, 1).unwrap();
+        let mask = env.legal_mask(0).unwrap();
+        assert!(!mask[22], "move into New York has ambiguous sources");
+        assert!(mask[23], "other destination remains legal");
+        assert!(mask[END_TURN]);
+        assert_eq!(env.omitted_tie_moves(), 1);
+        env.legal_mask(0).unwrap();
+        assert_eq!(env.omitted_tie_moves(), 2);
+        assert_eq!(env.snapshot().omitted_tie_moves(), 2);
     }
 
     fn trace(deck: &[String], seed: i128, check_mask: bool, recruit: bool) -> Vec<String> {

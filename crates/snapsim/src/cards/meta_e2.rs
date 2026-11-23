@@ -230,6 +230,7 @@ fn web_sling(game: &mut Game<'_>, card: usize) {
     game.grant_move(MoveGrant {
         seat: game.cards[card].owner,
         source: card,
+        owner_def_id: None,
         card: None,
         lane: Some(lane),
         destination: None,

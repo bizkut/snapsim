@@ -1,6 +1,6 @@
 //! Meta-deck cards, batch B1: power-ledger cards (increased Power, Afflict, doubling, Empower); rules from the 59.15.1 client.
 use super::CardDef;
-use crate::game::{Event, Game};
+use crate::game::{Event, Game, StatOperation};
 
 pub(crate) static CARDS: &[CardDef] = &[
     CardDef {
@@ -165,13 +165,18 @@ fn hellcow(game: &mut Game<'_>, card: usize) {
 }
 
 // CanPlay (0x7eca82c), HasNegativePower (0x7ecab50): an enemy
-// must be revealed and have a negative additive Power modifier.
+// must be revealed, able to have Power reduced, and have a negative additive modifier.
 fn ikari(game: &Game<'_>, _card: usize, lane: usize, seat: usize) -> bool {
     game.lanes[lane].cards.iter().copied().any(|target| {
         game.cards[target].owner != seat
             && game.cards[target].revealed
             && game.is_character(target)
-            && game.is_afflicted(target)
+            && game.can_reduce_card_power(target)
+            && (game.is_afflicted(target)
+                || game.cards[target]
+                    .power_modifiers
+                    .iter()
+                    .any(|modifier| modifier.operation == StatOperation::Add && modifier.value < 0))
     })
 }
 
@@ -388,8 +393,21 @@ mod tests {
         assert!(!g.can_play(card, 1, 0, 10, 0));
         g.cards[enemy].revealed = true;
         assert!(g.can_play(card, 1, 0, 10, 0));
+        let luke = place(&mut g, "LukeCage", 1, 2, true);
+        assert!(!g.can_play(card, 1, 0, 10, 0));
+        g.cards[luke].abilities_removed = true;
+        assert!(g.can_play(card, 1, 0, 10, 0));
         assert!(!g.can_play(card, 0, 0, 10, 0));
         g.reset_power(enemy);
+        g.cards[enemy].power_modifiers.clear();
         assert!(!g.can_play(card, 1, 0, 10, 0));
+        g.cards[enemy]
+            .power_modifiers
+            .push(crate::game::CardPowerModifier {
+                operation: StatOperation::Add,
+                value: -1,
+                source: Some(0),
+            });
+        assert!(g.can_play(card, 1, 0, 10, 0));
     }
 }

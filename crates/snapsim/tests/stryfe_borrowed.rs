@@ -262,6 +262,41 @@ fn borrowed_movement_grants_capture_stryfes_location_and_seat() {
 }
 
 #[test]
+fn borrowed_cloak_uses_cloaks_priority_not_stryfes() {
+    let mut rng = PythonRandom::seed(5);
+    let mut game = game(&mut rng);
+    let (source, _) = borrow(&mut game, "Cloak");
+    assert_eq!(game.players[1].move_grants[0].source, source);
+    assert_eq!(game.players[1].move_grants[0].owner_def_id, Some("Cloak"));
+    let crawler = game.create_card("Nightcrawler", 1);
+    game.cards[crawler].lane = Some(0);
+    game.cards[crawler].revealed = true;
+    game.lanes[0].cards.push(crawler);
+    game.turn = 3;
+    game.stage_action(
+        1,
+        Action::Move {
+            card: crawler,
+            lane: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(game.last_move_source, Some("Cloak"));
+    assert_eq!(game.cards[crawler].player_moves_used, 0);
+    assert!(
+        game.stage_action(
+            1,
+            Action::Move {
+                card: crawler,
+                lane: 2
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(game.last_move_source, None);
+}
+
+#[test]
 fn mysterio_adds_illusion_for_stryfes_owner_elsewhere() {
     let mut rng = PythonRandom::seed(6);
     let mut game = game(&mut rng);

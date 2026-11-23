@@ -1316,6 +1316,8 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     };
     let mut game = Game {
         cards: Vec::new(),
+        move_provenance_known: false,
+        last_move_source: None,
         ability_call_depth: 0,
         replay_hooks: None,
         players: [Player::default(), Player::default()],

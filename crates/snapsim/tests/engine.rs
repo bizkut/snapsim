@@ -374,6 +374,186 @@ fn staged_move_updates_slots_but_fires_hooks_only_on_resolution() {
 }
 
 #[test]
+fn cloak_and_hellion_moves_preserve_nightcrawlers_intrinsic_stack() {
+    use snapsim::game::Action;
+    for source in ["Cloak", "Hellion"] {
+        let mut rng = PythonRandom::seed(15);
+        let mut game = game(&mut rng);
+        let crawler = play(&mut game, "Nightcrawler", 0, 0);
+        play(&mut game, source, 0, 1);
+        game.turn += 1;
+        game.stage_action(
+            0,
+            Action::Move {
+                card: crawler,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        game.resolve_staged_actions(0);
+        assert_eq!(game.cards[crawler].player_moves_used, 0, "{source}");
+        game.turn += 1;
+        assert!(game.can_player_move(crawler, 2, 0), "{source}");
+    }
+}
+
+#[test]
+fn intrinsic_movement_is_suppressed_in_deep_space() {
+    let mut rng = PythonRandom::seed(15);
+    let mut game = game(&mut rng);
+    let crawler = play(&mut game, "Nightcrawler", 0, 0);
+    assert!(game.can_player_move(crawler, 1, 0));
+    game.replace_location(0, "DeepSpace");
+    assert!(!game.can_player_move(crawler, 1, 0));
+    game.replace_location(0, "Ruins");
+    assert!(game.can_player_move(crawler, 1, 0));
+}
+
+#[test]
+fn equivalent_move_source_ties_are_accepted() {
+    use snapsim::game::Action;
+    let mut rng = PythonRandom::seed(15);
+    let mut game = game(&mut rng);
+    let card = play(&mut game, "MistyKnight", 0, 0);
+    play(&mut game, "Cloak", 0, 1);
+    play(&mut game, "Hellion", 0, 1);
+    game.turn += 1;
+    assert!(game.stage_action(0, Action::Move { card, lane: 1 }).is_ok());
+}
+
+#[test]
+fn consequential_move_source_tie_is_reported() {
+    use snapsim::game::Action;
+    let mut rng = PythonRandom::seed(15);
+    let mut game = game(&mut rng);
+    game.turn = 5;
+    let card = play(&mut game, "MistyKnight", 0, 0);
+    play(&mut game, "Cloak", 0, 1);
+    game.replace_location(1, "NewYork");
+    game.turn = 6;
+    assert_eq!(
+        game.stage_action(0, Action::Move { card, lane: 1 }),
+        Err("move_source_tie_unknown".into())
+    );
+    for &candidate in &game.lanes[0].cards {
+        for lane in 0..3 {
+            if game.can_player_move(candidate, lane, 0) {
+                assert!(
+                    game.fork_owned()
+                        .stage_action(
+                            0,
+                            Action::Move {
+                                card: candidate,
+                                lane
+                            }
+                        )
+                        .is_ok()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn enumerated_actions_stage_in_seeded_random_positions() {
+    use snapsim::game::Action;
+    let pool = [
+        "Nightcrawler",
+        "Vision",
+        "Cloak",
+        "Hellion",
+        "JeffTheBabyLandShark",
+        "MistyKnight",
+        "Wasp",
+        "Medusa",
+        "Hawkeye",
+        "IronMan",
+        "Sentinel",
+        "Hulk",
+        "Colossus",
+        "Wolverine",
+        "AntMan",
+        "MultipleMan",
+        "Angela",
+        "Kraven",
+    ];
+    for seed in 0..64 {
+        let mut chooser = PythonRandom::seed(seed);
+        let mut deck: Vec<String> = pool.iter().map(|id| (*id).to_owned()).collect();
+        chooser.shuffle(&mut deck);
+        deck.truncate(12);
+        let locations: Vec<String> = ["Ruins", "Xandar", "KamarTaj"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut rng = PythonRandom::seed(seed + 1000);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        game.turn = 1 + chooser.randbelow(6) as u8;
+        game.players[0].energy = 6;
+        for lane in &mut game.lanes {
+            lane.def = locations::get("Ruins").unwrap();
+            lane.revealed = true;
+        }
+        for _ in 0..6 {
+            let id = pool[chooser.randbelow(pool.len())];
+            let lane = chooser.randbelow(3);
+            if game.lanes[lane]
+                .cards
+                .iter()
+                .filter(|&&card| game.cards[card].owner == 0)
+                .count()
+                < 4
+            {
+                play(&mut game, id, 0, lane);
+            }
+        }
+        for &card in &game.players[0].hand {
+            for lane in 0..3 {
+                if game.can_play(card, lane, 0, game.players[0].energy, 0) {
+                    assert!(
+                        game.fork_owned()
+                            .stage_action(0, Action::Play { card, lane })
+                            .is_ok(),
+                        "seed {seed}"
+                    );
+                }
+            }
+        }
+        for lane in &game.lanes {
+            for &card in &lane.cards {
+                if game.cards[card].owner != 0 {
+                    continue;
+                }
+                for destination in 0..3 {
+                    if game.can_player_move(card, destination, 0) {
+                        assert!(
+                            game.fork_owned()
+                                .stage_action(
+                                    0,
+                                    Action::Move {
+                                        card,
+                                        lane: destination
+                                    }
+                                )
+                                .is_ok(),
+                            "seed {seed}"
+                        );
+                    }
+                }
+                if game.can_activate(card, 0) {
+                    assert!(
+                        game.fork_owned()
+                            .stage_action(0, Action::Activate { card })
+                            .is_ok(),
+                        "seed {seed}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn lane_move_grant_is_turn_scoped_and_shared() {
     use snapsim::game::{Action, MoveGrant};
     fn buff(game: &mut Game<'_>, source: usize, moved: usize) {
@@ -386,6 +566,7 @@ fn lane_move_grant_is_turn_scoped_and_shared() {
     game.grant_move(MoveGrant {
         seat: 0,
         source,
+        owner_def_id: None,
         card: None,
         lane: Some(0),
         destination: None,

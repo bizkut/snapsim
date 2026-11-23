@@ -118,6 +118,7 @@ fn snapshot_hidden_mask_gate(
         card_cost_effects: Known::Unknown,
         player_cost_effects: Known::Unknown,
         state_effects: Known::Unknown,
+        move_source_provenance: Known::Unknown,
     };
     match check_hidden_pool(&inputs) {
         Result::Valid => Vec::new(),
@@ -168,6 +169,16 @@ impl VecEnv {
     }
     fn __len__(&self) -> usize {
         self.decks.len()
+    }
+    /// Cumulative omitted move-mask entries per environment since reset.
+    fn omitted_tie_moves(&self) -> PyResult<Vec<u64>> {
+        Ok(self
+            .envs
+            .lock()
+            .map_err(error)?
+            .iter()
+            .map(Env::omitted_tie_moves)
+            .collect())
     }
     fn reset(&mut self, indices: Vec<usize>, seeds: Vec<i64>) -> PyResult<()> {
         if indices.len() != seeds.len() {

@@ -53,7 +53,10 @@ fn mockingbird(game: &mut Game<'_>, card: usize) {
             game.cards[id].owner == owner && game.cards[id].revealed && game.cards[id].created
         })
         .count() as i32;
-    game.add_ongoing_cost(card, -count, owner);
+    if count > 0 {
+        let cost = game.cards[card].cost + game.cards[card].ongoing_cost;
+        game.set_ongoing_cost(card, (cost - count).max(0), owner);
+    }
 }
 
 // NebulaBehavior::EnableAbility (0x7f0abd0) installs a pre-end trigger.
@@ -223,6 +226,8 @@ mod tests {
         let mut game = game(&mut rng);
         let bird = game.create_card("Mockingbird", 0);
         game.players[0].hand.push(bird);
+        mockingbird(&mut game, bird);
+        assert!(game.cards[bird].stat_updates.is_empty());
         let created = place(&mut game, "Wasp", 0, 0);
         game.cards[created].created = true;
         let hidden = place(&mut game, "Hulk", 0, 1);
@@ -232,6 +237,11 @@ mod tests {
         game.cards[enemy].created = true;
         game.ongoing();
         assert_eq!(game.card_cost(bird), 5);
+        assert!(game.cards[bird].stat_updates.iter().any(|update| {
+            update.stat == crate::game::Stat::Cost
+                && update.operation == crate::game::StatOperation::Set
+                && update.value == 5
+        }));
     }
 
     #[test]

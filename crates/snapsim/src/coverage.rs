@@ -336,6 +336,132 @@ fn resolved_source_possible(position: &Position, id: &str) -> bool {
                     .any(|action| action.card_id == id && action.kind == "play" && action.resolved)
             })
 }
+// Restored observations do not contain MovableByPlayerComponent.CreatedTimestamp
+// (FindMovableByPlayerSource 0x7c9d9ec). Include possible unexported grants,
+// rather than sampling a hidden game and treating it as authoritative.
+fn move_source_tie_possible(position: &Position) -> bool {
+    use crate::game::move_source_effects_conflict;
+    use crate::move_priority::{card_priority, location_priority};
+
+    for (source_lane, source) in position.locations.iter().enumerate() {
+        for seat in 0..2 {
+            let targets = if seat == 0 {
+                &source.mine
+            } else {
+                &source.theirs
+            };
+            for card in targets.iter().filter(|card| card.revealed) {
+                let Some(def) = cards::get(&card.id) else {
+                    continue;
+                };
+                for (destination, lane) in position.locations.iter().enumerate() {
+                    let occupants = if seat == 0 {
+                        lane.mine.len()
+                    } else {
+                        lane.theirs.len() + lane.theirs_face_down
+                    };
+                    if source_lane == destination
+                        || lane.destroyed
+                        || occupants >= 4
+                        || card
+                            .move_targets
+                            .as_ref()
+                            .is_some_and(|targets| !targets.contains(&destination))
+                    {
+                        continue;
+                    }
+                    let mut first = [None; 4];
+                    let mut conflict = false;
+                    let mut consider = |priority: i32, effect| {
+                        let index = match priority {
+                            1 => 0,
+                            2 => 1,
+                            3 => 2,
+                            _ => 3,
+                        };
+                        if let Some(previous) = first[index] {
+                            conflict |= move_source_effects_conflict(previous, effect);
+                        } else {
+                            first[index] = Some(effect);
+                        }
+                    };
+                    if def.move_each_turn
+                        || (def.move_limit > 0
+                            && card
+                                .player_moves_used
+                                .is_none_or(|used| used < def.move_limit))
+                    {
+                        consider(card_priority(&card.id), (1, u8::MAX, def.move_limit, None));
+                    }
+                    if card.augments.as_ref().is_some_and(|augments| {
+                        augments
+                            .items
+                            .iter()
+                            .any(|augment| augment.id == "MoveableAugment")
+                    }) {
+                        consider(card_priority("MoveableAugment"), (2, u8::MAX, 1, Some(0)));
+                    }
+                    for id in ["ThePhoenixForce", "SPdr", "Skill01GhostRiderChampion"] {
+                        if resolved_source_possible(position, id) {
+                            consider(card_priority(id), (0, u8::MAX, 0, None));
+                        }
+                    }
+                    if position.turn > 1 {
+                        for id in ["Cloak", "Hellion"] {
+                            if resolved_source_possible(position, id) {
+                                consider(card_priority(id), (0, position.turn, 0, None));
+                            }
+                        }
+                        if card.id == "Miek" && resolved_source_possible(position, "Miek") {
+                            consider(card_priority("Miek"), (3, position.turn, 1, Some(0)));
+                        }
+                        if card.id == "ThanosFracturedFrontier"
+                            && resolved_source_possible(position, "SpaceShot")
+                        {
+                            consider(card_priority("SpaceShot"), (3, position.turn, 1, Some(1)));
+                        }
+                        if resolved_source_possible(position, "WebSling") {
+                            consider(card_priority("WebSling"), (3, position.turn, 1, Some(2)));
+                        }
+                    }
+                    for provider in source
+                        .mine
+                        .iter()
+                        .chain(&source.theirs)
+                        .filter(|provider| provider.revealed)
+                    {
+                        if cards::get(&provider.id)
+                            .is_some_and(|def| def.grants_move_from.is_some())
+                        {
+                            consider(card_priority(&provider.id), (0, u8::MAX, 0, None));
+                        }
+                    }
+                    if card.id == "CapsShield" {
+                        for provider in position
+                            .locations
+                            .iter()
+                            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+                            .filter(|provider| provider.revealed)
+                        {
+                            if cards::get(&provider.id)
+                                .is_some_and(|def| def.grants_move_globally.is_some())
+                            {
+                                consider(card_priority(&provider.id), (0, u8::MAX, 0, None));
+                            }
+                        }
+                    }
+                    if position.turn == 6 && lane.id.as_deref() == Some("NewYork") {
+                        consider(location_priority("NewYork"), (0, u8::MAX, 0, None));
+                    }
+                    if conflict {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 
 pub fn coverage(position: &Position) -> Value {
     let mut card_ids: BTreeSet<&str> = position
@@ -383,6 +509,12 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    if !cards::reference_rules_enabled() && move_source_tie_possible(position) {
+        extra_state.insert(
+            "move_source_tie_unknown: MovableByPlayerComponent.CreatedTimestamp not exported"
+                .to_owned(),
+        );
+    }
     // CyclopsXMen GetPowerChange 0x7e868b4 reads the player lifetime peak.
     if !cards::reference_rules_enabled() && card_ids.contains("CyclopsXMen") {
         extra_state.insert(
@@ -2524,6 +2656,31 @@ pub fn coverage(position: &Position) -> Value {
 #[cfg(test)]
 mod location_change_tests {
     use super::*;
+
+    #[test]
+    fn movement_source_ties_require_component_timestamps() {
+        let mut position = Position {
+            turn: 6,
+            ..Position::default()
+        };
+        position.locations[0].mine.push(crate::position::CardRef {
+            id: "Vision".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        let reason = "move_source_tie_unknown";
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.locations[1].id = Some("NewYork".into());
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.turn = 5;
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.locations[1].mine.push(crate::position::CardRef {
+            id: "Cloak".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
 
     #[test]
     fn scream_requires_current_turn_trigger_state() {

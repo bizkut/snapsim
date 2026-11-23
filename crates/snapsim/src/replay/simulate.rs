@@ -324,6 +324,8 @@ pub(super) fn simulate(
         current_ongoing_source: None,
         merge_batches: Vec::new(),
         staging_order: None,
+        move_provenance_known: false,
+        last_move_source: None,
         rng: RefCell::new(crate::game::GameRandom::Borrowed(&mut game_rng)),
     };
     // CaveOfTheDragonBehavior::AddCard (0x7d45454) makes one random

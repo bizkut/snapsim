@@ -210,6 +210,17 @@ fn strange_academy(game: &mut Game<'_>, lane: usize) {
         return;
     }
     for card in game.lanes[lane].cards.clone() {
+        // StrangeAcademyBehavior::MoveAllCards (0x7d84854) enumerates
+        // revealed cards only; hidden cards must not consume a random roll.
+        if !crate::cards::reference_rules_enabled() && !game.cards[card].revealed {
+            continue;
+        }
+        if !crate::cards::reference_rules_enabled() {
+            if let Some(target) = game.random_location_to_move_card(card, lane, true) {
+                game.move_card(card, target);
+            }
+            continue;
+        }
         let seat = game.cards[card].owner;
         let targets: Vec<_> = (0..3)
             .filter(|&target| {
@@ -301,6 +312,85 @@ mod tests {
     use crate::game::Game;
     use crate::position::UNKNOWN_LOCATION;
     use crate::random::PythonRandom;
+
+    #[test]
+    fn strange_academy_skips_hidden_cards_without_a_random_roll() {
+        let deck: Vec<String> = [
+            "Hulk",
+            "Medusa",
+            "Sentinel",
+            "IronMan",
+            "Hawkeye",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let locations = ["StrangeAcademy", "Ruins", "Xandar"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(4);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        let card = game.create_card("Hawkeye", 0);
+        game.add_card(card, 0, 0, false);
+        game.cards[card].revealed = false;
+        game.turn = 5;
+        let mut expected = game.rng.borrow().clone_rng();
+        super::strange_academy(&mut game, 0);
+        assert_eq!(game.cards[card].lane, Some(0));
+        assert_eq!(
+            game.rng.borrow_mut().getrandbits(32),
+            expected.getrandbits(32)
+        );
+    }
+
+    #[test]
+    fn random_move_destination_filters_legality_and_falls_back() {
+        let deck: Vec<String> = [
+            "Hulk",
+            "Medusa",
+            "Sentinel",
+            "IronMan",
+            "Hawkeye",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let locations = ["Ruins", "SpaceThrone", "Xandar"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(4);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        game.lanes[1].revealed = true;
+        let occupant = game.create_card("Hawkeye", 0);
+        game.add_card(occupant, 1, 0, false);
+        let card = game.create_card("Hawkeye", 0);
+        game.add_card(card, 0, 0, false);
+        assert_eq!(game.random_location_to_move_card(card, 0, true), Some(2));
+
+        let colossus = game.create_card("Colossus", 0);
+        game.add_card(colossus, 0, 0, false);
+        let mut expected = game.rng.borrow().clone_rng();
+        assert_eq!(game.random_location_to_move_card(colossus, 0, false), None);
+        let choice = expected.randbelow(2);
+        assert_eq!(
+            game.random_location_to_move_card(colossus, 0, true),
+            Some([1, 2][choice])
+        );
+        assert_eq!(
+            game.rng.borrow_mut().getrandbits(32),
+            expected.getrandbits(32)
+        );
+    }
 
     #[test]
     fn zenn_la_reveals_first_printed_three_cost_card() {

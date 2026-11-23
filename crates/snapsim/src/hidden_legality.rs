@@ -45,6 +45,9 @@ pub struct Inputs<'a> {
     pub player_cost_effects: Known<'a, Sourced<PlayerCostEffectKind>>,
     /// Includes play locks, location silence, move grants and other pending/global effects.
     pub state_effects: Known<'a, Sourced<StateEffectKind>>,
+    /// Complete movable component source identities and creation order.
+    /// The client breaks priority ties with MovableByPlayerComponent.CreatedTimestamp.
+    pub move_source_provenance: Known<'a, ()>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -760,6 +763,9 @@ pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
             }
         }
     }
+    if matches!(inputs.move_source_provenance, Known::Unknown) {
+        reasons.push("move source provenance is unknown".into());
+    }
     if reasons.is_empty() {
         Result::Valid
     } else {
@@ -994,6 +1000,7 @@ mod tests {
             card_cost_effects: Known::Known(&[]),
             player_cost_effects: Known::Known(&[]),
             state_effects: Known::Known(&[]),
+            move_source_provenance: Known::Known(&[]),
         };
         assert!(matches!(check_hidden_pool(&inputs), Result::Invalid { .. }));
         let unknown = Inputs {
@@ -1017,8 +1024,12 @@ mod tests {
             card_cost_effects: Known::Known(&[]),
             player_cost_effects: Known::Known(&[]),
             state_effects: Known::Known(&[]),
+            move_source_provenance: Known::Known(&[]),
         };
         assert_eq!(check_hidden_pool(&inputs), Result::Valid);
+        inputs.move_source_provenance = Known::Unknown;
+        assert!(matches!(check_hidden_pool(&inputs), Result::Invalid { .. }));
+        inputs.move_source_provenance = Known::Known(&[]);
         inputs.visible_cards = Known::Unknown;
         assert!(matches!(check_hidden_pool(&inputs), Result::Invalid { .. }));
         inputs.visible_cards = Known::Known(&["Wasp"]);

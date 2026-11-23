@@ -68,6 +68,7 @@ fn space(game: &mut Game<'_>, card: usize) {
         game.grant_move(MoveGrant {
             seat: owner,
             source: card,
+            owner_def_id: None,
             card: Some(target),
             lane: None,
             destination: None,
