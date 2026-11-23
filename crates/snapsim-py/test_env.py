@@ -95,6 +95,31 @@ class VectorEnvTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             env.reset([0, 0], [5, 6])
 
+    def test_black_vortex_replaced_during_transform_does_not_panic(self):
+        # Fuzz repro (batch 2264 game 7): Black Vortex transforms a played card into
+        # Leader, whose copied reveal replaces Black Vortex with Kyln before the
+        # consumed flag is marked. This panicked in locations_h::black_vortex.
+        pair = [["AdamantiumInfusion", "Boomerang", "Daken", "DeathFracturedFrontier", "Deathlok",
+                 "Dracula", "HawkeyeAvengers", "HighEvolutionary", "JaneFoster", "MadThinker",
+                 "MerlinOfAvalon", "Morph"],
+                ["Arishem", "Copycat", "Firelord", "HumanTorch", "JaneFoster", "Makkari", "Maximus",
+                 "Mercury", "Quake", "Rhino", "SuperSkrull", "Wave"]]
+        seed = 2264 * 1000 + 7
+        env = sim.VecEnv([pair], [seed], threads=1)
+        due, obs, mask, rewards, terminal, rejected = buffers(1)
+        phase = np.zeros((1, 3), np.int32)
+        rng = random.Random(seed)
+        for _ in range(2000):
+            env.observe(phase, due, obs, mask)
+            actions = np.full((1, 2), sim.ENV_NOOP, np.int64)
+            for seat in range(2):
+                if due[0, seat]:
+                    actions[0, seat] = int(rng.choice(np.flatnonzero(mask[0, seat, :70])))
+            env.step(actions, rewards, terminal, rejected)
+            if terminal[0]:
+                break
+        self.assertTrue(terminal[0])
+
     def test_all_decks_and_thread_determinism(self):
         ds = decks()
         seeds = list(range(100, 100 + len(ds)))

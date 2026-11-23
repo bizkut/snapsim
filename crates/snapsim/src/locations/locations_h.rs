@@ -408,25 +408,32 @@ fn black_vortex(game: &mut Game<'_>, lane: usize, event: Event) {
     }) else {
         return;
     };
-    let spent = *game.lanes[lane]
+    // A hook dispatched in the same pass can run after this location was
+    // replaced; act only while its initialised consumed-flag state is present.
+    let Some(spent) = game.lanes[lane]
         .state
         .as_deref()
-        .unwrap()
-        .as_any()
-        .downcast_ref::<[bool; 2]>()
-        .unwrap();
+        .and_then(|state| state.as_any().downcast_ref::<[bool; 2]>())
+    else {
+        return;
+    };
     if spent[seat] {
         return;
     }
+    // The consumed flags belong to this location instance. The transformed card's
+    // reveal can move it (Quake swaps whole lanes) or replace it (e.g. with Kyln),
+    // so mark the same state object wherever it is now, or nothing if it is gone.
+    let instance = std::ptr::from_ref(spent).cast::<()>();
     if let Some(id) = game.random_card(|row| row.cost == 6 && row.card_type == "Character") {
         game.transform_card_without_modifiers(card, id);
-        game.lanes[lane]
-            .state
-            .as_deref_mut()
-            .unwrap()
-            .as_any_mut()
-            .downcast_mut::<[bool; 2]>()
-            .unwrap()[seat] = true;
+        if let Some(spent) = game.lanes.iter_mut().find_map(|lane| {
+            lane.state
+                .as_deref_mut()
+                .and_then(|state| state.as_any_mut().downcast_mut::<[bool; 2]>())
+                .filter(|flags| std::ptr::from_ref::<[bool; 2]>(flags).cast::<()>() == instance)
+        }) {
+            spent[seat] = true;
+        }
     }
 }
 
@@ -1173,7 +1180,7 @@ mod tests {
     fn vortex_transforms_only_first_play_per_player() {
         let mut rng = PythonRandom::seed(23);
         let deck = deck();
-        let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let locations = ["BlackVortex", "Xandar", "Wakanda"].map(str::to_owned);
         let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
         game.lanes[0].state = Some(Box::new([false; 2]));
         let first = game.create_card("Hawkeye", 0);
