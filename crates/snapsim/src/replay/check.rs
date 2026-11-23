@@ -158,6 +158,14 @@ pub fn check_observations(
                     }
                 }
                 used_samples.retain(|f| f.line >= start.line);
+                if used_samples.iter().any(|frame| !frame.lane_layout_complete)
+                    || !target.lane_layout_complete
+                {
+                    return Err(
+                        "destroyed-lane layout cannot be established from location entity IDs"
+                            .into(),
+                    );
+                }
                 let mut missing_cards = BTreeSet::new();
                 let mut missing_locations = BTreeSet::new();
                 for f in used_samples.iter().copied().chain(std::iter::once(target)) {
@@ -535,6 +543,37 @@ pub fn check_observations(
                     return Err(error);
                 }
                 let (seed, differences) = best.expect("positive seeds");
+                // With schema-v1 observations an opponent's first revealed
+                // power may include hidden hand buffs or effects already
+                // resolved in the same sample. If trials disagree, a changed
+                // value without a ledger cannot establish pre-play power.
+                if !cards::reference_rules_enabled() {
+                    let catalog = crate::data::cards();
+                    for play in staged.plays.iter().filter(|play| play.card.owner == 1) {
+                        let Some(visible) = frames.iter().find_map(|frame| {
+                            entity(frame, &play.card.entity).filter(|card| card.revealed)
+                        }) else {
+                            continue;
+                        };
+                        if visible.stat_updates.as_array().is_some() {
+                            continue;
+                        }
+                        let Some(id) = play.id.as_str() else { continue };
+                        let Some(row) = catalog.iter().find(|row| row.carddefid == id) else {
+                            continue;
+                        };
+                        if visible
+                            .power
+                            .as_i64()
+                            .is_some_and(|power| power != i64::from(row.power))
+                        {
+                            return Err(format!(
+                                "opponent pre-play Power for {id} [{}] cannot be established without a stat ledger",
+                                label(&play.card.entity)
+                            ));
+                        }
+                    }
+                }
                 let mut cards: BTreeSet<String> = differences
                     .iter()
                     .flat_map(|d| d.cards.iter().cloned())

@@ -9,7 +9,7 @@ pub const STAR_BRAND_CRATER: LocationDef = LocationDef {
 };
 
 pub const CROWN_CITY: LocationDef = LocationDef {
-    ongoing: Some(crown_city),
+    conditional_ongoing: Some(crown_city),
     ..location("CrownCity", 0, 0, 1, false)
 };
 
@@ -78,16 +78,20 @@ fn star_brand_crater(game: &mut Game<'_>, lane: usize) {
 
 // CrownCityBehavior::BuffAdjacentLocations @ 0x7d4c204: ties give neither
 // player a bonus; the winning player receives power at each adjacent lane.
-fn crown_city(game: &mut Game<'_>, lane: usize) {
+// ActionReturns2: no extant adjacent location means no action was performed.
+fn crown_city(game: &mut Game<'_>, lane: usize) -> bool {
+    let adjacent = (lane > 0 && !game.lanes[lane - 1].destroyed)
+        || (lane + 1 < game.lanes.len() && !game.lanes[lane + 1].destroyed);
     let Some(winner) = game.lane_winner(lane) else {
-        return;
+        return adjacent;
     };
     if lane > 0 {
-        game.lanes[lane - 1].bonus[winner] += 4;
+        game.add_lane_bonus(lane - 1, winner, 4);
     }
     if lane + 1 < game.lanes.len() {
-        game.lanes[lane + 1].bonus[winner] += 4;
+        game.add_lane_bonus(lane + 1, winner, 4);
     }
+    adjacent
 }
 
 #[cfg(test)]

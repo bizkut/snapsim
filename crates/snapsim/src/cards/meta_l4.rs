@@ -204,6 +204,7 @@ pub(crate) static CARDS: &[CardDef] = &[
         objective_update: Some(stryfe_update),
         objective_freeze: Some(stryfe_freeze),
         initial_state: Some(stryfe_state),
+        clear_reveal_state: Some(stryfe_reset_copy),
         ..CardDef::vanilla("Stryfe")
     },
 ];
@@ -279,7 +280,7 @@ fn rockslide(game: &mut Game<'_>, card: usize) {
     let opponent = 1 - game.cards[card].owner;
     for _ in 0..2 {
         let rock = game.create_card("Rock", opponent);
-        game.players[opponent].deck.push(rock);
+        game.push_deck(opponent, rock);
     }
     game.shuffle_deck(opponent);
 }
@@ -339,7 +340,7 @@ fn terrax(game: &mut Game<'_>, card: usize) {
         }
         for _ in 0..losses[seat] {
             let rock = game.create_card("Rock", seat);
-            game.players[seat].deck.push(rock);
+            game.push_deck(seat, rock);
         }
         game.shuffle_deck(seat);
     }
@@ -490,11 +491,11 @@ fn loki(game: &mut Game<'_>, card: usize) {
         let other = index + game.rng.borrow_mut().randbelow(cards.len() - index);
         cards.swap(index, other);
     }
-    game.players[owner].deck.clear();
+    game.set_aside_deck(owner);
     for id in cards {
         let created = game.create_card(id, owner);
         game.add_cost(created, -1, owner);
-        game.players[owner].deck.push(created);
+        game.push_deck(owner, created);
     }
 }
 
@@ -527,7 +528,7 @@ fn baron_zemo(game: &mut Game<'_>, card: usize) {
             .iter()
             .position(|&id| id == target)
             .unwrap();
-        game.players[enemy].deck.remove(index);
+        game.take_deck(enemy, index);
         game.add_card(target, lane, owner, true);
     }
 }
@@ -575,7 +576,7 @@ fn spider_noir(game: &mut Game<'_>, card: usize) {
         .map(|id| game.cards[id].cost + game.cards[id].ongoing_cost)
         .sum();
     if total == 8 && game.can_add(target, lane, owner) {
-        game.players[owner].deck.remove(index);
+        game.take_deck(owner, index);
         game.add_card(target, lane, owner, true);
     }
 }
@@ -639,7 +640,7 @@ fn eson(game: &mut Game<'_>, card: usize) {
             .iter()
             .position(|&id| id == target)
             .unwrap();
-        game.players[owner].hand.remove(index);
+        game.take_hand(owner, index);
         game.add_card(target, lane, owner, true);
     }
 }
@@ -678,8 +679,7 @@ fn merlin(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let mut index = game.rng.borrow_mut().randbelow(3);
     let previous = game.cards[card]
-        .state
-        .as_deref()
+        .ability_state()
         .and_then(|s| s.as_any().downcast_ref::<Option<usize>>())
         .copied()
         .flatten();
@@ -691,8 +691,7 @@ fn merlin(game: &mut Game<'_>, card: usize) {
         let spell = game.create_card(id, owner);
         game.add_hand(owner, spell, false);
         if let Some(state) = game.cards[card]
-            .state
-            .as_deref_mut()
+            .ability_state_mut()
             .and_then(|s| s.as_any_mut().downcast_mut::<Option<usize>>())
         {
             *state = Some(index);
@@ -905,7 +904,7 @@ fn agamotto_start(game: &mut Game<'_>, card: usize, event: crate::game::Event) {
         "Spell03Agamotto",
     ] {
         let spell = game.create_card(id, owner);
-        game.players[owner].deck.push(spell);
+        game.push_deck(owner, spell);
     }
     game.shuffle_deck(owner);
 }
@@ -919,7 +918,7 @@ fn temporal_spell(game: &mut Game<'_>, card: usize) {
         game.add_power(target, 3, owner);
         if let Some(slot) = game.players[owner].deck.iter().position(|&id| id == target) {
             if game.players[owner].hand.len() < 7 {
-                game.players[owner].deck.remove(slot);
+                game.take_deck(owner, slot);
                 game.add_hand(owner, target, true);
             }
         } else if game.players[owner]
@@ -1008,14 +1007,13 @@ fn add_ritual(game: &mut Game<'_>, source: usize, id: &str) {
     let owner = game.cards[source].owner;
     if game.players[owner].hand.len() < 7 {
         let token = game.create_card(id, owner);
-        game.cards[token].state = Some(Box::new(source));
+        game.cards[token].set_ability_state(Some(Box::new(source)));
         game.add_hand(owner, token, false);
     }
 }
 fn ritual_source(game: &Game<'_>, card: usize) -> Option<usize> {
     game.cards[card]
-        .state
-        .as_deref()?
+        .ability_state()?
         .as_any()
         .downcast_ref::<usize>()
         .copied()
@@ -1114,8 +1112,7 @@ fn galactus_event(game: &mut Game<'_>, card: usize, event: crate::game::Event) {
         return;
     }
     let current = game.cards[card]
-        .state
-        .as_deref()
+        .ability_state()
         .and_then(|s| s.as_any().downcast_ref::<Option<usize>>())
         .copied()
         .flatten();
@@ -1124,8 +1121,7 @@ fn galactus_event(game: &mut Game<'_>, card: usize, event: crate::game::Event) {
             if current.is_none() && seat == owner && game.is_character(target) =>
         {
             if let Some(state) = game.cards[card]
-                .state
-                .as_deref_mut()
+                .ability_state_mut()
                 .and_then(|s| s.as_any_mut().downcast_mut::<Option<usize>>())
             {
                 *state = Some(target);
@@ -1136,8 +1132,19 @@ fn galactus_event(game: &mut Game<'_>, card: usize, event: crate::game::Event) {
             absorbed,
         } if current == Some(absorbed) => {
             if let Some(state) = game.cards[card]
-                .state
-                .as_deref_mut()
+                .ability_state_mut()
+                .and_then(|s| s.as_any_mut().downcast_mut::<Option<usize>>())
+            {
+                *state = Some(target);
+            }
+        }
+        // UpdateHerald 0x7eaf0f4 follows membership in the whole merged list.
+        crate::game::Event::CardMergedBatch {
+            card: target,
+            batch,
+        } if current.is_some_and(|id| game.merge_batches[batch].contains(&id)) => {
+            if let Some(state) = game.cards[card]
+                .ability_state_mut()
                 .and_then(|s| s.as_any_mut().downcast_mut::<Option<usize>>())
             {
                 *state = Some(target);
@@ -1165,6 +1172,11 @@ struct StryfeState {
 fn stryfe_state() -> Box<dyn crate::game::CardState> {
     Box::new(StryfeState::default())
 }
+// Frigga's CreateCopyInternal constructs a fresh Entity and copies card
+// effects, not its ObjectiveComponent (Card copy constructor 0x7caecc8).
+fn stryfe_reset_copy(card: &mut crate::game::Card) {
+    card.set_ability_state(Some(stryfe_state()));
+}
 // StryfeBehavior::CalculateObjectiveProgress 0x7cca080, GetValidCount 0x7cca19c.
 fn stryfe_update(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
@@ -1176,7 +1188,10 @@ fn stryfe_update(game: &mut Game<'_>, card: usize) {
             .filter(|play| {
                 play.turn == game.turn
                     && !play.resolved
-                    && game.cards[play.card].ability_def().reveal.is_some()
+                    && game.cards[play.card].abilities().any(|a| {
+                        a.supports(crate::engine_ext::abilities::AbilityKind::Reveal)
+                            && a.def.reveal.is_some()
+                    })
             })
             .count();
     }
@@ -1221,7 +1236,12 @@ fn stryfe_complete(game: &mut Game<'_>, card: usize, event: crate::game::Event) 
         .hand
         .iter()
         .copied()
-        .filter(|&id| game.cards[id].ability_def().reveal.is_some())
+        .filter(|&id| {
+            game.cards[id].abilities().any(|a| {
+                a.supports(crate::engine_ext::abilities::AbilityKind::Reveal)
+                    && a.def.reveal.is_some()
+            })
+        })
         .map(|id| game.printed_cost(id))
         .max()
     else {
@@ -1232,7 +1252,10 @@ fn stryfe_complete(game: &mut Game<'_>, card: usize, event: crate::game::Event) 
         .iter()
         .copied()
         .filter(|&id| {
-            game.cards[id].ability_def().reveal.is_some() && game.printed_cost(id) == maximum
+            game.cards[id].abilities().any(|a| {
+                a.supports(crate::engine_ext::abilities::AbilityKind::Reveal)
+                    && a.def.reveal.is_some()
+            }) && game.printed_cost(id) == maximum
         })
         .collect();
     let index = game.rng.borrow_mut().randbelow(choices.len());
@@ -1269,6 +1292,26 @@ mod tests {
         g.cards[id].revealed = true;
         g.lanes[lane].cards.push(id);
         id
+    }
+    #[test]
+    fn galactus_follows_herald_in_batch_merge() {
+        let mut rng = PythonRandom::seed(5);
+        let mut g = fixture(&mut rng);
+        let galactus = g.create_card("GalactusFirstSteps", 0);
+        g.players[0].hand.push(galactus);
+        let receiver = place(&mut g, "Wasp", 0, 0);
+        let first = place(&mut g, "MistyKnight", 0, 1);
+        let herald = place(&mut g, "Shocker", 0, 1);
+        g.cards[galactus].state = Some(Box::new(Some(herald)));
+        assert!(g.merge_cards(receiver, &[first, herald]));
+        let current = g.cards[galactus]
+            .state
+            .as_deref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Option<usize>>()
+            .unwrap();
+        assert_eq!(*current, Some(receiver));
     }
     #[test]
     fn galactus_selects_staging_owner_and_rechecks_ownership() {
@@ -1384,34 +1427,36 @@ mod tests {
         );
     }
     #[test]
-    fn stryfe_borrowing_frigga_copies_its_objective_context() {
-        let mut rng = PythonRandom::seed(10);
-        let mut g = fixture(&mut rng);
-        g.players[0].hand.clear();
-        let stryfe = place(&mut g, "Stryfe", 0, 0);
-        let state = g.cards[stryfe]
-            .state
-            .as_deref_mut()
-            .unwrap()
-            .as_any_mut()
-            .downcast_mut::<StryfeState>()
-            .unwrap();
-        state.ready = true;
-        state.completed = true;
-        g.players[0].play_history.push((g.turn, stryfe));
-        let frigga = g.create_card("Frigga", 0);
-        assert!(g.trigger_borrowed_reveal(stryfe, frigga));
-        let copy = g.players[0].hand[0];
-        let state = g.cards[copy]
-            .state
-            .as_deref()
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StryfeState>()
-            .unwrap();
-        assert!(state.ready && state.completed);
-        g.add_card(copy, 1, 0, true);
-        stryfe_complete(&mut g, copy, crate::game::Event::AfterTurnEnd);
+    fn stryfe_borrowing_frigga_resets_its_objective_context() {
+        for (progress, ready, completed) in [(2, false, false), (3, true, true)] {
+            let mut rng = PythonRandom::seed(10);
+            let mut g = fixture(&mut rng);
+            g.players[0].hand.clear();
+            let stryfe = place(&mut g, "Stryfe", 0, 0);
+            let state = g.cards[stryfe]
+                .ability_state_mut()
+                .unwrap()
+                .as_any_mut()
+                .downcast_mut::<StryfeState>()
+                .unwrap();
+            state.progress = progress;
+            state.ready = ready;
+            state.completed = completed;
+            g.players[0].play_history.push((g.turn, stryfe));
+            let frigga = g.create_card("Frigga", 0);
+            assert!(g.trigger_borrowed_reveal(stryfe, frigga));
+            let copy = g.players[0].hand[0];
+            let state = g.cards[copy]
+                .ability_state()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StryfeState>()
+                .unwrap();
+            assert_eq!(state.progress, 0);
+            assert!(!state.ready && !state.completed);
+            g.add_card(copy, 1, 0, true);
+            stryfe_complete(&mut g, copy, crate::game::Event::AfterTurnEnd);
+        }
     }
     #[test]
     fn stryfe_retains_state_from_borrowed_text_replacement() {
@@ -1422,7 +1467,10 @@ mod tests {
         let torch = g.create_card("HumanTorchFirstSteps", 0);
         g.players[0].deck = vec![torch];
         assert!(g.trigger_borrowed_reveal(stryfe, lad));
-        assert_eq!(g.cards[stryfe].ability_def().id, "HumanTorchFirstSteps");
+        assert_eq!(
+            g.cards[stryfe].abilities().next().unwrap().def.id,
+            "HumanTorchFirstSteps"
+        );
         assert!(
             g.cards[stryfe]
                 .state
@@ -1996,7 +2044,9 @@ mod tests {
         let target = game.top_card(1).unwrap();
         baron_mordo(&mut game, card);
         game.ongoing();
-        assert_eq!(game.cards[target].player_cost_set_until, Some((6, 6)));
+        assert!(game.players[1].cost_effects.iter().any(|effect| matches!(
+            effect.kind, crate::game::PlayerCostEffectKind::BaronMordo { card, until: 6, value: 6 } if card == target
+        )));
     }
     #[test]
     fn kitty_returns_and_gains_power() {
@@ -2263,10 +2313,9 @@ mod tests {
         }
         let swan = game.create_card("BlackSwan", 0);
         black_swan(&mut game, swan);
-        assert_eq!(
-            game.players[0].hand_cost_sets.last(),
-            Some(&(game.turn + 1, 1, 0))
-        );
+        assert!(game.players[0].cost_effects.iter().any(|effect| matches!(
+            effect.kind, crate::game::PlayerCostEffectKind::BlackSwan { until, printed_cost: 1, value: 0 } if until == game.turn + 1
+        )));
     }
     #[test]
     fn agamotto_and_dormammu_start_effects_create_tokens() {

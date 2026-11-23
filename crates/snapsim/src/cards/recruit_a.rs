@@ -14,15 +14,15 @@ pub(crate) fn angel_replace(g: &mut Game<'_>, seat: usize, lane: usize) {
         };
         if let Some(index) = pile.iter().position(|&id| g.cards[id].def.id == "Angel") {
             let card = if from_hand {
-                g.players[seat].hand.remove(index)
+                g.take_hand(seat, index)
             } else {
-                g.players[seat].deck.remove(index)
+                g.take_deck(seat, index)
             };
             if !g.add_card(card, lane, seat, true) {
                 if from_hand {
-                    g.players[seat].hand.insert(index, card);
+                    g.put_hand(seat, index, card);
                 } else {
-                    g.players[seat].deck.insert(index, card);
+                    g.put_deck(seat, index, card);
                 }
             }
             return;
@@ -122,7 +122,7 @@ fn apocalypse(g: &mut Game<'_>, id: usize) {
     g.add_power(id, 4, g.cards[id].owner);
     g.add_hand(g.cards[id].owner, id, false);
 }
-fn panther(g: &mut Game<'_>, id: usize) {
+pub(crate) fn panther(g: &mut Game<'_>, id: usize) {
     g.multiply_power(id, 2, g.cards[id].owner);
 }
 fn forge(g: &mut Game<'_>, id: usize) {
@@ -131,11 +131,11 @@ fn forge(g: &mut Game<'_>, id: usize) {
 fn cable(g: &mut Game<'_>, id: usize) {
     let owner = g.cards[id].owner;
     if g.players[owner].hand.len() < 7 && !g.players[1 - owner].deck.is_empty() {
-        let card = g.players[1 - owner].deck.remove(0);
+        let card = g.take_deck(1 - owner, 0);
         g.add_hand(owner, card, false);
     }
 }
-fn captain(g: &mut Game<'_>, id: usize) {
+pub(crate) fn captain(g: &mut Game<'_>, id: usize) {
     let lane = g.cards[id].lane.unwrap();
     let owner = g.cards[id].owner;
     for index in 0..g.lanes[lane].cards.len() {
@@ -143,7 +143,7 @@ fn captain(g: &mut Game<'_>, id: usize) {
         if other != id
             && g.cards[other].revealed
             && g.cards[other].owner == owner
-            && g.cards[other].has_ongoing()
+            && g.cards[other].has_ongoing(false)
         {
             g.add_ongoing_power(other, 2, owner);
         }
@@ -222,7 +222,7 @@ fn korg(g: &mut Game<'_>, id: usize) {
         .rng
         .borrow_mut()
         .randbelow(g.players[opponent].deck.len() + 1);
-    g.players[opponent].deck.insert(index, rock);
+    g.put_deck(opponent, index, rock);
 }
 fn lady_sif(g: &mut Game<'_>, id: usize) {
     let owner = g.cards[id].owner;

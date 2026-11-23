@@ -11,12 +11,17 @@ mod locations_e;
 mod locations_f;
 mod locations_g;
 mod locations_h;
+mod locations_na;
+mod locations_nd;
+mod locations_ne;
+mod locations_si;
 mod recruit_a;
 mod turns;
 
 pub(crate) use locations_d2::cave_candidate;
 
 pub type LocationHook = fn(&mut Game<'_>, usize);
+pub type ConditionalLocationHook = fn(&mut Game<'_>, usize) -> bool;
 pub type CardHook = fn(&mut Game<'_>, usize, usize);
 pub type MoveHook = fn(&mut Game<'_>, usize, usize, usize);
 pub type PlayPredicate = fn(&Game<'_>, usize, usize, usize, usize) -> bool;
@@ -42,6 +47,7 @@ pub struct LocationDef {
     pub on_staging_end: Option<LocationHook>,
     pub on_turn_end: Option<LocationHook>,
     pub ongoing: Option<LocationHook>,
+    pub conditional_ongoing: Option<ConditionalLocationHook>,
     pub before_card_reveal: Option<CardHook>,
     pub after_card_play: Option<CardHook>,
     pub on_card_moved: Option<MoveHook>,
@@ -57,6 +63,7 @@ pub struct LocationDef {
     pub grants_move_to: Option<PlayPredicate>,
     pub energy_bonus: Option<EnergyHook>,
     pub modify_cost: Option<CostHook>,
+    pub prevents_retreat: Option<fn(&Game<'_>, bool) -> bool>,
     pub minimum_turns: u8,
     pub maximum_turns: u8,
     pub contributes_to_other_lanes: bool,
@@ -87,6 +94,7 @@ pub(crate) const fn location(
         on_staging_end: None,
         on_turn_end: None,
         ongoing: None,
+        conditional_ongoing: None,
         before_card_reveal: None,
         after_card_play: None,
         on_card_moved: None,
@@ -102,6 +110,7 @@ pub(crate) const fn location(
         grants_move_to: None,
         energy_bonus: None,
         modify_cost: None,
+        prevents_retreat: None,
         minimum_turns: 0,
         maximum_turns: 0,
         contributes_to_other_lanes: false,
@@ -299,8 +308,62 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_h::ASTRAL_PLANE,
     locations_h::CASTLE_ZEMO,
     locations_h::KVCH,
+    locations_ne::WORLDSHIP,
+    locations_ne::X_MANSION,
+    locations_ne::MOUNT_VESUVIUS,
+    locations_na::BROOKLYN_BRIDGE,
+    locations_nd::HOSPICE,
+    locations_si::SANCTUM_INFINITUM,
+    location("Ego", 0, 0, 1, false),
 ];
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {
     REGISTRY.iter().find(|entry| entry.id == id)
+}
+
+/// Priority of a location-owned ongoing stat ability in the 59.15.1 client.
+/// The fixed-power locations and the first group use the default priority.
+/// Constructor RVAs: Atlantis 0x7d3d4a0, Baxter 0x7d3fb60,
+/// Crown City 0x7d4c498, Monster Metropolis 0x7d67480,
+/// Wakandan Throne Room 0x7d95318, Hospice 0x7d59744, Nexus 0x7d8b588.
+/// Cost constructor RVAs: Dream Dimension 0x7d4fd68, Elysium 0x7d50f18,
+/// Fractured Frontier 0x7d54638, Sandbar 0x7d8c8b8, Titan 0x7d8e4d0,
+/// Utopia 0x7d90820; all use the default priority.
+/// Returns priority, active-while-staging, active-when-staged-for-play,
+/// and active-when-staged-for-move. The client constructors leave all three
+/// staging flags false for these location-owned effects.
+pub fn ongoing_stat_schedule(id: &str) -> Option<(u8, bool, bool, bool)> {
+    let priority = match id {
+        "Xandar" | "NegativeZone" | "Necrosha" | "Nidavellir" | "SewerSystem" | "WashingtonDC"
+        | "Mojoworld" | "Atlantis" | "LakeHellas" | "Panoptichron" | "SmithsonianMuseum"
+        | "DreamDimension" | "Elysium" | "FracturedFrontier" | "TheSandbar" | "Titan"
+        | "Utopia" => 0,
+        "MonsterMetropolis" | "WakandanThroneRoom" => 2,
+        "BaxterBuilding" | "CrownCity" | "Hospice" | "TheNexus" => 3,
+        _ => return None,
+    };
+    Some((priority, false, false, false))
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::{REGISTRY, ongoing_stat_schedule};
+
+    #[test]
+    fn every_ongoing_stat_location_has_a_client_priority() {
+        for location in REGISTRY {
+            if location.power != 0
+                || location.ongoing.is_some()
+                || location.conditional_ongoing.is_some()
+                || location.modify_cost.is_some()
+                || location.contributes_to_other_lanes
+            {
+                assert!(
+                    ongoing_stat_schedule(location.id).is_some(),
+                    "missing priority for {}",
+                    location.id
+                );
+            }
+        }
+    }
 }

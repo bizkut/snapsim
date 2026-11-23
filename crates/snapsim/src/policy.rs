@@ -68,7 +68,9 @@ impl Policy {
                         *value = (*value + location.bonus[s]) * location.multiplier[s];
                     }
                     multiplier[lane] = location.multiplier[seat];
-                    lane_power[lane] = location.def.power;
+                    if game.location_abilities_active(lane) {
+                        lane_power[lane] = location.def.power;
+                    }
                 }
                 margins[lane] = power[seat] - power[1 - seat];
                 width[lane] = if occupied[1 - seat] == 4 {
@@ -141,12 +143,10 @@ impl Policy {
     }
 
     /// Plan player actions on an isolated staging state, then choose normal plays.
-    pub fn plan_actions<R: GameRng + ?Sized>(
-        self,
-        game: &Game<'_>,
-        seat: usize,
-        rng: &mut R,
-    ) -> Vec<Action> {
+    pub fn plan_actions(self, game: &Game<'_>, seat: usize, rng: &mut dyn GameRng) -> Vec<Action> {
+        if let Some(controller) = game.autoplay_controller(seat) {
+            return game.autoplay_plan_with_rng(seat, controller, rng);
+        }
         let mut fork_rng = rng.clone_rng();
         let mut staging = game.fork(fork_rng.as_mut());
         let mut actions = Vec::new();

@@ -163,7 +163,7 @@ fn zenn_la(game: &mut Game<'_>, lane: usize) {
         if let Some(slot) = slot {
             let id = game.players[seat].deck[slot];
             if game.can_add(id, lane, seat) {
-                game.players[seat].deck.remove(slot);
+                game.take_deck(seat, slot);
                 game.add_card(id, lane, seat, true);
             }
         }
@@ -175,7 +175,7 @@ fn put_from_hand(game: &mut Game<'_>, lane: usize, seat: usize, reveal: bool) {
         let slot = game.rng.borrow_mut().randbelow(len);
         let card = game.players[seat].hand[slot];
         if game.can_add(card, lane, seat) {
-            game.players[seat].hand.remove(slot);
+            game.take_hand(seat, slot);
             game.add_card(card, lane, seat, reveal);
         }
     }

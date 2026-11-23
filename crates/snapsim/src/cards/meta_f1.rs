@@ -126,11 +126,16 @@ fn drax(game: &mut Game<'_>, card: usize) {
 }
 
 // CaptainCarterBehavior::BuffCards (0x7e7d22c).
-fn captain_carter(game: &mut Game<'_>, card: usize) {
+fn captain_carter(game: &mut Game<'_>, card: usize) -> bool {
     let Some(lane) = game.cards[card].lane else {
-        return;
+        return false;
     };
     let owner = game.cards[card].owner;
+    if !game.lanes[lane].cards.iter().copied().any(|target| {
+        game.cards[target].owner == owner && game.cards[target].revealed && game.is_back_row(target)
+    }) {
+        return false;
+    }
     let power = game.cards[card].power();
     for index in 0..game.lanes[lane].cards.len() {
         let target = game.lanes[lane].cards[index];
@@ -142,6 +147,7 @@ fn captain_carter(game: &mut Game<'_>, card: usize) {
             game.add_ongoing_power(target, power, owner);
         }
     }
+    true
 }
 
 // IscaBehavior::DoublePower (0x7ed08d4).
@@ -186,6 +192,8 @@ mod tests {
         );
         let mut rng = PythonRandom::seed(2);
         let mut game = build_game(&p, &mut rng).unwrap();
+        // Permanent power changes from resolved effects use the full updater (0x7c94474).
+        game.is_wait_for_staging = false;
         let ids = game.lanes[0].cards.clone();
         game.ongoing();
         assert_eq!(game.cards[ids[0]].power(), 2);

@@ -21,20 +21,20 @@ impl Game<'_> {
         if !in_zone || !self.can_add(card, lane, seat) {
             return false;
         }
-        self.cards[card].state = self.cards[card]
-            .ability_def()
-            .initial_state
-            .map(|init| init());
+        let initial_state = self.cards[card]
+            .abilities()
+            .next()
+            .unwrap()
+            .def
+            .initial_state;
+        self.cards[card].state = initial_state.map(|init| init());
         self.cards[card]
             .attached_abilities
             .retain(|ability| !matches!(ability.kind, AttachedAbilityKind::Watch { .. }));
         self.cards[card].turn_played = 0;
         self.cards[card].ongoing = 0;
         self.cards[card].location_power = 0;
-        for player in &mut self.players {
-            player.discard.retain(|&id| id != card);
-            player.graveyard_order.retain(|&id| id != card);
-        }
+        self.detach_discards(card);
         if amount != 0 {
             self.add_power(card, amount, seat);
         }

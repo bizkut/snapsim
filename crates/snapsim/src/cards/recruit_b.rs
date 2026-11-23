@@ -123,7 +123,7 @@ fn punisher(g: &mut Game, id: usize) {
         .count();
     g.add_ongoing_power(id, count as i32, g.cards[id].owner);
 }
-fn prediction(g: &mut Game, id: usize) {
+pub(crate) fn prediction(g: &mut Game, id: usize) {
     let card = &g.cards[id];
     if g.played_at(1 - card.owner, card.lane.unwrap()) {
         g.add_power(id, 4, g.cards[id].owner);
@@ -135,7 +135,7 @@ fn spectrum(g: &mut Game, id: usize) {
         if g.cards[other].lane.is_some()
             && g.cards[other].revealed
             && g.cards[other].owner == owner
-            && g.cards[other].has_ongoing()
+            && g.cards[other].has_ongoing(false)
         {
             g.add_power(other, 2, owner);
         }
@@ -193,17 +193,19 @@ fn yellowjacket(g: &mut Game, id: usize) {
         }
     }
 }
+// YonduBehavior::BanishLowestCostInDeck (0x7cf8068): order by current
+// cost, uniformly roll among the minimum-cost cards, then BanishCard.
 fn yondu(g: &mut Game, id: usize) {
     let owner = 1 - g.cards[id].owner;
     let deck = &g.players[owner].deck;
-    if let Some(cost) = deck.iter().map(|&card| g.cards[card].cost).min() {
+    if let Some(cost) = deck.iter().map(|&card| g.card_cost(card)).min() {
         let candidates: Vec<_> = deck
             .iter()
-            .enumerate()
-            .filter_map(|(slot, &card)| (g.cards[card].cost == cost).then_some(slot))
+            .filter(|&&card| g.card_cost(card) == cost)
+            .copied()
             .collect();
-        let slot = candidates[g.rng.borrow_mut().randbelow(candidates.len())];
-        g.players[owner].deck.remove(slot);
+        let card = candidates[g.rng.borrow_mut().randbelow(candidates.len())];
+        g.banish_card(card);
     }
 }
 
@@ -285,7 +287,7 @@ fn discard_wolverine(g: &mut Game, id: usize) {
     regenerate(g, id);
     if g.cards[id].lane.is_none() {
         let owner = g.cards[id].owner;
-        g.players[owner].discard.push(id);
+        g.push_discard(owner, id);
     }
 }
 fn zombie_giant_man(g: &mut Game, id: usize) {
@@ -317,6 +319,40 @@ mod tests {
     use crate::position::{Position, build_game};
     use crate::random::PythonRandom;
     use serde_json::json;
+
+    #[test]
+    fn yondu_rolls_once_among_current_lowest_cost_cards() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 2, "energy": 2, "hand": [], "deck": [],
+            "locations": [
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        }))
+        .unwrap();
+        let mut rng = PythonRandom::seed(4);
+        let mut game = build_game(&position, &mut rng).unwrap();
+        let first = game.create_card("Hulk", 1);
+        let second = game.create_card("Wasp", 1);
+        let higher = game.create_card("Cyclops", 1);
+        game.cards[first].ongoing_cost = -6;
+        for card in [first, higher, second] {
+            game.push_deck(1, card);
+        }
+        let source = game.create_card("Yondu", 0);
+        let mut expected_rng = game.rng.borrow().clone_rng();
+        let expected = [first, second][expected_rng.randbelow(2)];
+        yondu(&mut game, source);
+        assert_eq!(game.players[1].banished, vec![expected]);
+        assert_eq!(game.players[1].deck.len(), 2);
+        assert!(game.players[1].deck.contains(&higher));
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(1000),
+            expected_rng.randbelow(1000)
+        );
+    }
 
     #[test]
     fn destroyed_zombie_blade_has_no_end_turn_effect() {

@@ -1,4 +1,5 @@
 //! Game state and turn lifecycle. Board and hand entries are stable arena indices.
+pub use crate::engine_ext::abilities::{AbilityInstance, AbilityKind, AbilityRef};
 use crate::{
     cards::{self, CardDef},
     data,
@@ -50,6 +51,51 @@ pub enum StatOperation {
     Set,
 }
 
+/// Stable identity of an ongoing ability during a pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OngoingSource {
+    Card {
+        card: usize,
+        instance: Option<u64>,
+        hand: bool,
+    },
+    Location {
+        lane: usize,
+    },
+    Player {
+        seat: usize,
+        sequence: u64,
+    },
+    CardCost {
+        card: usize,
+        sequence: u64,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ScheduledOngoingHook {
+    Ordinary(cards::CardHook),
+    Conditional(cards::ConditionalCardHook),
+}
+
+#[derive(Clone, Copy)]
+struct ScheduledOngoing {
+    card: usize,
+    instance: Option<u64>,
+    hook: ScheduledOngoingHook,
+    runs: usize,
+    hand: bool,
+}
+
+#[derive(Clone, Copy)]
+enum PendingConditional {
+    Card(ScheduledOngoing),
+    Location {
+        lane: usize,
+        hook: fn(&mut Game<'_>, usize) -> bool,
+    },
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct CardStatUpdate {
     pub stat: Stat,
@@ -57,6 +103,28 @@ pub struct CardStatUpdate {
     pub value: i32,
     pub source: usize,
     pub ongoing: bool,
+    pub(crate) ongoing_source: Option<OngoingSource>,
+}
+
+/// A client CardPowerModifier, distinct from its power stat-update history.
+#[derive(Clone, Copy, Debug)]
+pub struct CardPowerModifier {
+    pub operation: StatOperation,
+    pub value: i32,
+    pub source: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CardCostEffectKind {
+    NextTurnDelta { turn: u8, delta: i32 },
+    TemporarySet { turn: u8, value: i32 },
+    WhiteQueenWinning { lane: usize, seat: usize },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CardCostEffect {
+    pub sequence: u64,
+    pub kind: CardCostEffectKind,
 }
 
 static NEXT_ATTACHED_ABILITY_ID: AtomicU64 = AtomicU64::new(1);
@@ -88,9 +156,6 @@ pub enum AttachedAbilityKind {
     NicoPrepare {
         used: u8,
     },
-    CannotPlayTurn {
-        turn: u8,
-    },
     RevealAtGameEnd,
 }
 
@@ -112,6 +177,12 @@ impl Card {
     pub fn attach_ability(&mut self, mut ability: AttachedAbility) {
         ability.index = NEXT_ATTACHED_ABILITY_ID.fetch_add(1, Ordering::Relaxed);
         self.attached_abilities.push(ability);
+    }
+
+    pub fn attach_cost_effect(&mut self, kind: CardCostEffectKind) {
+        let sequence = self.next_cost_effect_sequence;
+        self.next_cost_effect_sequence += 1;
+        self.cost_effects.push(CardCostEffect { sequence, kind });
     }
 
     pub fn attach_watch(&mut self, origin: usize, turn: u8, lane: usize, expect: bool, power: i32) {
@@ -157,9 +228,10 @@ pub struct Card {
     pub owner: usize,
     pub cost: i32,
     pub ongoing_cost: i32,
-    pub temporary_hand_cost: Option<(u8, i32)>,
-    pub next_turn_cost_delta: Option<(u8, i32)>,
-    pub player_cost_set_until: Option<(u8, i32)>,
+    /// Card dynamic text AssignedCost, set by Askanison IncrementCost 0x7e6be3c.
+    pub dynamic_assigned_cost: Option<i32>,
+    pub cost_effects: Vec<CardCostEffect>,
+    pub next_cost_effect_sequence: u64,
     /// Lasting cost before location modifiers.
     pub created: bool,
     /// Whether creation occurred in hand; None means the origin is unobserved.
@@ -176,22 +248,30 @@ pub struct Card {
     pub permanent: i32,
     pub base_power_override: Option<i32>,
     pub stat_updates: Vec<CardStatUpdate>,
+    pub power_modifiers: Vec<CardPowerModifier>,
+    pub power_modifiers_complete: bool,
     pub ongoing: i32,
     pub location_power: i32,
     pub lane: Option<usize>,
     /// Last location this card left, updated before movement or destruction hooks.
     pub last_lane: Option<usize>,
+    /// The last two zone identities; restored games may not expose them.
+    pub zone: Option<crate::zones::CardZone>,
+    pub previous_zone: Option<crate::zones::CardZone>,
     pub revealed: bool,
     pub abilities_removed: bool,
     pub repeating: bool,
     pub latest_resolution_order: u32,
     pub turn_played: u8,
+    /// Last observed or simulated reveal turn; absent if not exported.
+    pub turn_revealed: Option<u8>,
     pub drawn_turn: Option<u8>,
     pub draw_extends_quickdraw: bool,
     pub move_turns: Vec<u8>,
     /// Voluntary movement and activation state (forced movement does not consume stacks).
     pub player_moves_used: u8,
     pub player_move_turn: Option<u8>,
+    pub(crate) external_moves: Vec<crate::engine_ext::merge::CardMoveGrant>,
     pub activated: bool,
     pub move_staged: bool,
     pub activate_staged: bool,
@@ -200,6 +280,11 @@ pub struct Card {
     pub observed_move_targets: Option<u8>,
     pub merged_to: Option<usize>,
     pub attached_abilities: Vec<AttachedAbility>,
+    pub composed_abilities: Vec<AbilityInstance>,
+    pub(crate) copied_ongoing_guards: Vec<&'static CardDef>,
+    pub(crate) virtual_ongoing_ids: Vec<(usize, Option<u64>, u64, u64, AbilityInstance)>,
+    pub(crate) ability_frames: Vec<crate::engine_ext::abilities::AbilityFrame>,
+    pub(crate) default_ability_generation: u64,
     pub state: Option<Box<dyn CardState>>,
     /// Persistent state hidden temporarily while another card's reveal runs.
     pub(crate) borrowed_original_state: Option<Option<Box<dyn CardState>>>,
@@ -217,30 +302,41 @@ impl Card {
     pub fn power(&self) -> i32 {
         self.permanent + self.ongoing + self.location_power
     }
-    pub fn has_ongoing(&self) -> bool {
-        !self.abilities_removed
-            && (self.ability_def().ongoing.is_some()
-                || self.ability_def().late_ongoing.is_some()
-                || self.ability_def().ongoing_ability
-                || self.ability_def().cost_guard.is_some()
-                || self.ability_def().destroy_guard.is_some()
-                || self.ability_def().blocks_expensive_plays
-                || self.ability_def().blocks_spawns
-                || self.ability_def().blocks_reveal
-                || self.ability_def().prevents_destroy
-                || self.ability_def().locks_lane)
+    pub fn has_ongoing(&self, include_hidden: bool) -> bool {
+        (include_hidden && !self.external_moves.is_empty())
+            || self.abilities().any(|ability| {
+                (ability.kind != AbilityKind::Default || !self.abilities_removed)
+                    && (include_hidden || !ability.hidden)
+                    && ability.supports(AbilityKind::Ongoing)
+                    && (ability.def.ongoing.is_some()
+                        || ability.def.late_ongoing.is_some()
+                        || ability.def.ongoing_ability
+                        || ability.def.cost_guard.is_some()
+                        || ability.def.destroy_guard.is_some()
+                        || ability.def.blocks_expensive_plays
+                        || ability.def.blocks_spawns
+                        || ability.def.blocks_reveal
+                        || ability.def.prevents_destroy
+                        || ability.def.locks_lane)
+            })
     }
     /// GorrBehavior::GetPowerChange (0x7eb883c), predicate 0x7eb8d4c.
-    /// Current attached ability kinds are watches, movement, and preparation;
-    /// none is a ThisCardResolvedTrigger.
+    /// Additional resolve instances count independently of the default text.
     pub fn has_resolve_trigger(&self) -> bool {
-        !self.abilities_removed && self.ability_def().reveal.is_some()
+        self.abilities().any(|ability| {
+            (ability.id.is_some() || !self.abilities_removed)
+                && ability.supports(AbilityKind::Reveal)
+                && ability.def.reveal.is_some()
+        })
     }
 
     /// FantasticarBehavior::GetTargetCard (0x7ea7514), predicate 0x7ea7c8c.
     pub fn has_end_turn_trigger(&self) -> bool {
         !self.abilities_removed
-            && (self.ability_def().end_turn.is_some() || self.ability_def().end_turn_trigger)
+            && self.abilities().any(|ability| {
+                ability.supports(AbilityKind::Trigger)
+                    && (ability.def.end_turn.is_some() || ability.def.end_turn_trigger)
+            })
     }
 
     /// Card::HasNoText (0x7cb3768) uses the effective client behavior
@@ -249,12 +345,15 @@ impl Card {
         if self.abilities_removed {
             Some(true)
         } else {
-            cards::no_text::has_no_text(self.ability_def().id)
+            cards::no_text::has_no_text(self.default_ability().id)
         }
     }
 
     pub fn can_reduce_power(&self) -> bool {
-        !self.revealed || !self.ability_def().immune_destroy_move
+        !self.revealed
+            || !self.ongoing_guard_abilities().any(|ability| {
+                ability.supports(AbilityKind::Ongoing) && ability.def.immune_destroy_move
+            })
     }
 
     pub fn reduce_power(&mut self, amount: i32) {
@@ -265,15 +364,18 @@ impl Card {
     pub fn has_no_ability(&self) -> bool {
         self.abilities_removed
             || CATALOG
-                .get(self.ability_def().id)
+                .get(self.default_ability().id)
                 .is_some_and(|data| data.ability.is_empty())
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerTrigger {
+    StartTurn,
     BeforeCardRevealed,
+    Quickdraw,
     CardPlayed,
     CardResolved,
+    CardBanished,
     EndTurn,
 }
 
@@ -309,6 +411,21 @@ pub struct StagedPlay {
     pub resolved: bool,
 }
 
+/// Identity of the action that staged a card, independent of later movement or ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StagingContext {
+    pub seat: usize,
+    pub lane: usize,
+}
+
+/// A pending reveal; restored positions may not expose its staging context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueuedReveal {
+    pub card: usize,
+    pub staging: Option<StagingContext>,
+    pub persistent: bool,
+}
+
 /// A player-owned movement permission; one grant may be shared by a whole lane.
 #[derive(Clone)]
 pub struct MoveGrant {
@@ -321,6 +438,8 @@ pub struct MoveGrant {
     pub end_turn: u8,
     pub remaining: u8,
     pub unlimited: bool,
+    /// Optional condition evaluated with (source, target) when checking the grant.
+    pub condition: Option<fn(&Game<'_>, usize, usize) -> bool>,
     /// Invoked with (source card, moved card) after the granted move resolves.
     pub on_move: Option<crate::cards::PlayHook>,
 }
@@ -331,11 +450,14 @@ pub enum Action {
     Play { card: usize, lane: usize },
     Move { card: usize, lane: usize },
     Activate { card: usize },
+    Return { card: usize },
 }
 
 #[derive(Clone)]
 struct StagedAction {
     action: Action,
+    cost: i32,
+    hand_index: Option<usize>,
 }
 
 /// Immutable event snapshot, retained when the card returns or is resurrected.
@@ -347,12 +469,82 @@ pub struct CardZoneEvent {
     pub lane: Option<usize>,
 }
 
+/// Identity and lane are snapshots, not mutable properties of the entity.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedPlayEvent {
+    pub turn: u8,
+    pub card: usize,
+    pub def_id: &'static str,
+    pub printed_cost: i32,
+    pub staged_lane: Option<usize>,
+    pub lane: Option<usize>,
+    /// Historical action observations do not export resolution-time power.
+    pub power: Option<i32>,
+}
+
+/// Energy at the end of resolution, before end-of-turn triggers.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnEnergyEvent {
+    pub turn: u8,
+    pub spent: i32,
+    pub remaining: i32,
+    pub bonus: i32,
+}
+
+/// Player-owned cost abilities retain their attachment order within a priority.
+#[derive(Clone, Copy, Debug)]
+pub enum PlayerCostEffectKind {
+    Sandman {
+        turn: u8,
+    },
+    BaronMordo {
+        card: usize,
+        until: u8,
+        value: i32,
+    },
+    BlackSwan {
+        until: u8,
+        printed_cost: i32,
+        value: i32,
+    },
+    Wave {
+        until: u8,
+    },
+    ChampionDoom {
+        turn: u8,
+    },
+}
+
+impl PlayerCostEffectKind {
+    /// Priority and staging flags of the client player-owned stat ability.
+    /// Constructors: Sandman 0x7f2e540, Mordo 0x7e6ee98,
+    /// Black Swan 0x7e73fa0, Wave 0x7cef518.
+    fn ongoing_schedule(self) -> (u8, bool, bool, bool) {
+        let priority = match self {
+            Self::Sandman { .. } => 0,
+            Self::BaronMordo { .. } | Self::BlackSwan { .. } => 2,
+            Self::Wave { .. } => 4,
+            Self::ChampionDoom { .. } => 4,
+        };
+        (priority, false, false, false)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerCostEffect {
+    pub sequence: u64,
+    pub kind: PlayerCostEffectKind,
+}
+
 #[derive(Clone, Default)]
 pub struct Player {
     pub hand: Vec<usize>,
     pub deck: Vec<usize>,
     /// Original deck identities; None means a restored position did not report them.
     pub starting_deck: Option<Vec<&'static str>>,
+    /// Original deck entity indices, retained even when cards change zones or identity.
+    /// Unknown when reconstructing a position without complete instance provenance.
+    pub starting_deck_instances: Option<Vec<usize>>,
     /// Original opening-hand entity indices; absent in unobserved restored positions.
     pub starting_hand: Option<Vec<usize>>,
     pub discard: Vec<usize>,
@@ -366,13 +558,23 @@ pub struct Player {
     /// Successful discard and destruction events in occurrence order.
     pub discard_history: Vec<CardZoneEvent>,
     pub destruction_history: Vec<CardZoneEvent>,
+    /// Distinct recipient entities in Player.StealsPerCardEntityId.
+    pub stolen_power_recipients: Vec<usize>,
     /// Colonel America's shared set of turns folded from its discard context.
     pub colonel_discard_turns: Vec<u8>,
     pub pending_effects: Vec<PendingEffect>,
-    /// Wave's player-owned maximum-cost effect, through this turn.
-    pub wave_until: Option<u8>,
-    /// Player-owned (expiry turn, printed target cost, assigned cost) effects.
-    pub hand_cost_sets: Vec<(u8, i32, i32)>,
+    pub(crate) sinister_six: Vec<crate::engine_ext::sinister::SinisterState>,
+    pub cost_effects: Vec<PlayerCostEffect>,
+    /// Player-owned next-turn restrictions, retaining the targeted entity.
+    pub play_locks: Vec<(usize, u8)>,
+    pub next_cost_effect_sequence: u64,
+    /// Snowguard Hawk's player-owned location silence, through this turn.
+    pub location_silence_until: Option<u8>,
+    /// (staging turn, originating card) for Supergiant concealment.
+    pub supergiant_hidden_turns: Vec<(u8, usize)>,
+    /// Invisible Woman First Steps' player-owned cumulative multiplier and active turn.
+    pub end_turn_multiplier: u32,
+    pub end_turn_multiplier_turn: Option<u8>,
     pub move_grants: Vec<MoveGrant>,
     staged_actions: Vec<StagedAction>,
     pub scheduled_energy: Vec<(u8, i32)>,
@@ -388,10 +590,13 @@ pub struct Player {
     pub draws: Vec<(u8, usize)>,
     /// Resolved played cards, preserving turn and resolution order.
     pub play_history: Vec<(u8, usize)>,
+    pub resolved_play_history: Vec<ResolvedPlayEvent>,
     /// Number of resolved plays that had On Reveal text at resolution time.
     pub on_reveal_cards_played: usize,
     /// Snapshot of all staged plays, including those not yet resolved.
     pub staged_history: Vec<StagedPlay>,
+    /// Original turn and lane for every staged play, retained after zone changes.
+    pub staged_lane_history: Vec<(u8, usize)>,
     /// Observed turns containing plays or moves, including cards no longer visible.
     pub observed_play_turns: Vec<u8>,
     pub observed_move_turns: Vec<u8>,
@@ -403,11 +608,45 @@ pub struct Player {
     pub snapped_turns: Vec<u8>,
     /// (turn, energy spent, all available energy spent).
     pub energy_history: Vec<(u8, i32, bool)>,
+    pub turn_energy_history: Vec<TurnEnergyEvent>,
     pub energy_spent_this_turn: i32,
+    /// PlayerEnergyComponent.HighestEnergyHadByPlayerThisGame.
+    pub highest_energy_this_game: i32,
     pub energy: i32,
     pub next_play_power: i32,
     pub pending_left_moves: u32,
 }
+
+impl Player {
+    pub fn attach_cost_effect(&mut self, kind: PlayerCostEffectKind) {
+        let sequence = self.next_cost_effect_sequence;
+        self.next_cost_effect_sequence += 1;
+        self.cost_effects.push(PlayerCostEffect { sequence, kind });
+    }
+}
+
+/// Location ongoing-stat flags; true means the corresponding ability is allowed.
+#[derive(Clone, Copy)]
+pub(crate) struct LocationAbilityFlags {
+    pub on_reveal: bool,
+    pub ongoing: bool,
+    pub hidden_ongoing: bool,
+    pub trigger: bool,
+    pub activate: bool,
+}
+
+impl Default for LocationAbilityFlags {
+    fn default() -> Self {
+        Self {
+            on_reveal: true,
+            ongoing: true,
+            hidden_ongoing: true,
+            trigger: true,
+            activate: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Lane {
     pub def: &'static LocationDef,
@@ -415,10 +654,14 @@ pub struct Lane {
     pub observed_id: Option<String>,
     pub revealed: bool,
     pub destroyed: bool,
+    pub(crate) ability_flags: LocationAbilityFlags,
+    /// Future reveal turn for a copied hidden location.
+    pub copied_reveal_turn: Option<u8>,
     pub revealed_turn: Option<u8>,
     pub cards: Vec<usize>,
     pub bonus: [i32; 2],
     pub multiplier: [i32; 2],
+    pub(crate) contributions: Vec<crate::lane_contributions::LaneContribution>,
     pub state: Option<Box<dyn CardState>>,
 }
 #[derive(Serialize)]
@@ -455,6 +698,12 @@ pub enum Event {
     BeforeCardRevealed {
         card: usize,
     },
+    /// A staged action about to resolve with its original seat and lane.
+    StagedCardResolving {
+        card: usize,
+        seat: usize,
+        lane: usize,
+    },
     AfterTurnEnd,
     CardRevealed {
         card: usize,
@@ -465,6 +714,12 @@ pub enum Event {
     /// PostCardResolvedTrigger, after the resolving card's skill banishment.
     CardResolved {
         card: usize,
+    },
+    /// A resolved staged action whose original seat and lane are known.
+    StagedCardResolved {
+        card: usize,
+        seat: usize,
+        lane: usize,
     },
     CardActivated {
         card: usize,
@@ -491,6 +746,11 @@ pub enum Event {
     CardMerged {
         card: usize,
         absorbed: usize,
+    },
+    /// One client PostCardMergedTrigger for a batch; index into merge_batches.
+    CardMergedBatch {
+        card: usize,
+        batch: usize,
     },
     CardDestroyed {
         card: usize,
@@ -543,6 +803,8 @@ mod stakes_tests {
             end_game_multiplier: 1,
             game_multiplier: 1,
             snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
         };
         stakes.snap(0).unwrap();
         assert_eq!((stakes.current, stakes.next), (1, 2));
@@ -565,6 +827,8 @@ mod stakes_tests {
             end_game_multiplier: 1,
             game_multiplier: 1,
             snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
         };
         assert!(stakes.snap(0).is_err());
         stakes.advance_turn();
@@ -573,6 +837,10 @@ mod stakes_tests {
             stakes.retreat_now(0, RetreatCost::DisplayedCurrent),
             Ok([-2, 2])
         );
+        assert_eq!(stakes.deferred_retreat([false, false]), None);
+        assert_eq!(stakes.deferred_retreat([true, false]), Some([-2, 2]));
+        assert_eq!(stakes.deferred_retreat([false, true]), Some([2, -2]));
+        assert_eq!(stakes.deferred_retreat([true, true]), Some([0, 0]));
         stakes.set_end_game_multiplier(2);
         stakes.finish_game();
         assert_eq!(stakes.showdown(Some(1)), [-2, 2]);
@@ -590,6 +858,8 @@ mod stakes_tests {
             end_game_multiplier: 2,
             game_multiplier: 2,
             snapped: [true, false],
+            last_raiser: None,
+            pending_retreat: [false; 2],
         };
         stakes.update_next();
         assert_eq!(stakes.next, 16);
@@ -601,7 +871,7 @@ mod stakes_tests {
     }
 }
 
-/// This rule is a provisional inference, not a verified client result rule.
+/// Cube amount captured by the client when a concession ends the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetreatCost {
     DisplayedCurrent,
@@ -619,6 +889,8 @@ pub struct Stakes {
     pub end_game_multiplier: u32,
     pub game_multiplier: u32,
     pub snapped: [bool; 2],
+    pub last_raiser: Option<usize>,
+    pub pending_retreat: [bool; 2],
 }
 
 impl Stakes {
@@ -630,6 +902,7 @@ impl Stakes {
         self.player_multiplier[seat] = self.player_multiplier[seat].saturating_mul(2);
         self.update_next();
         self.snapped[seat] = true;
+        self.last_raiser = Some(seat);
         Ok(())
     }
 
@@ -683,8 +956,9 @@ impl Stakes {
         }
     }
 
-    /// Inference: immediate retreat pays the current displayed stake. This
-    /// has not been verified against the client result path.
+    /// WaitForStaging::HandleConcedeImmediatelyRequest 0x7e50204 validates
+    /// the request against current cubes; result construction 0x7dd4324
+    /// copies Game.CubeValue into the result.
     pub fn retreat_now(&self, seat: usize, rule: RetreatCost) -> Result<[i64; 2], &'static str> {
         let cubes = match rule {
             RetreatCost::DisplayedCurrent => i64::from(self.current),
@@ -693,6 +967,18 @@ impl Stakes {
             0 => Ok([-cubes, cubes]),
             1 => Ok([cubes, -cubes]),
             _ => Err("invalid seat"),
+        }
+    }
+
+    /// EndTurn::CheckForConcedes 0x7e09764 runs before reveal or stake
+    /// promotion. GameMode::DetermineGameResult 0x7dd3a6c treats all
+    /// players conceding as a tie.
+    pub fn deferred_retreat(&self, conceded: [bool; 2]) -> Option<[i64; 2]> {
+        match conceded {
+            [false, false] => None,
+            [true, true] => Some([0, 0]),
+            [true, false] => Some([-i64::from(self.current), i64::from(self.current)]),
+            [false, true] => Some([i64::from(self.current), -i64::from(self.current)]),
         }
     }
 }
@@ -715,9 +1001,9 @@ pub struct Game<'a> {
     pub played_on_reveal: [bool; 2],
     pub delays_reveals: bool,
     pub(crate) ending_reveals: bool,
-    pub delayed_reveals: [Vec<usize>; 2],
+    pub delayed_reveals: [Vec<QueuedReveal>; 2],
     pub(crate) deferred_added_reveals: Vec<usize>,
-    pub(crate) post_resolve_plays: Vec<usize>,
+    pub(crate) post_resolve_plays: Vec<QueuedReveal>,
     pub(crate) end_turn_lane_order: Option<[usize; 3]>,
     /// Python's `current_location`: scheduled reveals consumed so far. A lane that a
     /// card already revealed (Scarlet Witch, Magik) still uses up its scheduled turn.
@@ -726,6 +1012,11 @@ pub struct Game<'a> {
     pub location_reveal_order: [usize; 3],
     /// Optional replay observer, populated only for explicitly observed games.
     pub destroyed: Option<Vec<(usize, usize)>>,
+    /// Location power overrides produced during the current ongoing pass.
+    pub(crate) score_overrides: [Option<i32>; 2],
+    pub(crate) current_ongoing_source: Option<OngoingSource>,
+    pub(crate) ability_call_depth: u8,
+    pub(crate) merge_batches: Vec<Vec<usize>>,
     pub rng: RefCell<&'a mut dyn GameRng>,
 }
 
@@ -747,10 +1038,20 @@ static HAS_SPAWN_BLOCKERS: LazyLock<bool> =
     LazyLock::new(|| cards::registry().any(|entry| entry.blocks_spawns));
 
 impl<'a> Game<'a> {
+    /// DefaultGameMode::HandleConcedeRequestInternal 0x7dd1bf4 rejects
+    /// conceding while this player is the latest raiser on their snap turn.
+    pub fn can_retreat_seat(&self, seat: usize, end_turn: bool) -> bool {
+        seat < 2
+            && self.can_retreat(end_turn)
+            && !(self.stakes.as_ref().and_then(|stakes| stakes.last_raiser) == Some(seat)
+                && self.players[seat].snapped_turns.contains(&self.turn))
+    }
+
     /// Clone all simulation state against a separately cloned RNG stream.
     pub fn fork<'b>(&self, rng: &'b mut dyn GameRng) -> Game<'b> {
         Game {
             cards: self.cards.clone(),
+            ability_call_depth: self.ability_call_depth,
             players: self.players.clone(),
             human_seat: self.human_seat,
             lanes: self.lanes.clone(),
@@ -774,6 +1075,9 @@ impl<'a> Game<'a> {
             current_location: self.current_location,
             location_reveal_order: self.location_reveal_order,
             destroyed: self.destroyed.clone(),
+            score_overrides: self.score_overrides,
+            current_ongoing_source: self.current_ongoing_source,
+            merge_batches: self.merge_batches.clone(),
             rng: RefCell::new(rng),
         }
     }
@@ -781,15 +1085,34 @@ impl<'a> Game<'a> {
     pub fn fork_rng(&self) -> Box<dyn GameRng> {
         self.rng.borrow().clone_rng()
     }
+    fn lane_ongoing_allowed(&self, lane: usize) -> bool {
+        if cards::reference_rules_enabled() {
+            !self.lanes[lane].revealed || !self.lanes[lane].def.disables_ongoing
+        } else {
+            self.lanes[lane].ability_flags.ongoing
+        }
+    }
+
     // DeepSpaceBehavior::PreventCardAbilities 0x7d4e4dc disables card
     // trigger and activate abilities here, but not player-owned effects.
     fn card_triggers_allowed(&self, card: usize) -> bool {
-        self.cards[card]
-            .lane
-            .is_none_or(|lane| !self.lanes[lane].revealed || self.lanes[lane].def.id != "DeepSpace")
+        self.cards[card].lane.is_none_or(|lane| {
+            if cards::reference_rules_enabled() {
+                !self.lanes[lane].revealed || self.lanes[lane].def.id != "DeepSpace"
+            } else {
+                self.lanes[lane].ability_flags.trigger
+            }
+        })
     }
 
     pub(crate) fn emit(&mut self, event: Event) {
+        if matches!(
+            event,
+            Event::CardDrawn { .. } | Event::StagedCardResolved { .. }
+        ) {
+            let _ = self
+                .counted_trigger(|game| crate::engine_ext::sinister::sinister_event(game, event));
+        }
         if !*HAS_EVENT_HOOKS {
             return;
         }
@@ -798,29 +1121,25 @@ impl<'a> Game<'a> {
             .iter()
             .flat_map(|lane| lane.cards.iter().copied())
             .filter(|&id| {
-                self.cards[id].revealed
-                    && self.cards[id].ability_def().id != "NicoMinoru"
-                    && self.cards[id].ability_def().on_event.is_some()
+                (self.cards[id].revealed || matches!(event, Event::Empower { .. }))
+                    && self.cards[id].has_event_ability(true, !self.cards[id].revealed)
             })
             .collect();
         // Game::ActivateTriggerAbility @ 0x7da93a0 dispatches locations
         // before card abilities for PostCardResolvedTrigger.
         if matches!(event, Event::CardResolved { .. }) {
             for lane in 0..3 {
-                if self.lanes[lane].revealed
+                if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.on_event
                 {
-                    hook(self, lane, event);
+                    let _ = self.counted_trigger(|game| hook(game, lane, event));
                 }
             }
         }
         for card in observers {
-            if self.cards[card].lane.is_some()
-                && !self.cards[card].abilities_removed
-                && self.card_triggers_allowed(card)
-                && let Some(hook) = self.cards[card].ability_def().on_event
-            {
-                hook(self, card, event);
+            if self.cards[card].lane.is_some() && self.card_triggers_allowed(card) {
+                let face_down = !self.cards[card].revealed;
+                self.dispatch_card_event(card, event, true, face_down);
             }
         }
         if matches!(
@@ -828,6 +1147,7 @@ impl<'a> Game<'a> {
             Event::GameStart
                 | Event::TurnStart
                 | Event::TurnEnd
+                | Event::AfterTurnEnd
                 | Event::GameEnd
                 | Event::Empower { .. }
                 | Event::CardDrawn { .. }
@@ -838,41 +1158,32 @@ impl<'a> Game<'a> {
                 .players
                 .iter()
                 .flat_map(|player| player.hand.iter().chain(&player.deck).copied())
-                .filter(|&id| {
-                    self.cards[id].ability_def().id != "NicoMinoru"
-                        && self.cards[id].ability_def().on_event.is_some()
-                })
+                .filter(|&id| self.cards[id].has_event_ability(true, false))
                 .collect();
             for card in observers {
-                if !self.cards[card].abilities_removed
-                    && let Some(hook) = self.cards[card].ability_def().on_event
-                {
-                    hook(self, card, event);
-                }
+                self.dispatch_card_event(card, event, true, false);
             }
         }
         if matches!(
             event,
-            Event::BeforeCardRevealed { .. } | Event::CardMerged { .. } | Event::CardStaged { .. }
+            Event::BeforeCardRevealed { .. }
+                | Event::CardMerged { .. }
+                | Event::CardMergedBatch { .. }
+                | Event::CardStaged { .. }
         ) {
             let observers: Vec<_> = self
                 .players
                 .iter()
                 .flat_map(|player| player.hand.iter().copied())
-                .filter(|&id| {
-                    !self.cards[id].abilities_removed
-                        && self.cards[id].ability_def().on_event.is_some()
-                })
+                .filter(|&id| self.cards[id].has_event_ability(false, false))
                 .collect();
             for card in observers {
-                if !self.cards[card].abilities_removed
-                    && self
-                        .players
-                        .iter()
-                        .any(|player| player.hand.contains(&card))
-                    && let Some(hook) = self.cards[card].ability_def().on_event
+                if self
+                    .players
+                    .iter()
+                    .any(|player| player.hand.contains(&card))
                 {
-                    hook(self, card, event);
+                    self.dispatch_card_event(card, event, false, false);
                 }
             }
         }
@@ -904,16 +1215,20 @@ impl<'a> Game<'a> {
         }
         if !matches!(event, Event::CardResolved { .. }) {
             for lane in 0..3 {
-                if self.lanes[lane].revealed
+                if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.on_event
                 {
-                    hook(self, lane, event);
+                    let _ = self.counted_trigger(|game| hook(game, lane, event));
                 }
             }
         }
     }
     pub(crate) fn emit_merged(&mut self, card: usize, absorbed: usize) {
-        self.emit(Event::CardMerged { card, absorbed });
+        let event = Event::CardMerged { card, absorbed };
+        self.emit(event);
+        // The absorbed entity is already set aside, so it is absent from the
+        // ordinary board and hand observer scans.
+        self.dispatch_absorbed_merge(absorbed, event);
         self.ongoing();
     }
     /// Install an independent instance; repeated reveals can install repeated effects.
@@ -925,11 +1240,16 @@ impl<'a> Game<'a> {
         let effects = std::mem::take(&mut self.players[seat].pending_effects);
         let mut survivors = Vec::new();
         for mut effect in effects {
-            let fired = effect.trigger == trigger
-                && !(card == Some(effect.source)
+            let fired = self.ability_call_depth < 32
+                && effect.trigger == trigger
+                && !(trigger != PlayerTrigger::CardBanished
+                    && card == Some(effect.source)
                     && (effect.created_turn == self.turn
                         || effect.lifetime == EffectLifetime::NextOtherCard));
-            let completed = fired && (effect.apply)(self, &mut effect, card);
+            let completed = fired
+                && self
+                    .counted_trigger(|game| (effect.apply)(game, &mut effect, card))
+                    .unwrap_or(false);
             let expired = fired
                 && matches!(
                     effect.lifetime,
@@ -979,6 +1299,10 @@ impl<'a> Game<'a> {
     pub fn set_energy(&mut self, seat: usize, energy: i32) {
         let old = self.players[seat].energy;
         self.players[seat].energy = energy;
+        // PlayerEnergySystem::ApplyEnergyUpdate 0x7ca0728 records the peak
+        // before dispatching energy-change notifications.
+        self.players[seat].highest_energy_this_game =
+            self.players[seat].highest_energy_this_game.max(energy);
         if old != energy {
             self.emit(Event::EnergyChanged {
                 seat,
@@ -1000,7 +1324,11 @@ impl<'a> Game<'a> {
         self.players[seat].scheduled_energy.push((turn, amount));
     }
     pub fn set_temporary_hand_cost(&mut self, card: usize, turn: u8, value: i32) {
-        self.cards[card].temporary_hand_cost = Some((turn, value));
+        self.cards[card].attach_cost_effect(CardCostEffectKind::TemporarySet { turn, value });
+        // Ability::AddAbility refreshes ongoing stats (0x7c8b180).
+        if !cards::reference_rules_enabled() {
+            self.ongoing();
+        }
     }
     pub fn movable_cards_played_count(&self, seat: usize) -> usize {
         self.players[seat].movable_cards_played.len()
@@ -1057,7 +1385,15 @@ impl<'a> Game<'a> {
             value,
             source,
             ongoing: false,
+            ongoing_source: None,
         });
+        if stat == Stat::Power {
+            target.power_modifiers.push(CardPowerModifier {
+                operation,
+                value,
+                source: Some(source),
+            });
+        }
         match stat {
             Stat::Power => target.permanent = new,
             Stat::Cost => target.cost = new,
@@ -1095,6 +1431,12 @@ impl<'a> Game<'a> {
             value: amount,
             source,
             ongoing: false,
+            ongoing_source: None,
+        });
+        target.power_modifiers.push(CardPowerModifier {
+            operation: StatOperation::Add,
+            value: amount,
+            source: Some(source),
         });
         self.cards[card].ongoing += self.luke_power_correction(card) - correction_before;
     }
@@ -1179,7 +1521,11 @@ impl<'a> Game<'a> {
             self.add_power(card, -amount, source);
             stolen += before - self.cards[card].permanent;
         }
-        if stolen > 0 {
+        if stolen > 0 && self.is_character(to) {
+            let owner = self.cards[to].owner;
+            if !self.players[owner].stolen_power_recipients.contains(&to) {
+                self.players[owner].stolen_power_recipients.push(to);
+            }
             self.change_stat(to, Stat::Power, StatOperation::Add, stolen, source, true);
         }
         stolen > 0
@@ -1195,7 +1541,11 @@ impl<'a> Game<'a> {
             self.add_power(card, -amount, source);
             stolen += before - self.cards[card].permanent;
         }
-        if stolen > 0 {
+        if stolen > 0 && self.is_character(to) {
+            let owner = self.cards[to].owner;
+            if !self.players[owner].stolen_power_recipients.contains(&to) {
+                self.players[owner].stolen_power_recipients.push(to);
+            }
             self.change_stat(to, Stat::Power, StatOperation::Add, stolen, source, true);
         }
     }
@@ -1214,6 +1564,7 @@ impl<'a> Game<'a> {
                 value: amount,
                 source,
                 ongoing: true,
+                ongoing_source: self.current_ongoing_source,
             });
         }
     }
@@ -1230,6 +1581,7 @@ impl<'a> Game<'a> {
             value: amount,
             source,
             ongoing: true,
+            ongoing_source: self.current_ongoing_source,
         });
     }
     pub fn add_ongoing_cost(&mut self, card: usize, amount: i32, source: usize) {
@@ -1242,6 +1594,7 @@ impl<'a> Game<'a> {
                 value: amount,
                 source,
                 ongoing: true,
+                ongoing_source: self.current_ongoing_source,
             });
         }
     }
@@ -1255,16 +1608,29 @@ impl<'a> Game<'a> {
                 value,
                 source,
                 ongoing: true,
+                ongoing_source: self.current_ongoing_source,
             });
         }
     }
 
     /// IsleOfSilenceBehavior::DisableOngoing (0x7d5a9ec).
     pub fn ongoing_active(&self, card: usize) -> bool {
-        self.cards[card].has_ongoing()
-            && self.cards[card].lane.is_none_or(|lane| {
-                !self.lanes[lane].revealed || !self.lanes[lane].def.disables_ongoing
-            })
+        self.cards[card].has_ongoing(true)
+            && self.cards[card]
+                .lane
+                .is_none_or(|lane| self.lane_ongoing_allowed(lane))
+    }
+
+    /// JeanGrey's staging-time ongoing examines its previous location while
+    /// staged to move (ApplyMustPlayHereFirst 0x7ed2460).
+    pub(crate) fn jean_ongoing_active(&self, card: usize) -> bool {
+        let target = &self.cards[card];
+        let lane = if self.is_wait_for_staging && target.move_staged {
+            target.last_lane
+        } else {
+            target.lane
+        };
+        target.has_ongoing(true) && lane.is_none_or(|lane| self.lane_ongoing_allowed(lane))
     }
 
     pub fn cost_change_allowed(&self, card: usize, old: i32, new: i32) -> bool {
@@ -1278,9 +1644,16 @@ impl<'a> Game<'a> {
                 !self.cards[id].revealed
                     || !self.ongoing_active(id)
                     || self.cards[id]
-                        .def
-                        .cost_guard
-                        .is_none_or(|guard| guard(self, id, card, old, new))
+                        .ongoing_guard_abilities()
+                        .filter(|a| {
+                            a.supports(AbilityKind::Ongoing)
+                                && (a.id.is_some() || !self.cards[id].abilities_removed)
+                        })
+                        .all(|a| {
+                            a.def
+                                .cost_guard
+                                .is_none_or(|guard| guard(self, id, card, old, new))
+                        })
             })
     }
     /// ScorpionBrandNewDayBehavior::DoubleAfflictions (0x7f3240c).
@@ -1345,7 +1718,8 @@ impl<'a> Game<'a> {
             current = next;
         }
         for (lane, location) in self.lanes.iter().enumerate() {
-            if location.revealed
+            if cards::reference_rules_enabled()
+                && location.revealed
                 && let Some(hook) = location.def.modify_cost
             {
                 let next = hook(self, lane, card, current);
@@ -1374,7 +1748,7 @@ impl<'a> Game<'a> {
         self.zone_position(card).is_some_and(|slot| slot < 2)
     }
     /// LukeCageBehavior::BuffCards (0x7eeb1d4), across all locations.
-    fn can_reduce_card_power(&self, card: usize) -> bool {
+    pub(crate) fn can_reduce_card_power(&self, card: usize) -> bool {
         self.cards[card].can_reduce_power()
             && (cards::reference_rules_enabled()
                 || !self.cards[card].revealed
@@ -1383,7 +1757,7 @@ impl<'a> Game<'a> {
                     lane.cards.iter().any(|&id| {
                         self.cards[id].owner == self.cards[card].owner
                             && self.cards[id].revealed
-                            && self.cards[id].ability_def().id == "LukeCage"
+                            && self.cards[id].default_ability().id == "LukeCage"
                             && self.ongoing_active(id)
                     })
                 }))
@@ -1440,6 +1814,21 @@ impl<'a> Game<'a> {
     pub fn is_character(&self, card: usize) -> bool {
         CATALOG[self.cards[card].def.id].card_type == "Character"
     }
+    /// Faction affiliation from the client card definition, including its base card.
+    pub fn in_faction(&self, card: usize, faction: &str) -> bool {
+        CATALOG[self.cards[card].def.id]
+            .factions
+            .iter()
+            .any(|value| value == faction)
+    }
+    /// Client CardDef::GetFactionCardDefId (0x7c1c33c).
+    pub fn faction_card_def(id: &str, faction: &str) -> Option<&'static str> {
+        let base = CATALOG.get(id)?;
+        if !base.factions.iter().any(|value| value == faction) {
+            return None;
+        }
+        base.faction_cards.first().map(String::as_str)
+    }
     pub fn is_skill(&self, card: usize) -> bool {
         CATALOG[self.cards[card].def.id].card_type == "Skill"
     }
@@ -1493,6 +1882,10 @@ impl<'a> Game<'a> {
         if available.len() < 3 {
             return Err("at least three distinct locations are required".into());
         }
+        let pre_start = decks
+            .iter()
+            .flat_map(|deck| deck.iter())
+            .any(|id| cards::get(id).is_some_and(|def| def.pre_game_start.is_some()));
         // Both shuffled decks and opening hands precede random location sampling.
         let mut cards = Vec::new();
         let mut players: [Player; 2] = Default::default();
@@ -1521,9 +1914,9 @@ impl<'a> Game<'a> {
                     owner: seat,
                     cost: data.cost,
                     ongoing_cost: 0,
-                    temporary_hand_cost: None,
-                    next_turn_cost_delta: None,
-                    player_cost_set_until: None,
+                    dynamic_assigned_cost: None,
+                    cost_effects: Vec::new(),
+                    next_cost_effect_sequence: 0,
                     created: false,
                     created_in_hand: Some(false),
                     created_hand_seat: None,
@@ -1536,20 +1929,26 @@ impl<'a> Game<'a> {
                     permanent: data.power,
                     base_power_override: None,
                     stat_updates: Vec::new(),
+                    power_modifiers: Vec::new(),
+                    power_modifiers_complete: true,
                     ongoing: 0,
                     location_power: 0,
                     lane: None,
                     last_lane: None,
+                    zone: Some(crate::zones::CardZone::Deck(seat)),
+                    previous_zone: None,
                     revealed: false,
                     abilities_removed: false,
                     repeating: false,
                     latest_resolution_order: 0,
                     turn_played: 0,
+                    turn_revealed: None,
                     drawn_turn: None,
                     draw_extends_quickdraw: false,
                     move_turns: Vec::new(),
                     player_moves_used: 0,
                     player_move_turn: None,
+                    external_moves: Vec::new(),
                     activated: false,
                     move_staged: false,
                     activate_staged: false,
@@ -1557,10 +1956,15 @@ impl<'a> Game<'a> {
                     observed_move_targets: None,
                     merged_to: None,
                     attached_abilities: initial_attachments(def),
+                    composed_abilities: Vec::new(),
+                    copied_ongoing_guards: Vec::new(),
+                    virtual_ongoing_ids: Vec::new(),
+                    ability_frames: Vec::new(),
+                    default_ability_generation: 0,
                     state: def.initial_state.map(|init| init()),
                     borrowed_original_state: None,
                 });
-                players[seat].deck.push(index);
+                crate::zones::initialize_deck_card(&mut players[seat], index);
             }
             players[seat].starting_deck = Some(
                 players[seat]
@@ -1569,22 +1973,38 @@ impl<'a> Game<'a> {
                     .map(|&id| cards[id].def.id)
                     .collect(),
             );
-            rng.shuffle(&mut players[seat].deck);
+            players[seat].starting_deck_instances = Some(players[seat].deck.clone());
+            if !pre_start {
+                rng.shuffle(&mut players[seat].deck);
+            }
         }
-        let chosen = rng.sample_indices(available.len(), 3);
+        let chosen = if pre_start {
+            [0, 1, 2]
+        } else {
+            let indices = rng.sample_indices(available.len(), 3);
+            [indices[0], indices[1], indices[2]]
+        };
         let lanes = std::array::from_fn(|i| Lane {
             def: available[chosen[i]],
             observed_id: None,
             revealed: false,
             destroyed: false,
+            ability_flags: LocationAbilityFlags::default(),
+            copied_reveal_turn: None,
             revealed_turn: None,
             cards: Vec::new(),
             bonus: [0; 2],
             multiplier: [1; 2],
-            state: available[chosen[i]].initial_state.map(|init| init()),
+            contributions: Vec::new(),
+            state: if pre_start {
+                None
+            } else {
+                available[chosen[i]].initial_state.map(|init| init())
+            },
         });
         let mut game = Self {
             cards,
+            ability_call_depth: 0,
             players,
             human_seat: None,
             lanes,
@@ -1608,9 +2028,52 @@ impl<'a> Game<'a> {
             current_location: 0,
             location_reveal_order: [0, 1, 2],
             destroyed: None,
+            score_overrides: [None; 2],
+            current_ongoing_source: None,
+            merge_batches: Vec::new(),
             rng: RefCell::new(rng),
         };
-        game.emit(Event::GameStart);
+        if pre_start {
+            // Game::GetAllCardsForActivatingTriggerAbility (0x7dacfcc)
+            // materializes the entity list before any GameStart callback.
+            // Newly generated deck cards therefore cannot join this dispatch.
+            let original_count = game.cards.len();
+            for card in 0..original_count {
+                if game.cards[card].abilities_removed {
+                    continue;
+                }
+                let original = game.cards[card].default_ability();
+                let generation = game.cards[card].default_ability_generation;
+                if let Some(hook) = original.pre_game_start {
+                    let _ = game.counted_trigger(|game| hook(game, card));
+                }
+                if !game.cards[card].abilities_removed
+                    && game.cards[card].default_ability_generation == generation
+                    && original.id != "NicoMinoru"
+                    && let Some(hook) = original.on_event
+                {
+                    let _ = game.counted_trigger(|game| hook(game, card, Event::GameStart));
+                }
+            }
+            let chosen;
+            {
+                let mut random = game.rng.borrow_mut();
+                for player in &mut game.players {
+                    for index in (1..player.deck.len()).rev() {
+                        let other = random.randbelow(index + 1);
+                        crate::zones::swap_initial_deck(player, index, other);
+                    }
+                }
+                chosen = random.sample_indices(game.location_pool.len(), 3);
+            }
+            for (lane, &index) in chosen.iter().enumerate() {
+                let def = game.location_pool[index];
+                game.lanes[lane].def = def;
+                game.lanes[lane].state = def.initial_state.map(|init| init());
+            }
+        } else {
+            game.emit(Event::GameStart);
+        }
         // StartGame::OnEnter (0x7e47c68) triggers game-start before the opening draw.
         for seat in 0..2 {
             game.draw_initial_hand(seat);
@@ -1625,14 +2088,19 @@ impl<'a> Game<'a> {
     fn draw_initial_hand(&mut self, seat: usize) {
         // DrawSelfDef::DrawSelf (0x7cc1158) intercepts initial-hand draws only.
         // Keep the existing Quicksilver behavior when no other such card exists.
-        while self.players[seat].hand.len() < 3 {
+        for _ in 0..3 {
+            if self.players[seat].hand.len() >= 7 {
+                break;
+            }
             let slot = self.players[seat]
                 .deck
                 .iter()
                 .position(|&id| {
                     !self.cards[id].abilities_removed
-                        && (self.cards[id].ability_def().start_in_hand
-                            || self.cards[id].def.id == "Quicksilver")
+                        && (self.cards[id].default_ability().start_in_hand
+                            || self.cards[id].def.id == "Quicksilver"
+                            || cards::meta_variants_c::skill_for_champion(self.cards[id].def.id)
+                                .is_some())
                 })
                 .or_else(|| {
                     self.players[seat]
@@ -1643,7 +2111,23 @@ impl<'a> Game<'a> {
             let Some(slot) = slot else {
                 break;
             };
-            let card = self.players[seat].deck.remove(slot);
+            let card = self.take_deck(seat, slot);
+            let skill = if self.cards[card].abilities_removed {
+                None
+            } else {
+                cards::meta_variants_c::skill_for_champion(self.cards[card].def.id)
+            };
+            if let Some(skill) = skill {
+                let handled = self.counted_trigger(|game| {
+                    if game.add_hand(seat, card, true) && game.players[seat].hand.len() < 7 {
+                        let skill = game.create_card(skill, seat);
+                        game.add_hand(seat, skill, false);
+                    }
+                });
+                if handled.is_some() {
+                    continue;
+                }
+            }
             self.add_hand(seat, card, true);
         }
     }
@@ -1661,6 +2145,19 @@ impl<'a> Game<'a> {
         self.played_cards_at(seat, lane).next().is_some()
     }
 
+    /// SpecialDeckSystem::GetPlayerChampionCard (0x7ca2b30) selects the
+    /// owner's original-deck Champion, not a subsequently created copy.
+    pub fn player_champion(&self, seat: usize) -> Option<usize> {
+        let original = self.players[seat].starting_deck_instances.as_ref();
+        self.cards.iter().enumerate().find_map(|(id, card)| {
+            (card.owner == seat
+                && card.def.id.contains("Champion")
+                && self.is_character(id)
+                && original.map_or(!card.created, |deck| deck.contains(&id)))
+            .then_some(id)
+        })
+    }
+
     pub fn create_card(&mut self, id: &str, owner: usize) -> usize {
         debug_assert!(cards::get(id).is_some(), "unregistered created card {id}");
         let def = crate::position::card_def(id).expect("unregistered created card");
@@ -1674,13 +2171,15 @@ impl<'a> Game<'a> {
             replaced_card_def_id: None,
             owner,
             ongoing_cost: 0,
-            temporary_hand_cost: None,
-            next_turn_cost_delta: None,
-            player_cost_set_until: None,
+            dynamic_assigned_cost: None,
+            cost_effects: Vec::new(),
+            next_cost_effect_sequence: 0,
             cost: row.cost,
             permanent: row.power,
             base_power_override: None,
             stat_updates: Vec::new(),
+            power_modifiers: Vec::new(),
+            power_modifiers_complete: true,
             created: true,
             created_in_hand: None,
             created_hand_seat: None,
@@ -1694,16 +2193,20 @@ impl<'a> Game<'a> {
             location_power: 0,
             lane: None,
             last_lane: None,
+            zone: None,
+            previous_zone: None,
             revealed: false,
             abilities_removed: false,
             repeating: false,
             latest_resolution_order: 0,
             turn_played: 0,
+            turn_revealed: None,
             drawn_turn: None,
             draw_extends_quickdraw: false,
             move_turns: Vec::new(),
             player_moves_used: 0,
             player_move_turn: None,
+            external_moves: Vec::new(),
             activated: false,
             move_staged: false,
             activate_staged: false,
@@ -1711,6 +2214,11 @@ impl<'a> Game<'a> {
             observed_move_targets: None,
             merged_to: None,
             attached_abilities: initial_attachments(def),
+            composed_abilities: Vec::new(),
+            copied_ongoing_guards: Vec::new(),
+            virtual_ongoing_ids: Vec::new(),
+            ability_frames: Vec::new(),
+            default_ability_generation: 0,
             state: def.initial_state.map(|init| init()),
             borrowed_original_state: None,
         });
@@ -1729,18 +2237,38 @@ impl<'a> Game<'a> {
             .copied()
             .filter(|update| !update.ongoing)
             .collect();
+        self.cards[card].power_modifiers = self.cards[source].power_modifiers.clone();
+        self.cards[card].power_modifiers_complete = self.cards[source].power_modifiers_complete;
         self.cards[card].abilities_removed = self.cards[source].abilities_removed;
         self.cards[card].override_ability = self.cards[source].override_ability;
+        self.cards[card].dynamic_assigned_cost = self.cards[source].dynamic_assigned_cost;
+        // Card::CopyEffects (0x7caf324) copies attached ability instances.
+        self.cards[card].external_moves = self.cards[source].external_moves.clone();
+        self.cards[card].composed_abilities = self.cards[source].copy_composed_abilities();
+        self.copy_virtual_ongoing_contexts(source, card);
+        if !cards::reference_rules_enabled() {
+            let attached = self.cards[source].attached_abilities.clone();
+            self.cards[card].attached_abilities.clear();
+            for ability in attached {
+                self.cards[card].attach_ability(ability);
+            }
+        }
+        // White Queen's generated ongoing is a card-owned ability and its
+        // captured location/player context is retained by Card::CopyEffects.
+        for index in 0..self.cards[source].cost_effects.len() {
+            let kind = self.cards[source].cost_effects[index].kind;
+            if matches!(kind, CardCostEffectKind::WhiteQueenWinning { .. }) {
+                self.cards[card].attach_cost_effect(kind);
+            }
+        }
         self.cards[card].morphed_from = self.cards[source].morphed_from;
         self.cards[card].morphed_from_entity = self.cards[source].morphed_from_entity;
         // Card::Copy (0x7caed0c) carries replacement provenance.
         self.cards[card].replaced_card_def_id = self.cards[source].replaced_card_def_id;
         self.cards[card].state = self.cards[source]
-            .borrowed_original_state
-            .as_ref()
-            .unwrap_or(&self.cards[source].state)
-            .clone();
-        if let Some(clear) = self.cards[card].ability_def().clear_reveal_state {
+            .default_ability_state()
+            .map(CardState::clone_box);
+        if let Some(clear) = self.cards[card].default_ability().clear_reveal_state {
             clear(&mut self.cards[card]);
         }
         card
@@ -1750,7 +2278,7 @@ impl<'a> Game<'a> {
     pub(crate) fn is_default_attached(&self, card: usize, ability: &AttachedAbility) -> bool {
         let receiver = &self.cards[card];
         (ability.id == "NicoMinoruStartOfTurnTrigger"
-            && (receiver.def.id == "NicoMinoru" || receiver.ability_def().id == "NicoMinoru"))
+            && (receiver.def.id == "NicoMinoru" || receiver.default_ability().id == "NicoMinoru"))
             || ability
                 .origin
                 .and_then(|origin| self.cards.get(origin))
@@ -1760,9 +2288,19 @@ impl<'a> Game<'a> {
     /// Card::RemoveText (0x7cb2ebc) removes default abilities, while
     /// preserving attached abilities originating from other cards.
     pub fn remove_text(&mut self, card: usize) {
+        self.cards[card].default_ability_generation += 1;
+        self.remove_default_composed(card);
         let mut abilities = std::mem::take(&mut self.cards[card].attached_abilities);
         abilities.retain(|ability| !self.is_default_attached(card, ability));
         self.cards[card].attached_abilities = abilities;
+        let mut moves = std::mem::take(&mut self.cards[card].external_moves);
+        let receiver = self.cards[card].def.id;
+        moves.retain(|ability| {
+            self.cards
+                .get(ability.origin)
+                .is_none_or(|origin| origin.def.id != receiver)
+        });
+        self.cards[card].external_moves = moves;
         self.cards[card].abilities_removed = true;
         self.cards[card].borrowed_original_state = None;
         self.cards[card].state = None;
@@ -1772,7 +2310,7 @@ impl<'a> Game<'a> {
     /// Copy the source's current text without changing this card's identity or stats.
     /// CopyTextAndActivateResolveAbility (0x7cbb3f4) refreshes ongoing before resolve.
     pub fn copy_text(&mut self, card: usize, source: usize, activate_reveal: bool) -> bool {
-        let def = self.cards[source].ability_def();
+        let def = self.cards[source].default_ability();
         // Card::CopyText (0x7cbadb4) rejects an already installed override.
         if self.cards[card]
             .override_ability
@@ -1780,6 +2318,8 @@ impl<'a> Game<'a> {
         {
             return false;
         }
+        self.cards[card].default_ability_generation += 1;
+        self.remove_default_composed(card);
         let mut abilities = std::mem::take(&mut self.cards[card].attached_abilities);
         abilities.retain(|ability| !self.is_default_attached(card, ability));
         self.cards[card].attached_abilities = abilities;
@@ -1789,6 +2329,8 @@ impl<'a> Game<'a> {
         self.cards[card].borrowed_original_state = None;
         self.cards[card].state = def.initial_state.map(|init| init());
         if removed {
+            self.cards[card].composed_abilities.clear();
+            self.cards[card].external_moves.clear();
             self.cards[card].attached_abilities.clear();
         } else if def.id == "NicoMinoru" {
             for mut ability in initial_attachments(def) {
@@ -1800,7 +2342,11 @@ impl<'a> Game<'a> {
         if activate_reveal && !removed {
             // ActivateTextResolveAbility (0x7cbb424) uses the resolve count
             // from GetTriggerAbilityActivateCount (0x7cb2d1c).
-            self.trigger_on_reveal(card);
+            if cards::reference_rules_enabled() {
+                self.trigger_on_reveal(card);
+            } else {
+                self.trigger_text_reveal(card);
+            }
         }
         true
     }
@@ -1817,11 +2363,15 @@ impl<'a> Game<'a> {
         let Some(row) = CATALOG.get(target_id) else {
             return false;
         };
+        self.cards[card].default_ability_generation += 1;
         let old = self.cards[card].def.id;
         // Card::<MorphIntoNewCard>b__477_0 (0x7cbf0cc) matches OperationType::Set.
         self.cards[card]
             .stat_updates
             .retain(|u| u.ongoing || u.operation != StatOperation::Set);
+        self.cards[card]
+            .power_modifiers
+            .retain(|modifier| modifier.operation != StatOperation::Set);
         let mut power = row.power;
         let mut cost = row.cost;
         for update in self.cards[card].stat_updates.iter().filter(|u| !u.ongoing) {
@@ -1854,7 +2404,11 @@ impl<'a> Game<'a> {
         self.ongoing();
         // CompleteMorph (0x7cbb714) activates the new resolve text when eligible.
         if self.cards[card].lane.is_some() && self.cards[card].revealed {
-            self.trigger_on_reveal(card);
+            if cards::reference_rules_enabled() {
+                self.trigger_on_reveal(card);
+            } else {
+                self.trigger_text_reveal(card);
+            }
         }
         true
     }
@@ -1870,6 +2424,8 @@ impl<'a> Game<'a> {
         self.cards[card]
             .stat_updates
             .retain(|update| update.ongoing);
+        self.cards[card].power_modifiers.clear();
+        self.cards[card].power_modifiers_complete = true;
         self.transform_card(card, target_id)
     }
 
@@ -1882,10 +2438,8 @@ impl<'a> Game<'a> {
         let def = self.cards[source].def;
         let override_ability = self.cards[source].override_ability;
         let state = self.cards[source]
-            .borrowed_original_state
-            .as_ref()
-            .unwrap_or(&self.cards[source].state)
-            .clone();
+            .default_ability_state()
+            .map(CardState::clone_box);
         let updates = self.cards[source]
             .stat_updates
             .iter()
@@ -1895,9 +2449,18 @@ impl<'a> Game<'a> {
         let cost = self.cards[source].cost;
         let power = self.cards[source].permanent;
         let base_power_override = self.cards[source].base_power_override;
+        let dynamic_assigned_cost = self.cards[source].dynamic_assigned_cost;
         let replaced_card_def_id = self.cards[source].replaced_card_def_id;
         let removed = self.cards[source].abilities_removed;
+        // MorphIntoCopy (0x7cbb5cc) invokes Card::CopyEffects.
+        let external_moves = self.cards[source].external_moves.clone();
+        let composed_abilities = self.cards[source].copy_composed_abilities();
+        let attached_abilities = (!cards::reference_rules_enabled())
+            .then(|| self.cards[source].attached_abilities.clone());
+        let power_modifiers = self.cards[source].power_modifiers.clone();
+        let power_modifiers_complete = self.cards[source].power_modifiers_complete;
         let target = &mut self.cards[card];
+        target.default_ability_generation += 1;
         target.def = def;
         target.morphed_from = Some(old);
         target.morphed_from_entity = Some(source);
@@ -1905,17 +2468,39 @@ impl<'a> Game<'a> {
         target.override_ability = override_ability;
         target.borrowed_original_state = None;
         target.state = state;
+        target.external_moves = external_moves;
+        target.composed_abilities = composed_abilities;
+        for ability in &mut target.composed_abilities {
+            if let Some((0, generation)) = &mut ability.parent {
+                *generation = target.default_ability_generation;
+            }
+        }
+        target.dynamic_assigned_cost = dynamic_assigned_cost;
         target.stat_updates = updates;
+        target.power_modifiers = power_modifiers;
+        target.power_modifiers_complete = power_modifiers_complete;
         target.cost = cost;
         target.permanent = power;
         target.base_power_override = base_power_override;
         target.abilities_removed = removed;
-        target
-            .attached_abilities
-            .retain(|a| !matches!(a.kind, AttachedAbilityKind::Watch { .. }));
+        if let Some(attached) = attached_abilities {
+            target.attached_abilities.clear();
+            for ability in attached {
+                target.attach_ability(ability);
+            }
+        } else {
+            target
+                .attached_abilities
+                .retain(|ability| !matches!(ability.kind, AttachedAbilityKind::Watch { .. }));
+        }
+        self.copy_virtual_ongoing_contexts(source, card);
         self.ongoing();
         if self.cards[card].lane.is_some() && self.cards[card].revealed {
-            self.trigger_on_reveal(card);
+            if cards::reference_rules_enabled() {
+                self.trigger_on_reveal(card);
+            } else {
+                self.trigger_text_reveal(card);
+            }
         }
         true
     }
@@ -1924,7 +2509,9 @@ impl<'a> Game<'a> {
         self.lanes[lane].cards.iter().any(|&card| {
             self.cards[card].revealed
                 && self.ongoing_active(card)
-                && self.cards[card].ability_def().locks_lane
+                && self.cards[card]
+                    .ongoing_guard_abilities()
+                    .any(|ability| ability.supports(AbilityKind::Ongoing) && ability.def.locks_lane)
         })
     }
 
@@ -1933,11 +2520,20 @@ impl<'a> Game<'a> {
     /// played, added to the board or discarded, so cards elsewhere use their lasting cost.
     pub fn card_cost(&self, card: usize) -> i32 {
         let mut cost = self.cards[card].cost + self.cards[card].ongoing_cost;
-        if let Some((until, value)) = self.cards[card].player_cost_set_until
-            && self.turn <= until
-            && self.cost_change_allowed(card, cost, value)
-        {
-            cost = value;
+        if cards::reference_rules_enabled() {
+            for effect in &self.players[self.cards[card].owner].cost_effects {
+                if let PlayerCostEffectKind::BaronMordo {
+                    card: target,
+                    until,
+                    value,
+                } = effect.kind
+                    && target == card
+                    && self.turn <= until
+                    && self.cost_change_allowed(card, cost, value)
+                {
+                    cost = value;
+                }
+            }
         }
         if self
             .players
@@ -1945,7 +2541,8 @@ impl<'a> Game<'a> {
             .any(|player| player.hand.contains(&card))
         {
             for (lane, location) in self.lanes.iter().enumerate() {
-                if location.revealed
+                if cards::reference_rules_enabled()
+                    && location.revealed
                     && let Some(hook) = location.def.modify_cost
                 {
                     let next = hook(self, lane, card, cost);
@@ -1954,41 +2551,57 @@ impl<'a> Game<'a> {
                     }
                 }
             }
-            if let Some((turn, delta)) = self.cards[card].next_turn_cost_delta
-                && turn == self.turn
-                && self.cost_change_allowed(card, cost, cost + delta)
-            {
-                cost += delta;
+            if cards::reference_rules_enabled() {
+                for effect in &self.cards[card].cost_effects {
+                    if let CardCostEffectKind::NextTurnDelta { turn, delta } = effect.kind
+                        && turn == self.turn
+                        && self.cost_change_allowed(card, cost, cost + delta)
+                    {
+                        cost += delta;
+                    }
+                }
             }
             if !self.cards[card].abilities_removed
-                && let Some(hook) = self.cards[card].ability_def().modify_final_cost
+                && (cards::reference_rules_enabled()
+                    || self.cards[card].default_ability().id != "SuperiorIronMan")
+                && let Some(hook) = self.cards[card].default_ability().modify_final_cost
             {
                 let next = hook(self, card, cost);
                 if self.cost_change_allowed(card, cost, next) {
                     cost = next;
                 }
             }
-            if let Some((turn, value)) = self.cards[card].temporary_hand_cost
-                && turn == self.turn
-                && self.cost_change_allowed(card, cost, value)
-            {
-                cost = value;
-            }
-            for &(until, target, value) in &self.players[self.cards[card].owner].hand_cost_sets {
-                if self.turn <= until
-                    && self.printed_cost(card) == target
-                    && self.cost_change_allowed(card, cost, value)
-                {
-                    cost = value;
+            if cards::reference_rules_enabled() {
+                for effect in &self.cards[card].cost_effects {
+                    if let CardCostEffectKind::TemporarySet { turn, value } = effect.kind
+                        && turn == self.turn
+                        && self.cost_change_allowed(card, cost, value)
+                    {
+                        cost = value;
+                    }
                 }
             }
-            if self.players[self.cards[card].owner]
-                .wave_until
-                .is_some_and(|turn| self.turn <= turn)
-            {
-                let capped = cost.min(4);
-                if self.cost_change_allowed(card, cost, capped) {
-                    cost = capped;
+            if cards::reference_rules_enabled() {
+                for effect in &self.players[self.cards[card].owner].cost_effects {
+                    if let PlayerCostEffectKind::BlackSwan {
+                        until,
+                        printed_cost,
+                        value,
+                    } = effect.kind
+                        && self.turn <= until
+                        && self.printed_cost(card) == printed_cost
+                        && self.cost_change_allowed(card, cost, value)
+                    {
+                        cost = value;
+                    }
+                }
+                if self.players[self.cards[card].owner].cost_effects.iter().any(|effect| {
+                    matches!(effect.kind, PlayerCostEffectKind::Wave { until } if self.turn <= until)
+                }) {
+                    let capped = cost.min(4);
+                    if self.cost_change_allowed(card, cost, capped) {
+                        cost = capped;
+                    }
                 }
             }
         }
@@ -2022,23 +2635,29 @@ impl<'a> Game<'a> {
         self.lanes[lane].observed_id = observed_id;
         self.lanes[lane].state = def.initial_state.map(|init| init());
         self.lanes[lane].revealed = true;
+        self.lanes[lane].copied_reveal_turn = None;
         self.lanes[lane].revealed_turn = Some(self.turn);
-        self.delays_reveals |= def.delays_reveals;
+        self.delays_reveals |= self.location_abilities_active(lane) && def.delays_reveals;
         self.emit(Event::LocationRevealed { lane });
-        if let Some(hook) = def.on_reveal {
-            hook(self, lane);
+        if self.location_abilities_active(lane)
+            && let Some(hook) = def.on_reveal
+        {
+            let _ = self.counted_trigger(|game| hook(game, lane));
         }
         let minimum = self
             .lanes
             .iter()
-            .filter(|location| location.revealed)
-            .map(|location| location.def.minimum_turns)
+            .enumerate()
+            .filter(|(lane, _)| self.location_abilities_active(*lane))
+            .map(|(_, location)| location.def.minimum_turns)
             .max()
             .unwrap_or(0);
         self.set_total_turns(6.max(minimum));
-        for seat in 0..2 {
-            let energy = self.players[seat].energy + def.reveal_energy;
-            self.set_energy(seat, energy);
+        if self.location_abilities_active(lane) {
+            for seat in 0..2 {
+                let energy = self.players[seat].energy + def.reveal_energy;
+                self.set_energy(seat, energy);
+            }
         }
         self.ongoing();
         self.emit(Event::LocationMorphed { lane });
@@ -2062,8 +2681,8 @@ impl<'a> Game<'a> {
                 let source = &self.cards[id];
                 source.owner == target.owner
                     && source.revealed
-                    && source.has_ongoing()
-                    && source.ability_def().id == stone
+                    && source.has_ongoing(false)
+                    && source.default_ability().id == stone
             })
     }
 
@@ -2087,6 +2706,25 @@ impl<'a> Game<'a> {
         queued: usize,
         queued_total: usize,
     ) -> bool {
+        self.can_play_internal(card, lane, seat, energy, (queued, queued_total), false)
+    }
+
+    /// Jean Grey's candidate predicate uses Card::IsPlayableByCard (0x7cb0a28):
+    /// card and location requirements, but not the player's available energy.
+    pub(crate) fn can_play_for_jean(&self, card: usize, lane: usize, seat: usize) -> bool {
+        self.can_play_internal(card, lane, seat, i32::MAX, (0, 0), true)
+    }
+
+    fn can_play_internal(
+        &self,
+        card: usize,
+        lane: usize,
+        seat: usize,
+        energy: i32,
+        counts: (usize, usize),
+        skip_jean: bool,
+    ) -> bool {
+        let (queued, queued_total) = counts;
         if self.card_cost(card) > energy || !self.has_space(lane, seat, queued) {
             return false;
         }
@@ -2095,27 +2733,71 @@ impl<'a> Game<'a> {
         if self.thanos_stone_active(card, "SpaceStone") || self.jeff_unrestricted(card) {
             return true;
         }
-        if self.cards[card].attached_abilities.iter().any(|ability| {
-            matches!(ability.kind, AttachedAbilityKind::CannotPlayTurn { turn } if turn == self.turn)
-        }) {
+        // WarMachineBehavior::UnrestrictPlay (0x7cee0f0) grants the owner's
+        // hand cards IgnorePlayRestrictions while its ongoing is active.
+        if self.players[seat].hand.contains(&card)
+            && self
+                .lanes
+                .iter()
+                .flat_map(|location| &location.cards)
+                .any(|&source| {
+                    self.cards[source].owner == seat
+                        && self.cards[source].revealed
+                        && self.ongoing_active(source)
+                        && self.cards[source].ongoing_guard_abilities().any(|ability| {
+                            ability.supports(AbilityKind::Ongoing)
+                                && ability.def.grants_unrestricted_hand_plays
+                        })
+                })
+        {
+            return true;
+        }
+        if self.players[seat].hand.contains(&card)
+            && self.players[seat].play_locks.contains(&(card, self.turn))
+        {
             return false;
         }
         if self.lane_locked(lane)
             || (!self.cards[card].abilities_removed
                 && self.cards[card]
-                    .ability_def()
+                    .default_ability()
                     .can_play
                     .is_some_and(|test| !test(self, card, lane, seat)))
+        {
+            return false;
+        }
+        if self
+            .lanes
+            .iter()
+            .flat_map(|location| &location.cards)
+            .any(|&source| {
+                self.cards[source].revealed
+                    && self.cards[source].ongoing_guard_abilities().any(|ability| {
+                        ability.supports(AbilityKind::Ongoing)
+                            && if ability.def.id == "JeanGrey" {
+                                self.jean_ongoing_active(source)
+                            } else {
+                                self.ongoing_active(source)
+                            }
+                            && !(skip_jean && ability.def.id == "JeanGrey")
+                            && ability.def.global_play_guard.is_some_and(|guard| {
+                                !guard(self, source, card, lane, seat, queued_total)
+                            })
+                    })
+            })
         {
             return false;
         }
         if self.lanes[lane].cards.iter().any(|&source| {
             self.cards[source].revealed
                 && self.ongoing_active(source)
-                && self.cards[source]
-                    .ability_def()
-                    .ongoing_play_guard
-                    .is_some_and(|guard| !guard(self, source, card, lane, seat))
+                && self.cards[source].ongoing_guard_abilities().any(|ability| {
+                    ability.supports(AbilityKind::Ongoing)
+                        && ability
+                            .def
+                            .ongoing_play_guard
+                            .is_some_and(|guard| !guard(self, source, card, lane, seat))
+                })
         }) {
             return false;
         }
@@ -2124,13 +2806,15 @@ impl<'a> Game<'a> {
             && self.lanes[lane].cards.iter().any(|&source| {
                 self.cards[source].revealed
                     && self.ongoing_active(source)
-                    && self.cards[source].ability_def().blocks_expensive_plays
+                    && self.cards[source].ongoing_guard_abilities().any(|ability| {
+                        ability.supports(AbilityKind::Ongoing) && ability.def.blocks_expensive_plays
+                    })
             })
         {
             return false;
         }
         for (source, location) in self.lanes.iter().enumerate() {
-            if !location.revealed {
+            if !self.location_abilities_active(source) {
                 continue;
             }
             // ParkerIndustriesBehavior (0x7d7177c) limits staged plays
@@ -2169,7 +2853,7 @@ impl<'a> Game<'a> {
     }
     fn jeff_unrestricted(&self, card: usize) -> bool {
         !self.cards[card].abilities_removed
-            && self.cards[card].ability_def().id == "JeffTheBabyLandShark"
+            && self.cards[card].default_ability().id == "JeffTheBabyLandShark"
     }
     fn ongoing_blocks_move(&self, card: usize, source: usize) -> bool {
         !self.jeff_unrestricted(card)
@@ -2177,9 +2861,17 @@ impl<'a> Game<'a> {
                 self.cards[provider].revealed
                     && self.ongoing_active(provider)
                     && self.cards[provider]
-                        .ability_def()
-                        .blocks_player_move
-                        .is_some_and(|test| test(self, provider, card))
+                        .ongoing_guard_abilities()
+                        .filter(|a| {
+                            a.supports(AbilityKind::Ongoing)
+                                && (a.kind != AbilityKind::Default
+                                    || !self.cards[provider].abilities_removed)
+                        })
+                        .any(|a| {
+                            a.def
+                                .blocks_player_move
+                                .is_some_and(|test| test(self, provider, card))
+                        })
             })
     }
 
@@ -2201,6 +2893,9 @@ impl<'a> Game<'a> {
                 && self.turn <= grant.end_turn
                 && grant.card.is_none_or(|target| target == card)
                 && grant.lane.is_none_or(|target| target == lane)
+                && grant
+                    .condition
+                    .is_none_or(|condition| condition(self, grant.source, card))
                 && destination
                     .is_none_or(|lane| grant.destination.is_none_or(|target| target == lane))
         })
@@ -2215,7 +2910,9 @@ impl<'a> Game<'a> {
         if target.owner != seat
             || !target.revealed
             || target.move_staged
-            || target.ability_def().immune_destroy_move
+            || target
+                .ongoing_guard_abilities()
+                .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move)
             || destination >= 3
             || source == destination
             || !self.has_space(destination, seat, 0)
@@ -2226,14 +2923,14 @@ impl<'a> Game<'a> {
             return false;
         }
         if !self.jeff_unrestricted(card)
-            && self.lanes[source].revealed
+            && self.location_abilities_active(source)
             && let Some(test) = self.lanes[source].def.allows_move_from
             && !test(self, source, card, destination, seat)
         {
             return false;
         }
         if !self.jeff_unrestricted(card)
-            && self.lanes[destination].revealed
+            && self.location_abilities_active(destination)
             && let Some(test) = self.lanes[destination].def.allows_addition
             && !test(self, destination, card, destination, seat)
         {
@@ -2245,9 +2942,18 @@ impl<'a> Game<'a> {
         // HasMovesRemainingCondition::Evaluate (0x7d26688): zero stacks are unlimited;
         // Card::IsMovableByPlayer (0x7cb0cac) rejects a card already staged to move.
         (!target.abilities_removed
-            && (target.player_moves_used < target.ability_def().move_limit
-                || target.ability_def().move_each_turn
+            && (target.player_moves_used < target.default_ability().move_limit
+                || target.default_ability().move_each_turn
                     && target.player_move_turn != Some(self.turn)))
+            || ((if cards::reference_rules_enabled() {
+                !self.lanes[source].revealed || !self.lanes[source].def.disables_ongoing
+            } else {
+                self.lanes[source].ability_flags.hidden_ongoing
+            }) && target.external_moves.iter().any(|grant| {
+                grant.start <= self.turn
+                    && self.turn <= grant.end
+                    && grant.remaining.is_none_or(|remaining| remaining > 0)
+            }))
             || self
                 .matching_move_grant(card, seat, Some(destination))
                 .is_some()
@@ -2259,23 +2965,58 @@ impl<'a> Game<'a> {
                     self.cards[provider].revealed
                         && self.ongoing_active(provider)
                         && self.cards[provider]
-                            .ability_def()
-                            .grants_move_globally
-                            .is_some_and(|test| test(self, provider, card))
+                            .ongoing_guard_abilities()
+                            .filter(|a| {
+                                a.supports(AbilityKind::Ongoing)
+                                    && (a.kind != AbilityKind::Default
+                                        || !self.cards[provider].abilities_removed)
+                            })
+                            .any(|a| {
+                                a.def
+                                    .grants_move_globally
+                                    .is_some_and(|test| test(self, provider, card))
+                            })
                 })
             || self.lanes[source].cards.iter().copied().any(|provider| {
                 self.cards[provider].revealed
                     && self.ongoing_active(provider)
                     && self.cards[provider]
-                        .ability_def()
-                        .grants_move_from
-                        .is_some_and(|test| test(self, provider, card))
+                        .ongoing_guard_abilities()
+                        .filter(|a| {
+                            a.supports(AbilityKind::Ongoing)
+                                && (a.kind != AbilityKind::Default
+                                    || !self.cards[provider].abilities_removed)
+                        })
+                        .any(|a| {
+                            a.def
+                                .grants_move_from
+                                .is_some_and(|test| test(self, provider, card))
+                        })
             })
-            || (self.lanes[destination].revealed
+            || (self.location_abilities_active(destination)
                 && self.lanes[destination]
                     .def
                     .grants_move_to
                     .is_some_and(|test| test(self, destination, card, source, seat)))
+    }
+
+    // Movable ability stacks are consumed by a player move while active.
+    fn consume_external_move(&mut self, card: usize, source: usize) {
+        let active = if cards::reference_rules_enabled() {
+            !self.lanes[source].revealed || !self.lanes[source].def.disables_ongoing
+        } else {
+            self.lanes[source].ability_flags.hidden_ongoing
+        };
+        if active {
+            for grant in &mut self.cards[card].external_moves {
+                if grant.start <= self.turn
+                    && self.turn <= grant.end
+                    && let Some(remaining) = &mut grant.remaining
+                {
+                    *remaining = remaining.saturating_sub(1);
+                }
+            }
+        }
     }
 
     /// Resolve one voluntary movement, consuming its intrinsic and granted stacks.
@@ -2290,11 +3031,12 @@ impl<'a> Game<'a> {
         }
         self.players[seat].non_play_action_turn = Some(self.turn);
         self.players[seat].move_from_turn[source] = Some(self.turn);
-        if self.cards[card].ability_def().move_limit > 0 {
+        self.consume_external_move(card, source);
+        if self.cards[card].default_ability().move_limit > 0 {
             self.cards[card].player_moves_used =
                 self.cards[card].player_moves_used.saturating_add(1);
         }
-        if self.cards[card].ability_def().move_each_turn {
+        if self.cards[card].default_ability().move_each_turn {
             self.cards[card].player_move_turn = Some(self.turn);
         }
         if let Some(index) = grant {
@@ -2305,7 +3047,7 @@ impl<'a> Game<'a> {
             let source = grant.source;
             let callback = grant.on_move;
             if let Some(hook) = callback {
-                hook(self, source, card);
+                let _ = self.counted_trigger(|game| hook(game, source, card));
             }
         }
         true
@@ -2318,7 +3060,10 @@ impl<'a> Game<'a> {
         };
         if destination >= 3
             || destination == source
-            || (target.revealed && target.ability_def().immune_destroy_move)
+            || (target.revealed
+                && target
+                    .ongoing_guard_abilities()
+                    .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move))
             || !self.has_space(destination, target.owner, 0)
         {
             return false;
@@ -2327,37 +3072,51 @@ impl<'a> Game<'a> {
             return false;
         }
         if !self.jeff_unrestricted(card)
-            && self.lanes[source].revealed
+            && self.location_abilities_active(source)
             && let Some(test) = self.lanes[source].def.allows_move_from
             && !test(self, source, card, destination, target.owner)
         {
             return false;
         }
         self.jeff_unrestricted(card)
-            || !self.lanes[destination].revealed
+            || !self.location_abilities_active(destination)
             || self.lanes[destination]
                 .def
                 .allows_addition
                 .is_none_or(|test| test(self, destination, card, destination, target.owner))
     }
 
+    fn activation_definition(&self, card: usize, seat: usize) -> Option<&'static CardDef> {
+        let target = &self.cards[card];
+        target
+            .abilities()
+            .filter(|ability| ability.supports(AbilityKind::Activate))
+            .filter(|ability| ability.id.is_some() || !target.abilities_removed)
+            .map(|ability| ability.def)
+            .find(|def| {
+                def.on_activate.is_some()
+                    && self.players[seat].energy >= def.activate_cost
+                    && def.can_activate.is_none_or(|test| test(self, card))
+            })
+    }
+
     pub fn can_activate(&self, card: usize, seat: usize) -> bool {
         let target = &self.cards[card];
-        let def = target.ability_def();
         target.owner == seat
             && target.lane.is_some()
             && target.revealed
-            && !target.abilities_removed
             && self.card_triggers_allowed(card)
             && !target.activated
             && !target.activate_staged
             && target.observed_can_activate.unwrap_or(true)
             && target.lane.is_some_and(|lane| {
-                !self.lanes[lane].revealed || !self.lanes[lane].def.blocks_activate
+                if cards::reference_rules_enabled() {
+                    !self.lanes[lane].revealed || !self.lanes[lane].def.blocks_activate
+                } else {
+                    self.lanes[lane].ability_flags.activate
+                }
             })
-            && def.on_activate.is_some()
-            && self.players[seat].energy >= def.activate_cost
-            && def.can_activate.is_none_or(|test| test(self, card))
+            && self.activation_definition(card, seat).is_some()
     }
 
     /// Resolve an activation and dispatch its post-activation trigger.
@@ -2365,15 +3124,16 @@ impl<'a> Game<'a> {
         if !self.can_activate(card, seat) {
             return false;
         }
-        let def = self.cards[card].ability_def();
-        self.set_energy(seat, self.players[seat].energy - def.activate_cost);
-        self.players[seat].energy_spent_this_turn += def.activate_cost;
+        let cost = self
+            .activation_definition(card, seat)
+            .unwrap()
+            .activate_cost;
+        self.set_energy(seat, self.players[seat].energy - cost);
+        self.players[seat].energy_spent_this_turn += cost;
         self.cards[card].activated = true;
         self.players[seat].non_play_action_turn = Some(self.turn);
         self.ongoing();
-        if let Some(hook) = def.on_activate {
-            hook(self, card);
-        }
+        self.dispatch_card_activation(card);
         self.emit(Event::CardActivated { card });
         true
     }
@@ -2398,11 +3158,44 @@ impl<'a> Game<'a> {
                 if !self.can_activate(card, seat) {
                     return Err("illegal staged activation".into());
                 }
-                self.cards[card].ability_def().activate_cost
+                self.activation_definition(card, seat)
+                    .unwrap()
+                    .activate_cost
+            }
+            Action::Return { card } => {
+                if !self.staged_returnable(card, seat) {
+                    return Err("illegal staged return".into());
+                }
+                0
             }
         };
         self.apply_staged_action(seat, action, cost);
         Ok(())
+    }
+
+    /// Card::IsStageUndoable (0x7cb0e74): only the latest staged action can be undone.
+    pub(crate) fn staged_returnable(&self, card: usize, seat: usize) -> bool {
+        self.players[seat].hand.len() < 7
+            && self.players[seat].staged_actions.last().is_some_and(|staged| {
+                matches!(staged.action, Action::Play { card: staged_card, .. } if staged_card == card)
+            })
+            && self.cards[card].lane.is_some()
+    }
+
+    pub(crate) fn staged_undo_option(
+        &self,
+        card: usize,
+        seat: usize,
+    ) -> Option<crate::engine_ext::autoplay::Undo> {
+        use crate::engine_ext::autoplay::Undo;
+        match self.players[seat].staged_actions.last()?.action {
+            Action::Play { card: id, .. } if id == card => Some(Undo::Play),
+            Action::Move { card: id, .. } if id == card => {
+                self.cards[card].last_lane.map(|lane| Undo::Move { lane })
+            }
+            Action::Activate { card: id } if id == card => Some(Undo::Activate),
+            _ => None,
+        }
     }
 
     pub(crate) fn apply_staged_action(&mut self, seat: usize, action: Action, cost: i32) {
@@ -2414,7 +3207,7 @@ impl<'a> Game<'a> {
                     .position(|&id| id == card)
                     .unwrap();
                 self.emit(Event::CardStaged { card, seat });
-                self.players[seat].hand.remove(slot);
+                self.take_hand(seat, slot);
                 self.set_energy(seat, self.players[seat].energy - cost);
                 self.players[seat].energy_spent_this_turn += cost;
                 self.cards[card].lane = Some(lane);
@@ -2428,12 +3221,20 @@ impl<'a> Game<'a> {
                     created: self.cards[card].created,
                     resolved: false,
                 });
-                self.played[seat].push((card, lane));
-                self.lanes[lane].cards.push(card);
-                self.notify_added(card, lane);
                 self.players[seat]
-                    .staged_actions
-                    .push(StagedAction { action });
+                    .staged_lane_history
+                    .push((self.turn, lane));
+                self.played[seat].push((card, lane));
+                self.push_location(lane, card);
+                self.notify_added(card, lane);
+                self.players[seat].staged_actions.push(StagedAction {
+                    action,
+                    cost,
+                    hand_index: Some(slot),
+                });
+                if !cards::reference_rules_enabled() {
+                    self.ongoing();
+                }
             }
             Action::Move { card, lane } => {
                 self.players[seat].non_play_action_turn = Some(self.turn);
@@ -2463,21 +3264,24 @@ impl<'a> Game<'a> {
                         },
                     });
                 }
-                if self.cards[card].ability_def().move_limit > 0 {
+                if self.cards[card].default_ability().move_limit > 0 {
                     self.cards[card].player_moves_used =
                         self.cards[card].player_moves_used.saturating_add(1);
                 }
-                if self.cards[card].ability_def().move_each_turn {
+                if self.cards[card].default_ability().move_each_turn {
                     self.cards[card].player_move_turn = Some(self.turn);
                 }
+                self.consume_external_move(card, from);
                 self.cards[card].move_staged = true;
                 self.cards[card].last_lane = Some(from);
-                self.lanes[from].cards.retain(|&id| id != card);
-                self.lanes[lane].cards.push(card);
+                self.detach_location(from, card);
+                self.push_location(lane, card);
                 self.cards[card].lane = Some(lane);
-                self.players[seat]
-                    .staged_actions
-                    .push(StagedAction { action });
+                self.players[seat].staged_actions.push(StagedAction {
+                    action,
+                    cost,
+                    hand_index: None,
+                });
                 self.ongoing();
             }
             Action::Activate { card } => {
@@ -2485,9 +3289,43 @@ impl<'a> Game<'a> {
                 self.set_energy(seat, self.players[seat].energy - cost);
                 self.players[seat].energy_spent_this_turn += cost;
                 self.cards[card].activate_staged = true;
-                self.players[seat]
-                    .staged_actions
-                    .push(StagedAction { action });
+                self.players[seat].staged_actions.push(StagedAction {
+                    action,
+                    cost,
+                    hand_index: None,
+                });
+                self.ongoing();
+            }
+            Action::Return { card } => {
+                // Location::StageForReturn (0x7dde240) removes the original
+                // stage and refunds its recorded energy, not the card's current cost.
+                let staged = self.players[seat].staged_actions.pop().unwrap();
+                let Action::Play { lane, .. } = staged.action else {
+                    unreachable!()
+                };
+                self.detach_location(lane, card);
+                self.cards[card].lane = None;
+                self.cards[card].turn_played = 0;
+                self.put_hand(seat, staged.hand_index.unwrap(), card);
+                self.set_energy(seat, self.players[seat].energy + staged.cost);
+                self.players[seat].energy_spent_this_turn -= staged.cost;
+                if let Some(index) = self.played[seat].iter().rposition(|&(id, _)| id == card) {
+                    self.played[seat].remove(index);
+                }
+                if let Some(index) = self.players[seat]
+                    .staged_history
+                    .iter()
+                    .rposition(|play| play.card == card && play.turn == self.turn && !play.resolved)
+                {
+                    self.players[seat].staged_history.remove(index);
+                }
+                if let Some(index) = self.players[seat]
+                    .staged_lane_history
+                    .iter()
+                    .rposition(|&entry| entry == (self.turn, lane))
+                {
+                    self.players[seat].staged_lane_history.remove(index);
+                }
                 self.ongoing();
             }
         }
@@ -2497,10 +3335,10 @@ impl<'a> Game<'a> {
         // JosiesBarBehavior::BuffUnrevealedCards (0x7d5b898) is registered
         // on EndOfStagingTrigger before any staged cards resolve.
         for lane in 0..self.lanes.len() {
-            if self.lanes[lane].revealed
+            if self.location_abilities_active(lane)
                 && let Some(hook) = self.lanes[lane].def.on_staging_end
             {
-                hook(self, lane);
+                let _ = self.counted_trigger(|game| hook(game, lane));
             }
         }
     }
@@ -2511,13 +3349,15 @@ impl<'a> Game<'a> {
         self.location_staging_end();
         let pending = std::mem::take(&mut self.delayed_reveals);
         for seat in [priority, 1 - priority] {
-            for &card in &pending[seat] {
-                self.reveal(card);
+            for queued in &pending[seat] {
+                self.reveal_with_staging(queued.card, queued.staging);
             }
             let actions = std::mem::take(&mut self.players[seat].staged_actions);
             for staged in actions {
                 match staged.action {
-                    Action::Play { card, .. } => self.reveal(card),
+                    Action::Play { card, lane } => {
+                        self.reveal_with_staging(card, Some(StagingContext { seat, lane }));
+                    }
                     Action::Move { card, .. } => {
                         self.cards[card].move_staged = false;
                         // Card::CanResolveForMove (0x7cb9cbc) checks that both
@@ -2547,15 +3387,13 @@ impl<'a> Game<'a> {
                         {
                             self.cards[card].activated = true;
                             self.ongoing();
-                            if !self.cards[card].abilities_removed
-                                && self.card_triggers_allowed(card)
-                                && let Some(hook) = self.cards[card].ability_def().on_activate
-                            {
-                                hook(self, card);
+                            if self.card_triggers_allowed(card) {
+                                self.dispatch_card_activation(card);
                             }
                             self.emit(Event::CardActivated { card });
                         }
                     }
+                    Action::Return { .. } => unreachable!("returns undo a staged action"),
                 }
             }
         }
@@ -2573,7 +3411,10 @@ impl<'a> Game<'a> {
         let Some(source) = self.cards[card].lane else {
             return false;
         };
-        if (self.cards[card].revealed && self.cards[card].ability_def().immune_destroy_move)
+        if (self.cards[card].revealed
+            && self.cards[card]
+                .ongoing_guard_abilities()
+                .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move))
             || destination >= 3
             || source == destination
             || !self.has_space(destination, self.cards[card].owner, 0)
@@ -2584,14 +3425,14 @@ impl<'a> Game<'a> {
             return false;
         }
         if !self.jeff_unrestricted(card)
-            && self.lanes[source].revealed
+            && self.location_abilities_active(source)
             && let Some(test) = self.lanes[source].def.allows_move_from
             && !test(self, source, card, destination, self.cards[card].owner)
         {
             return false;
         }
         if !self.jeff_unrestricted(card)
-            && self.lanes[destination].revealed
+            && self.location_abilities_active(destination)
             && let Some(test) = self.lanes[destination].def.allows_addition
             && !test(self, destination, card, destination, self.cards[card].owner)
         {
@@ -2607,9 +3448,9 @@ impl<'a> Game<'a> {
         if self.cards[card].lane != Some(source) {
             return false;
         }
-        self.lanes[source].cards.retain(|&id| id != card);
+        self.detach_location(source, card);
         self.cards[card].last_lane = Some(source);
-        self.lanes[destination].cards.push(card);
+        self.push_location(destination, card);
         self.cards[card].lane = Some(destination);
         self.finish_move(card, source, destination);
         true
@@ -2622,9 +3463,9 @@ impl<'a> Game<'a> {
         self.cards[card].move_turns.push(self.turn);
         if self.cards[card].revealed
             && self.card_triggers_allowed(card)
-            && let Some(hook) = self.cards[card].ability_def().on_move
+            && let Some(hook) = self.cards[card].default_ability().on_move
         {
-            hook(self, card, source);
+            let _ = self.counted_trigger(|game| hook(game, card, source));
         }
         let abilities = std::mem::take(&mut self.cards[card].attached_abilities);
         for ability in abilities {
@@ -2633,7 +3474,7 @@ impl<'a> Game<'a> {
                 && let AttachedAbilityKind::MovePower { source, turn, hook } = ability.kind
                 && turn == self.turn
             {
-                hook(self, source, card);
+                let _ = self.counted_trigger(|game| hook(game, source, card));
             } else {
                 self.cards[card].attached_abilities.push(ability);
             }
@@ -2643,15 +3484,15 @@ impl<'a> Game<'a> {
             if observer != card
                 && self.cards[observer].revealed
                 && self.card_triggers_allowed(observer)
-                && let Some(hook) = self.cards[observer].ability_def().on_move_here
+                && let Some(hook) = self.cards[observer].default_ability().on_move_here
             {
-                hook(self, observer, card);
+                let _ = self.counted_trigger(|game| hook(game, observer, card));
             }
         }
-        if self.lanes[destination].revealed
+        if self.location_abilities_active(destination)
             && let Some(hook) = self.lanes[destination].def.on_card_moved
         {
-            hook(self, destination, card, source);
+            let _ = self.counted_trigger(|game| hook(game, destination, card, source));
         }
         self.emit(Event::CardMoved {
             card,
@@ -2662,14 +3503,14 @@ impl<'a> Game<'a> {
     }
     pub(crate) fn notify_added(&mut self, card: usize, lane: usize) {
         if self.card_triggers_allowed(card)
-            && let Some(hook) = self.cards[card].ability_def().on_added
+            && let Some(hook) = self.cards[card].default_ability().on_added
         {
-            hook(self, card);
+            let _ = self.counted_trigger(|game| hook(game, card));
         }
-        if self.lanes[lane].revealed
+        if self.location_abilities_active(lane)
             && let Some(hook) = self.lanes[lane].def.on_card_added
         {
-            hook(self, lane, card);
+            let _ = self.counted_trigger(|game| hook(game, lane, card));
         }
         self.emit(Event::CardAdded { card, lane });
     }
@@ -2679,7 +3520,9 @@ impl<'a> Game<'a> {
             || !self.lanes.iter().flat_map(|lane| &lane.cards).any(|&id| {
                 self.cards[id].revealed
                     && self.ongoing_active(id)
-                    && self.cards[id].ability_def().blocks_spawns
+                    && self.cards[id]
+                        .ongoing_guard_abilities()
+                        .any(|a| a.supports(AbilityKind::Ongoing) && a.def.blocks_spawns)
             })
     }
     pub fn can_add(&self, card: usize, lane: usize, seat: usize) -> bool {
@@ -2687,7 +3530,7 @@ impl<'a> Game<'a> {
             && self.has_space(lane, seat, 0)
             && self.spawns_allowed()
             && !self.lane_locked(lane)
-            && (!self.lanes[lane].revealed
+            && (!self.location_abilities_active(lane)
                 || self.lanes[lane]
                     .def
                     .allows_addition
@@ -2705,20 +3548,18 @@ impl<'a> Game<'a> {
             return false;
         }
         self.finish_creation_zone(card, false, seat);
-        for player in &mut self.players {
-            player.graveyard.retain(|&(id, _)| id != card);
-            player.graveyard_order.retain(|&id| id != card);
-        }
+        self.detach_graveyards(card);
         self.cards[card].owner = seat;
         self.cards[card].lane = Some(lane);
         self.cards[card].turn_played = 0;
         self.cards[card].revealed = false;
-        self.lanes[lane].cards.push(card);
+        self.push_location(lane, card);
         self.notify_added(card, lane);
         if trigger_reveal {
             self.reveal(card);
         } else {
             self.cards[card].revealed = true;
+            self.cards[card].turn_revealed = Some(self.turn);
             self.ongoing();
         }
         true
@@ -2730,15 +3571,12 @@ impl<'a> Game<'a> {
             return false;
         }
         self.finish_creation_zone(card, false, seat);
-        for player in &mut self.players {
-            player.graveyard.retain(|&(id, _)| id != card);
-            player.graveyard_order.retain(|&id| id != card);
-        }
+        self.detach_graveyards(card);
         self.cards[card].owner = seat;
         self.cards[card].lane = Some(lane);
         self.cards[card].turn_played = 0;
         self.cards[card].revealed = false;
-        self.lanes[lane].cards.push(card);
+        self.push_location(lane, card);
         self.notify_added(card, lane);
         self.deferred_added_reveals.push(card);
         true
@@ -2804,7 +3642,7 @@ impl<'a> Game<'a> {
         }
         self.finish_creation_zone(card, !from_deck, seat);
         self.cards[card].owner = seat;
-        self.players[seat].hand.push(card);
+        self.push_hand(seat, card);
         if from_deck {
             self.cards[card].drawn_turn = Some(self.turn);
             self.cards[card].draw_extends_quickdraw = false;
@@ -2816,6 +3654,9 @@ impl<'a> Game<'a> {
         self.ongoing();
         if from_deck {
             self.emit(Event::CardDrawn { card, seat });
+            if !cards::reference_rules_enabled() {
+                self.ongoing();
+            }
         }
         true
     }
@@ -2826,7 +3667,7 @@ impl<'a> Game<'a> {
         }
         self.finish_creation_zone(card, true, seat);
         self.cards[card].owner = seat;
-        self.players[seat].hand.push(card);
+        self.push_hand(seat, card);
         self.ongoing();
         true
     }
@@ -2840,9 +3681,9 @@ impl<'a> Game<'a> {
             .collect();
         for observer in observers {
             if self.card_triggers_allowed(observer)
-                && let Some(hook) = self.cards[observer].ability_def().on_hand_added
+                && let Some(hook) = self.cards[observer].default_ability().on_hand_added
             {
-                hook(self, observer, seat);
+                let _ = self.counted_trigger(|game| hook(game, observer, seat));
             }
         }
     }
@@ -2863,10 +3704,10 @@ impl<'a> Game<'a> {
                 .collect();
             for observer in observers {
                 if self.card_triggers_allowed(observer)
-                    && let Some(hook) = self.cards[observer].ability_def().on_hand_added
+                    && let Some(hook) = self.cards[observer].default_ability().on_hand_added
                 {
                     for _ in 0..count {
-                        hook(self, observer, seat);
+                        let _ = self.counted_trigger(|game| hook(game, observer, seat));
                     }
                 }
             }
@@ -2881,7 +3722,7 @@ impl<'a> Game<'a> {
         if self.lane_locked(lane) {
             return false;
         }
-        self.lanes[lane].cards.retain(|&id| id != card);
+        self.detach_location(lane, card);
         self.cards[card].last_lane = Some(lane);
         self.cards[card].lane = None;
         self.cards[card].revealed = false;
@@ -2891,7 +3732,7 @@ impl<'a> Game<'a> {
         self.cards[card]
             .attached_abilities
             .retain(|a| !matches!(a.kind, AttachedAbilityKind::Watch { .. }));
-        if let Some(clear) = self.cards[card].ability_def().clear_reveal_state {
+        if let Some(clear) = self.cards[card].default_ability().clear_reveal_state {
             clear(&mut self.cards[card]);
         }
         self.ongoing();
@@ -2927,7 +3768,8 @@ impl<'a> Game<'a> {
             .iter()
             .position(|&id| id == card)
             .expect("discard card must be in hand");
-        self.players[seat].hand.remove(slot);
+        self.take_hand(seat, slot);
+        self.transition_card_zone(card, crate::zones::CardZone::Discard(seat));
         // MorbiusBehavior::GetPowerChange 0x7f01d3c and
         // ColonelAmericaBehavior::UpdateDiscardTurnCount 0x7e82934 use events,
         // not the mutable discard zone. Record before the card's discard hook.
@@ -2938,10 +3780,10 @@ impl<'a> Game<'a> {
             lane: None,
         });
         self.players[seat].graveyard_order.push(card);
-        if let Some(hook) = self.cards[card].ability_def().on_discard {
-            hook(self, card);
+        if let Some(hook) = self.cards[card].default_ability().on_discard {
+            let _ = self.counted_trigger(|game| hook(game, card));
         } else {
-            self.players[seat].discard.push(card);
+            self.push_discard(seat, card);
         }
         if !self.players[seat].discard.contains(&card)
             && !self.players[seat]
@@ -2962,18 +3804,15 @@ impl<'a> Game<'a> {
             return false;
         }
         if let Some(lane) = self.cards[card].lane.take() {
-            self.lanes[lane].cards.retain(|&id| id != card);
+            self.detach_location(lane, card);
             self.cards[card].last_lane = Some(lane);
         }
-        for player in &mut self.players {
-            player.hand.retain(|&id| id != card);
-            player.deck.retain(|&id| id != card);
-            player.discard.retain(|&id| id != card);
-            player.graveyard.retain(|&(id, _)| id != card);
-            player.graveyard_order.retain(|&id| id != card);
-        }
-        self.players[owner].banished.push(card);
+        self.detach_player_zones(card);
+        self.push_banished(owner, card);
         self.ongoing();
+        for seat in 0..2 {
+            self.trigger_player_effects(seat, PlayerTrigger::CardBanished, Some(card));
+        }
         true
     }
 
@@ -2996,7 +3835,7 @@ impl<'a> Game<'a> {
             return false;
         }
         self.cards[card].state = self.cards[card]
-            .ability_def()
+            .default_ability()
             .initial_state
             .map(|init| init());
         self.cards[card]
@@ -3049,17 +3888,24 @@ impl<'a> Game<'a> {
         if self.cards[card].revealed && self.thanos_stone_active(card, "SoulStone") {
             return false;
         }
-        if self.cards[card].revealed && self.cards[card].ability_def().immune_destroy_move {
+        if self.cards[card].revealed
+            && self.cards[card]
+                .ongoing_guard_abilities()
+                .any(|a| a.supports(AbilityKind::Ongoing) && a.def.immune_destroy_move)
+        {
             return false;
         }
-        if self.lane_locked(lane) || (self.lanes[lane].revealed && self.lanes[lane].def.no_destroy)
+        if self.lane_locked(lane)
+            || (self.location_abilities_active(lane) && self.lanes[lane].def.no_destroy)
         {
             return false;
         }
         if self.lanes[lane].cards.iter().any(|&id| {
             self.cards[id].revealed
                 && self.ongoing_active(id)
-                && self.cards[id].ability_def().prevents_destroy
+                && self.cards[id]
+                    .ongoing_guard_abilities()
+                    .any(|a| a.supports(AbilityKind::Ongoing) && a.def.prevents_destroy)
         }) {
             return false;
         }
@@ -3072,9 +3918,13 @@ impl<'a> Game<'a> {
                 self.cards[source].revealed
                     && self.ongoing_active(source)
                     && self.cards[source]
-                        .ability_def()
-                        .destroy_guard
-                        .is_some_and(|guard| !guard(self, source, card))
+                        .ongoing_guard_abilities()
+                        .filter(|a| a.supports(AbilityKind::Ongoing))
+                        .any(|a| {
+                            a.def
+                                .destroy_guard
+                                .is_some_and(|guard| !guard(self, source, card))
+                        })
             })
         {
             return false;
@@ -3092,11 +3942,9 @@ impl<'a> Game<'a> {
             power: self.cards[card].power(),
             lane: Some(lane),
         });
-        self.lanes[lane].cards.retain(|&id| id != card);
+        self.detach_location(lane, card);
         self.cards[card].last_lane = Some(lane);
-        self.players[self.cards[card].owner]
-            .graveyard
-            .push((card, Some(lane)));
+        self.push_graveyard(owner, card, Some(lane));
         self.players[owner].graveyard_order.push(card);
         if let Some(destroyed) = &mut self.destroyed {
             destroyed.push((card, lane));
@@ -3104,9 +3952,9 @@ impl<'a> Game<'a> {
         self.cards[card].lane = None;
         if self.cards[card].revealed
             && !self.cards[card].abilities_removed
-            && let Some(hook) = self.cards[card].ability_def().on_destroy
+            && let Some(hook) = self.cards[card].default_ability().on_destroy
         {
-            hook(self, card);
+            let _ = self.counted_trigger(|game| hook(game, card));
         }
         self.emit(Event::CardDestroyed { card, lane });
         if !self.lanes[lane].destroyed {
@@ -3137,13 +3985,18 @@ impl<'a> Game<'a> {
         self.draw_from_deck(seat, seat);
     }
     pub fn start_turn(&mut self) {
+        if !cards::reference_rules_enabled() {
+            self.is_wait_for_staging = false;
+        }
         self.is_start_turn = true;
+        self.expire_location_silence(false);
         for player in &mut self.players {
             player.energy_spent_this_turn = 0;
         }
         for card in &mut self.cards {
             card.observed_can_activate = None;
             card.observed_move_targets = None;
+            card.external_moves.retain(|grant| grant.end >= self.turn);
         }
         self.played_on_reveal = [false; 2];
         self.delays_reveals = false;
@@ -3153,6 +4006,7 @@ impl<'a> Game<'a> {
                 seat,
                 i32::from(self.turn) + self.players[seat].default_energy_offset + permanent_energy,
             );
+            self.trigger_player_effects(seat, PlayerTrigger::StartTurn, None);
             let bonus: i32 = self.players[seat]
                 .scheduled_energy
                 .iter()
@@ -3167,32 +4021,52 @@ impl<'a> Game<'a> {
             }
             self.draw(seat);
         }
-        // Python: reveal the next scheduled lane unless it was already revealed.
-        if self.current_location < usize::from(self.turn).min(self.lanes.len()) {
-            let lane = self.location_reveal_order[self.current_location];
-            self.current_location += 1;
-            if !self.lanes[lane].revealed && !self.lanes[lane].destroyed {
-                self.lanes[lane].revealed = true;
-                self.lanes[lane].revealed_turn = Some(self.turn);
-                self.delays_reveals |= self.lanes[lane].def.delays_reveals;
-                self.emit(Event::LocationRevealed { lane });
-                if let Some(hook) = self.lanes[lane].def.on_reveal {
-                    hook(self, lane);
+        let copied_schedule = self
+            .lanes
+            .iter()
+            .any(|lane| lane.copied_reveal_turn.is_some());
+        if copied_schedule {
+            let scheduled = if self.current_location < usize::from(self.turn).min(self.lanes.len())
+            {
+                let lane = self.location_reveal_order[self.current_location];
+                self.current_location += 1;
+                Some(lane)
+            } else {
+                None
+            };
+            // Game::ActivateTriggerAbility (0x7da93a0) visits the location
+            // list in order for StartOfTurn, including simultaneous reveals.
+            self.end_turn_lane_order = Some([0, 1, 2]);
+            for original in 0..self.lanes.len() {
+                let lane = self.end_turn_lane_order.unwrap()[original];
+                let copied = self.lanes[lane].copied_reveal_turn;
+                if copied.is_some_and(|turn| turn <= self.turn)
+                    || (copied.is_none() && scheduled == Some(original))
+                {
+                    self.reveal_scheduled_location(lane);
                 }
-                self.set_total_turns(self.total_turns.max(self.lanes[lane].def.minimum_turns));
-                for seat in 0..2 {
-                    let energy = self.players[seat].energy + self.lanes[lane].def.reveal_energy;
-                    self.set_energy(seat, energy);
+                if self.location_abilities_active(lane)
+                    && let Some(hook) = self.lanes[lane].def.on_turn_start
+                {
+                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    self.ongoing();
                 }
             }
+            self.end_turn_lane_order = None;
+        } else if self.current_location < usize::from(self.turn).min(self.lanes.len()) {
+            let lane = self.location_reveal_order[self.current_location];
+            self.current_location += 1;
+            self.reveal_scheduled_location(lane);
         }
         self.ongoing();
-        for lane in 0..3 {
-            if self.lanes[lane].revealed
-                && let Some(hook) = self.lanes[lane].def.on_turn_start
-            {
-                hook(self, lane);
-                self.ongoing();
+        if !copied_schedule {
+            for lane in 0..3 {
+                if self.location_abilities_active(lane)
+                    && let Some(hook) = self.lanes[lane].def.on_turn_start
+                {
+                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    self.ongoing();
+                }
             }
         }
         let observers: Vec<_> = self
@@ -3202,13 +4076,28 @@ impl<'a> Game<'a> {
             .filter(|&id| self.cards[id].revealed)
             .collect();
         for id in observers {
-            if let Some(hook) = self.cards[id].ability_def().start_turn {
-                hook(self, id);
+            if !self.card_triggers_allowed(id) {
+                continue;
+            }
+            let default = self.cards[id].default_ability();
+            let attached: Vec<_> = self.cards[id]
+                .composed_abilities
+                .iter()
+                .filter(|ability| ability.kind == AbilityKind::Trigger)
+                .filter_map(|ability| ability.def.start_turn.map(|hook| (ability.id, hook)))
+                .collect();
+            if !self.cards[id].abilities_removed
+                && let Some(hook) = default.start_turn
+            {
+                self.execute_default_ability(id, hook);
+            }
+            for (instance, hook) in attached {
+                self.execute_ability(id, instance, hook);
             }
         }
         for seat in 0..2 {
             for lane in 0..3 {
-                if self.lanes[lane].revealed
+                if self.location_abilities_active(lane)
                     && let Some(hook) = self.lanes[lane].def.energy_bonus
                 {
                     let energy = self.players[seat].energy + hook(self, lane, seat);
@@ -3221,23 +4110,47 @@ impl<'a> Game<'a> {
             .iter()
             .flat_map(|lane| lane.cards.iter().copied())
             .filter(|&id| {
-                self.cards[id].revealed && self.cards[id].ability_def().post_start_turn.is_some()
+                self.cards[id].revealed
+                    && self.cards[id].default_ability().post_start_turn.is_some()
             })
             .collect();
         for id in observers {
             if self.cards[id].lane.is_some()
                 && self.cards[id].revealed
                 && !self.cards[id].abilities_removed
-                && let Some(hook) = self.cards[id].ability_def().post_start_turn
+                && let Some(hook) = self.cards[id].default_ability().post_start_turn
             {
-                hook(self, id);
+                let _ = self.counted_trigger(|game| hook(game, id));
             }
         }
         self.emit(Event::TurnStart);
+        // StartTurn::TriggerStartOfTurn and TriggerPostStartOfTurn refresh
+        // ongoing stats (0x7e4a36c, 0x7e4ab00).
+        if !cards::reference_rules_enabled() {
+            self.ongoing();
+        }
         self.is_start_turn = false;
         self.is_wait_for_staging = true;
     }
     pub fn powers(&self) -> [[i32; 2]; 3] {
+        let mut totals = self.raw_location_powers();
+        if self.score_overrides == [None; 2] {
+            return totals;
+        }
+        for (lane, powers) in totals.iter_mut().enumerate() {
+            if !self.lanes[lane].destroyed {
+                for (seat, value) in powers.iter_mut().enumerate() {
+                    if let Some(override_power) = self.score_overrides[seat] {
+                        *value = override_power;
+                    }
+                }
+            }
+        }
+        totals
+    }
+
+    /// Raw calculated totals ignore score overrides but include Nexus contributions.
+    pub(crate) fn raw_location_powers(&self) -> [[i32; 2]; 3] {
         let base: [[i32; 2]; 3] = std::array::from_fn(|lane| {
             if self.lanes[lane].destroyed {
                 return [0, 0];
@@ -3257,7 +4170,13 @@ impl<'a> Game<'a> {
         // contribution uses the unmodified lane total, not other Nexus bonuses.
         let mut result = base;
         for (source, location) in self.lanes.iter().enumerate() {
-            if location.revealed && location.def.contributes_to_other_lanes {
+            if location.def.contributes_to_other_lanes
+                && if cards::reference_rules_enabled() {
+                    location.revealed
+                } else {
+                    self.location_abilities_active(source)
+                }
+            {
                 for (destination, totals) in result.iter_mut().enumerate() {
                     if source != destination && !self.lanes[destination].destroyed {
                         for seat in 0..2 {
@@ -3277,11 +4196,16 @@ impl<'a> Game<'a> {
 
     fn lane_winner_with_power(&self, lane: usize, power: [i32; 2]) -> Option<usize> {
         let location = &self.lanes[lane];
-        if location.destroyed || (location.revealed && location.def.id == "Cancun") {
+        let active = if cards::reference_rules_enabled() {
+            location.revealed
+        } else {
+            self.location_abilities_active(lane)
+        };
+        if location.destroyed || (active && location.def.id == "Cancun") {
             return None;
         }
         let ordering = power[0].cmp(&power[1]);
-        let ordering = if location.revealed && location.def.id == "BarWithNoName" {
+        let ordering = if active && location.def.id == "BarWithNoName" {
             ordering.reverse()
         } else {
             ordering
@@ -3304,7 +4228,12 @@ impl<'a> Game<'a> {
             // GenerateGameResultDataByPowerGameBehavior::Get 0x7dce440
             // excludes a forced-tie lane from the power tiebreak.
             if !self.lanes[lane].destroyed
-                && !(self.lanes[lane].revealed && self.lanes[lane].def.id == "Cancun")
+                && !(self.lanes[lane].def.id == "Cancun"
+                    && if cards::reference_rules_enabled() {
+                        self.lanes[lane].revealed
+                    } else {
+                        self.location_abilities_active(lane)
+                    })
             {
                 total[0] += p[0];
                 total[1] += p[1];
@@ -3318,10 +4247,522 @@ impl<'a> Game<'a> {
             2
         }
     }
+    fn client_ongoing_metadata(
+        def: &'static CardDef,
+        hand: bool,
+    ) -> &'static cards::ongoing_priorities::OngoingMetadata {
+        // The client commonly labels the stat-changing hand ability "Ongoing";
+        // a second "InHandOngoing" on the same card may only produce VFX.
+        cards::ongoing_priorities::ONGOING_PRIORITIES
+            .iter()
+            .find(|row| row.0 == def.id && row.2 == "Ongoing")
+            .or_else(|| {
+                hand.then(|| {
+                    cards::ongoing_priorities::ONGOING_PRIORITIES
+                        .iter()
+                        .find(|row| row.0 == def.id && row.2 == "InHandOngoing")
+                })
+                .flatten()
+            })
+            .unwrap_or_else(|| panic!("missing ongoing stat priority for {}", def.id))
+    }
+
+    fn clear_ongoing_source(&mut self, source: OngoingSource) -> Vec<(usize, Vec<usize>)> {
+        let mut positions = Vec::new();
+        for (id, card) in self.cards.iter_mut().enumerate() {
+            let indices: Vec<_> = card
+                .stat_updates
+                .iter()
+                .enumerate()
+                .filter_map(|(index, update)| {
+                    (update.ongoing_source == Some(source)).then_some(index)
+                })
+                .collect();
+            if indices.is_empty() {
+                continue;
+            }
+            let mut power = 0;
+            card.stat_updates.retain(|update| {
+                if update.ongoing_source != Some(source) {
+                    return true;
+                }
+                if update.stat == Stat::Power {
+                    power += update.value;
+                }
+                false
+            });
+            card.ongoing -= power;
+            Self::recalculate_ongoing_cost(card);
+            positions.push((id, indices));
+        }
+        positions
+    }
+
+    fn recalculate_ongoing_cost(card: &mut Card) {
+        let mut cost = card.cost;
+        for update in card
+            .stat_updates
+            .iter()
+            .filter(|update| update.ongoing && update.stat == Stat::Cost)
+        {
+            cost = match update.operation {
+                StatOperation::Add => cost + update.value,
+                StatOperation::Multiply => cost * update.value,
+                StatOperation::Set => update.value,
+            };
+        }
+        card.ongoing_cost = cost - card.cost;
+    }
+
+    fn restore_ongoing_positions(
+        &mut self,
+        source: OngoingSource,
+        positions: Vec<(usize, Vec<usize>)>,
+    ) {
+        for (id, indices) in positions {
+            let card = &mut self.cards[id];
+            let mut replacements = Vec::new();
+            card.stat_updates.retain(|update| {
+                if update.ongoing_source == Some(source) {
+                    replacements.push(*update);
+                    false
+                } else {
+                    true
+                }
+            });
+            for (ordinal, update) in replacements.into_iter().enumerate() {
+                let index = indices
+                    .get(ordinal)
+                    .copied()
+                    .unwrap_or_else(|| indices[indices.len() - 1] + ordinal + 1 - indices.len());
+                card.stat_updates
+                    .insert(index.min(card.stat_updates.len()), update);
+            }
+            Self::recalculate_ongoing_cost(card);
+        }
+    }
+
+    fn activate_scheduled_ongoing(&mut self, scheduled: ScheduledOngoing) -> bool {
+        let ScheduledOngoing {
+            card,
+            instance,
+            hook,
+            runs,
+            hand,
+        } = scheduled;
+        let source = OngoingSource::Card {
+            card,
+            instance,
+            hand,
+        };
+        let positions = if self.is_wait_for_staging {
+            self.clear_ongoing_source(source)
+        } else {
+            Vec::new()
+        };
+        let lane_positions = if self.is_wait_for_staging {
+            self.take_lane_contributions(source)
+        } else {
+            Vec::new()
+        };
+        let previous_source = self.current_ongoing_source.replace(source);
+        let mut succeeded = false;
+        for _ in 0..runs {
+            let mut action_result = false;
+            let action = |game: &mut Self, card| {
+                action_result = match hook {
+                    ScheduledOngoingHook::Ordinary(hook) => {
+                        hook(game, card);
+                        true
+                    }
+                    ScheduledOngoingHook::Conditional(hook) => hook(game, card),
+                };
+            };
+            let executed = if let Some(instance) = instance {
+                self.execute_ability(card, instance, action)
+            } else {
+                self.execute_default_ability(card, action)
+            };
+            succeeded = executed && action_result;
+        }
+        self.current_ongoing_source = previous_source;
+        self.restore_ongoing_positions(source, positions);
+        self.restore_lane_contributions(source, lane_positions);
+        succeeded
+    }
+
+    fn run_client_ongoing_card(
+        &mut self,
+        card: usize,
+        priority: u8,
+        hand: bool,
+        runs: usize,
+        pending: &mut Vec<PendingConditional>,
+    ) {
+        let hooks: Vec<_> = self.cards[card]
+            .abilities()
+            .filter(|ability| ability.supports(AbilityKind::Ongoing))
+            .filter(|ability| ability.id.is_some() || !self.cards[card].abilities_removed)
+            .filter_map(|ability| {
+                let hook = if hand {
+                    ability
+                        .def
+                        .conditional_in_hand_ongoing
+                        .map(ScheduledOngoingHook::Conditional)
+                        .or_else(|| {
+                            ability
+                                .def
+                                .in_hand_ongoing
+                                .or(ability.def.late_in_hand_ongoing)
+                                .map(ScheduledOngoingHook::Ordinary)
+                        })
+                } else {
+                    ability
+                        .def
+                        .late_ongoing
+                        .map(ScheduledOngoingHook::Conditional)
+                        .or_else(|| ability.def.ongoing.map(ScheduledOngoingHook::Ordinary))
+                }?;
+                let metadata = Self::client_ongoing_metadata(ability.def, hand);
+                let staged_play = self.players.iter().any(|player| {
+                    player
+                        .staged_history
+                        .iter()
+                        .any(|play| play.card == card && play.turn == self.turn && !play.resolved)
+                });
+                (metadata.3 == priority
+                    && (!self.is_wait_for_staging || metadata.4)
+                    && (!staged_play || metadata.5)
+                    && (!self.cards[card].move_staged || metadata.6))
+                    .then_some(ScheduledOngoing {
+                        card,
+                        instance: ability.id,
+                        hook,
+                        runs,
+                        hand,
+                    })
+            })
+            .collect();
+        for scheduled in hooks {
+            if !self.activate_scheduled_ongoing(scheduled)
+                && matches!(scheduled.hook, ScheduledOngoingHook::Conditional(_))
+            {
+                pending.push(PendingConditional::Card(scheduled));
+            }
+        }
+    }
+
+    // AbilitySystem::UpdateOngoingStats 0x7c94474: Init, modifiers,
+    // Default, ConditionalCard, ConditionalLocation, PostConditional.
+    fn client_ongoing(&mut self) {
+        let staging = self.is_wait_for_staging;
+        // Card::ClearOngoingStatsWhileStaging 0x7cb4cec clears only
+        // movement/play restriction caches. Those guards are evaluated on
+        // demand here, so there are no equivalent cached fields to clear.
+        if !staging {
+            self.score_overrides = [None; 2];
+            for lane in &mut self.lanes {
+                lane.bonus = [0; 2];
+                lane.contributions.clear();
+                lane.multiplier = [1; 2];
+            }
+            for card in &mut self.cards {
+                card.ongoing = 0;
+                card.ongoing_cost = 0;
+                card.location_power = 0;
+                card.stat_updates.retain(|update| !update.ongoing);
+            }
+        }
+        let copied = self.prepare_copied_ongoing();
+        for priority in [1, 0, 2, 3, 4] {
+            let mut pending = Vec::new();
+            if !staging && priority == 0 {
+                for card in 0..self.cards.len() {
+                    self.cards[card].ongoing += self.luke_power_correction(card);
+                }
+            }
+            // ActivateOngoingAbilities visits each player's abilities in attachment order.
+            for seat in 0..2 {
+                for index in 0..self.players[seat].cost_effects.len() {
+                    let effect = self.players[seat].cost_effects[index];
+                    let (order, active_staging, _, _) = effect.kind.ongoing_schedule();
+                    if order != priority || (staging && !active_staging) {
+                        continue;
+                    }
+                    let previous_source =
+                        self.current_ongoing_source.replace(OngoingSource::Player {
+                            seat,
+                            sequence: effect.sequence,
+                        });
+                    match effect.kind {
+                        PlayerCostEffectKind::Sandman { turn } if turn == self.turn => {
+                            for hand_index in 0..self.players[seat].hand.len() {
+                                let card = self.players[seat].hand[hand_index];
+                                let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
+                                self.add_ongoing_cost(
+                                    card,
+                                    (cost + 1).min(cost.max(6)) - cost,
+                                    seat,
+                                );
+                            }
+                        }
+                        PlayerCostEffectKind::BaronMordo { card, until, value }
+                            if self.turn <= until =>
+                        {
+                            self.set_ongoing_cost(card, value, seat);
+                        }
+                        PlayerCostEffectKind::BlackSwan {
+                            until,
+                            printed_cost,
+                            value,
+                        } if self.turn <= until => {
+                            for hand_index in 0..self.players[seat].hand.len() {
+                                let card = self.players[seat].hand[hand_index];
+                                if self.printed_cost(card) == printed_cost {
+                                    self.set_ongoing_cost(card, value, seat);
+                                }
+                            }
+                        }
+                        // Skill01DrDoomChampionBehavior::.cctor (0x7d09b34)
+                        // assigns its player-owned cost setter priority 4.
+                        PlayerCostEffectKind::ChampionDoom { turn } if turn == self.turn => {
+                            for hand_index in 0..self.players[seat].hand.len() {
+                                let card = self.players[seat].hand[hand_index];
+                                if self.printed_cost(card) == 6 {
+                                    self.set_ongoing_cost(card, 3, seat);
+                                }
+                            }
+                        }
+                        PlayerCostEffectKind::Wave { until } if self.turn <= until => {
+                            for hand_index in 0..self.players[seat].hand.len() {
+                                let card = self.players[seat].hand[hand_index];
+                                let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
+                                self.set_ongoing_cost(card, cost.min(4), seat);
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.current_ongoing_source = previous_source;
+                }
+            }
+            for lane in 0..3 {
+                let location = self.lanes[lane].def;
+                if !self.location_abilities_active(lane)
+                    || !locations::ongoing_stat_schedule(location.id).is_some_and(
+                        |(order, active_staging, _, _)| {
+                            order == priority && (!staging || active_staging)
+                        },
+                    )
+                {
+                    continue;
+                }
+                let previous_source = self
+                    .current_ongoing_source
+                    .replace(OngoingSource::Location { lane });
+                if let Some(hook) = location.modify_cost {
+                    for seat in 0..2 {
+                        for index in 0..self.players[seat].hand.len() {
+                            let card = self.players[seat].hand[index];
+                            let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
+                            let next = hook(self, lane, card, cost);
+                            self.add_ongoing_cost(card, next - cost, seat);
+                        }
+                    }
+                }
+                for index in 0..self.lanes[lane].cards.len() {
+                    let card = self.lanes[lane].cards[index];
+                    if self.cards[card].revealed
+                        && location.power != 0
+                        && (location.power >= 0 || self.can_reduce_card_power(card))
+                    {
+                        self.add_location_power(card, location.power);
+                    }
+                }
+                if let Some(hook) = location.ongoing {
+                    let _ = self.counted_trigger(|game| hook(game, lane));
+                }
+                if let Some(hook) = location.conditional_ongoing
+                    && !self
+                        .counted_trigger(|game| hook(game, lane))
+                        .unwrap_or(false)
+                {
+                    pending.push(PendingConditional::Location { lane, hook });
+                }
+                self.current_ongoing_source = previous_source;
+            }
+            // Tribunal declares PlayOngoingAbilityBeforeCards = [OmegaRed].
+            for tribunal_first in [true, false] {
+                for lane in 0..3 {
+                    if !self.lane_ongoing_allowed(lane) {
+                        continue;
+                    }
+                    let base = if self.location_abilities_active(lane) {
+                        usize::from(self.lanes[lane].def.ongoing_repeats)
+                    } else {
+                        1
+                    };
+                    let mut extra = [0usize; 2];
+                    for &id in &self.lanes[lane].cards {
+                        if self.cards[id].revealed && self.cards[id].has_ongoing(true) {
+                            extra[self.cards[id].owner] += base
+                                * self.cards[id]
+                                    .abilities()
+                                    .filter(|ability| ability.supports(AbilityKind::Ongoing))
+                                    .filter(|ability| {
+                                        ability.id.is_some() || !self.cards[id].abilities_removed
+                                    })
+                                    .map(|ability| usize::from(ability.def.extra_ongoing_runs))
+                                    .sum::<usize>();
+                        }
+                    }
+                    for index in 0..self.lanes[lane].cards.len() {
+                        let card = self.lanes[lane].cards[index];
+                        if !self.cards[card].revealed || !self.cards[card].has_ongoing(true) {
+                            continue;
+                        }
+                        let tribunal = self.cards[card]
+                            .abilities()
+                            .any(|ability| ability.def.id == "LivingTribunal");
+                        if tribunal != tribunal_first {
+                            continue;
+                        }
+                        let own_extra: usize = self.cards[card]
+                            .abilities()
+                            .filter(|ability| ability.supports(AbilityKind::Ongoing))
+                            .filter(|ability| {
+                                ability.id.is_some() || !self.cards[card].abilities_removed
+                            })
+                            .map(|ability| usize::from(ability.def.extra_ongoing_runs))
+                            .sum();
+                        let runs = base + extra[self.cards[card].owner] - base * own_extra;
+                        self.run_client_ongoing_card(card, priority, false, runs, &mut pending);
+                    }
+                }
+            }
+            for seat in 0..2 {
+                for index in 0..self.players[seat].hand.len() {
+                    let card = self.players[seat].hand[index];
+                    self.run_client_ongoing_card(card, priority, true, 1, &mut pending);
+                    if !staging && priority == 0 {
+                        for effect_index in 0..self.cards[card].cost_effects.len() {
+                            let effect = self.cards[card].cost_effects[effect_index];
+                            let previous_source =
+                                self.current_ongoing_source
+                                    .replace(OngoingSource::CardCost {
+                                        card,
+                                        sequence: effect.sequence,
+                                    });
+                            match effect.kind {
+                                CardCostEffectKind::NextTurnDelta { turn, delta }
+                                    if turn == self.turn =>
+                                {
+                                    self.add_ongoing_cost(card, delta, seat);
+                                }
+                                CardCostEffectKind::TemporarySet { turn, value }
+                                    if turn == self.turn =>
+                                {
+                                    self.set_ongoing_cost(card, value, seat);
+                                }
+                                _ => {}
+                            }
+                            self.current_ongoing_source = previous_source;
+                        }
+                    }
+                    if !staging && priority == 4 {
+                        for effect_index in 0..self.cards[card].cost_effects.len() {
+                            let effect = self.cards[card].cost_effects[effect_index];
+                            if let CardCostEffectKind::WhiteQueenWinning { lane, seat: owner } =
+                                effect.kind
+                                && seat == owner
+                                && !self.lanes[lane].destroyed
+                                && self.lane_winner(lane) == Some(owner)
+                            {
+                                let previous =
+                                    self.current_ongoing_source
+                                        .replace(OngoingSource::CardCost {
+                                            card,
+                                            sequence: effect.sequence,
+                                        });
+                                self.add_ongoing_cost(card, -2, owner);
+                                self.current_ongoing_source = previous;
+                            }
+                        }
+                    }
+                    if !staging
+                        && priority == 4
+                        && !self.cards[card].abilities_removed
+                        && self.cards[card].default_ability().id == "SuperiorIronMan"
+                    {
+                        let previous_source =
+                            self.current_ongoing_source.replace(OngoingSource::Card {
+                                card,
+                                instance: None,
+                                hand: true,
+                            });
+                        let cost = self.card_cost(card);
+                        let next = self.double_cost_reductions(card, cost);
+                        self.add_ongoing_cost(card, next - cost, seat);
+                        self.current_ongoing_source = previous_source;
+                    }
+                }
+            }
+            // RerunConditionalOngoingAbilities 0x7c982e8 retries failed
+            // activations until a full traversal succeeds at none.
+            if matches!(priority, 2 | 3) {
+                loop {
+                    let mut succeeded = None;
+                    for (index, &scheduled) in pending.iter().enumerate() {
+                        let activated = match scheduled {
+                            PendingConditional::Card(card) => self.activate_scheduled_ongoing(card),
+                            PendingConditional::Location { lane, hook } => {
+                                let old = self
+                                    .current_ongoing_source
+                                    .replace(OngoingSource::Location { lane });
+                                let result = self
+                                    .counted_trigger(|game| hook(game, lane))
+                                    .unwrap_or(false);
+                                self.current_ongoing_source = old;
+                                result
+                            }
+                        };
+                        if activated {
+                            succeeded = Some(index);
+                            break;
+                        }
+                    }
+                    if let Some(index) = succeeded {
+                        pending.remove(index);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        self.finish_copied_ongoing(&copied);
+        for lane in 0..3 {
+            for index in 0..self.lanes[lane].cards.len() {
+                let id = self.lanes[lane].cards[index];
+                if !self.cards[id].abilities_removed
+                    && (self.cards[id].revealed || self.cards[id].turn_played > 0)
+                    && let Some(hook) = self.cards[id].default_ability().objective_update
+                {
+                    self.execute_default_ability(id, hook);
+                }
+            }
+        }
+        self.emit(Event::Ongoing);
+    }
+
     pub fn ongoing(&mut self) {
+        if !cards::reference_rules_enabled() {
+            self.client_ongoing();
+            return;
+        }
+        self.score_overrides = [None; 2];
         for lane in &mut self.lanes {
             lane.bonus = [0; 2];
             lane.multiplier = [1; 2];
+            lane.contributions.clear();
         }
         for card in &mut self.cards {
             card.ongoing = 0;
@@ -3336,14 +4777,14 @@ impl<'a> Game<'a> {
             for index in 0..self.players[seat].hand.len() {
                 let card = self.players[seat].hand[index];
                 if !self.cards[card].abilities_removed
-                    && let Some(hook) = self.cards[card].ability_def().in_hand_ongoing
+                    && let Some(hook) = self.cards[card].default_ability().in_hand_ongoing
                 {
-                    hook(self, card);
+                    let _ = self.counted_trigger(|game| hook(game, card));
                 }
             }
         }
         for lane in 0..3 {
-            if self.lanes[lane].revealed && self.lanes[lane].def.disables_ongoing {
+            if !self.lane_ongoing_allowed(lane) {
                 continue;
             }
             let base = if self.lanes[lane].revealed {
@@ -3353,21 +4794,21 @@ impl<'a> Game<'a> {
             };
             let mut extra = [0usize; 2];
             for &id in &self.lanes[lane].cards {
-                if self.cards[id].revealed && self.cards[id].has_ongoing() {
+                if self.cards[id].revealed && self.cards[id].has_ongoing(true) {
                     extra[self.cards[id].owner] +=
-                        base * usize::from(self.cards[id].ability_def().extra_ongoing_runs);
+                        base * usize::from(self.cards[id].default_ability().extra_ongoing_runs);
                 }
             }
             for index in 0..self.lanes[lane].cards.len() {
                 let id = self.lanes[lane].cards[index];
                 if self.cards[id].revealed
-                    && self.cards[id].has_ongoing()
-                    && let Some(hook) = self.cards[id].ability_def().ongoing
+                    && self.cards[id].has_ongoing(true)
+                    && let Some(hook) = self.cards[id].default_ability().ongoing
                 {
                     let runs = base + extra[self.cards[id].owner]
-                        - base * usize::from(self.cards[id].ability_def().extra_ongoing_runs);
+                        - base * usize::from(self.cards[id].default_ability().extra_ongoing_runs);
                     for _ in 0..runs {
-                        hook(self, id);
+                        let _ = self.counted_trigger(|game| hook(game, id));
                     }
                 }
             }
@@ -3385,12 +4826,31 @@ impl<'a> Game<'a> {
                     }
                 }
                 if let Some(hook) = self.lanes[lane].def.ongoing {
-                    hook(self, lane);
+                    let _ = self.counted_trigger(|game| hook(game, lane));
+                }
+                if let Some(hook) = self.lanes[lane].def.conditional_ongoing {
+                    let _ = self.counted_trigger(|game| hook(game, lane));
+                }
+            }
+        }
+        // SandmanBehavior::IncreaseCardCost (0x7f2e084): each effect adds
+        // one up to max(current cost, 6), to the current hand.
+        for seat in 0..2 {
+            let effects = self.players[seat].cost_effects.iter()
+                .filter(|effect| matches!(effect.kind, PlayerCostEffectKind::Sandman { turn } if turn == self.turn)).count();
+            for index in 0..self.players[seat].hand.len() {
+                let card = self.players[seat].hand[index];
+                for _ in 0..effects {
+                    let cost = self.card_cost(card);
+                    let next = (cost + 1).min(cost.max(6));
+                    if self.cost_change_allowed(card, cost, next) {
+                        self.cards[card].ongoing_cost += next - cost;
+                    }
                 }
             }
         }
         for lane in 0..3 {
-            if self.lanes[lane].revealed && self.lanes[lane].def.disables_ongoing {
+            if !self.lane_ongoing_allowed(lane) {
                 continue;
             }
             let base = if self.lanes[lane].revealed {
@@ -3400,21 +4860,21 @@ impl<'a> Game<'a> {
             };
             let mut extra = [0usize; 2];
             for &id in &self.lanes[lane].cards {
-                if self.cards[id].revealed && self.cards[id].has_ongoing() {
+                if self.cards[id].revealed && self.cards[id].has_ongoing(true) {
                     extra[self.cards[id].owner] +=
-                        base * usize::from(self.cards[id].ability_def().extra_ongoing_runs);
+                        base * usize::from(self.cards[id].default_ability().extra_ongoing_runs);
                 }
             }
             for index in 0..self.lanes[lane].cards.len() {
                 let id = self.lanes[lane].cards[index];
                 if self.cards[id].revealed
-                    && self.cards[id].has_ongoing()
-                    && let Some(hook) = self.cards[id].ability_def().late_ongoing
+                    && self.cards[id].has_ongoing(true)
+                    && let Some(hook) = self.cards[id].default_ability().late_ongoing
                 {
                     let runs = base + extra[self.cards[id].owner]
-                        - base * usize::from(self.cards[id].ability_def().extra_ongoing_runs);
+                        - base * usize::from(self.cards[id].default_ability().extra_ongoing_runs);
                     for _ in 0..runs {
-                        hook(self, id);
+                        let _ = self.counted_trigger(|game| hook(game, id));
                     }
                 }
             }
@@ -3423,9 +4883,16 @@ impl<'a> Game<'a> {
             for index in 0..self.players[seat].hand.len() {
                 let card = self.players[seat].hand[index];
                 if !self.cards[card].abilities_removed
-                    && let Some(hook) = self.cards[card].ability_def().late_in_hand_ongoing
+                    && let Some(hook) = self.cards[card].default_ability().late_in_hand_ongoing
                 {
-                    hook(self, card);
+                    let _ = self.counted_trigger(|game| hook(game, card));
+                }
+                if !self.cards[card].abilities_removed
+                    && let Some(hook) = self.cards[card]
+                        .default_ability()
+                        .conditional_in_hand_ongoing
+                {
+                    let _ = self.counted_trigger(|game| hook(game, card));
                 }
             }
         }
@@ -3434,9 +4901,9 @@ impl<'a> Game<'a> {
                 let id = self.lanes[lane].cards[index];
                 if !self.cards[id].abilities_removed
                     && (self.cards[id].revealed || self.cards[id].turn_played > 0)
-                    && let Some(hook) = self.cards[id].ability_def().objective_update
+                    && let Some(hook) = self.cards[id].default_ability().objective_update
                 {
-                    hook(self, id);
+                    self.execute_default_ability(id, hook);
                 }
             }
         }
@@ -3445,28 +4912,56 @@ impl<'a> Game<'a> {
     pub fn printed_cost(&self, card: usize) -> i32 {
         CATALOG[self.cards[card].def.id].cost
     }
+    pub(crate) fn printed_power(&self, card: usize) -> i32 {
+        CATALOG[self.cards[card].def.id].power
+    }
 
     pub fn trigger_on_reveal(&mut self, card: usize) {
-        let Some(hook) = self.cards[card].ability_def().reveal else {
-            return;
-        };
-        self.trigger_reveal_hook(card, hook);
+        let attached: Vec<_> = self.cards[card]
+            .composed_abilities
+            .iter()
+            .filter(|ability| ability.kind == AbilityKind::Reveal)
+            .filter_map(|ability| ability.def.reveal.map(|hook| (ability.id, hook)))
+            .collect();
+        self.trigger_text_reveal(card);
+        for (instance, hook) in attached {
+            self.execute_ability(card, instance, |game, card| {
+                game.trigger_reveal_hook(card, hook)
+            });
+        }
+    }
+    /// Card::ActivateTextResolveAbility (0x7cbb424) selects the first
+    /// resolve from GetDefaultAbilities (0x7cb1dcc), not foreign attachments.
+    pub(crate) fn trigger_text_reveal(&mut self, card: usize) {
+        if let Some(hook) = self.cards[card].default_ability().reveal {
+            let reentrant = self.cards[card]
+                .abilities()
+                .next()
+                .unwrap()
+                .resolve_reentrant(&self.cards[card]);
+            self.execute_default_resolve(card, reentrant, |game, card| {
+                game.trigger_reveal_hook(card, hook)
+            });
+        }
     }
     pub(crate) fn trigger_reveal_hook(&mut self, card: usize, hook: cards::CardHook) {
         let Some(lane) = self.cards[card].lane else {
             return;
         };
-        if self.cards[card].abilities_removed
-            || (self.lanes[lane].revealed && self.lanes[lane].def.disables_on_reveal)
-            || self.lanes[lane].cards.iter().any(|&id| {
-                self.cards[id].revealed
-                    && self.ongoing_active(id)
-                    && self.cards[id].ability_def().blocks_reveal
-            })
-        {
+        if (if cards::reference_rules_enabled() {
+            self.lanes[lane].revealed && self.lanes[lane].def.disables_on_reveal
+        } else {
+            !self.lanes[lane].ability_flags.on_reveal
+        }) || self.lanes[lane].cards.iter().any(|&id| {
+            self.cards[id].revealed
+                && self.ongoing_active(id)
+                && self.cards[id]
+                    .ongoing_guard_abilities()
+                    .any(|a| a.supports(AbilityKind::Ongoing) && a.def.blocks_reveal)
+        }) {
             return;
         }
-        let active = self.lanes[lane].revealed;
+        let active = self.location_abilities_active(lane);
         let ongoing_base = if active {
             usize::from(self.lanes[lane].def.ongoing_repeats)
         } else {
@@ -3481,7 +4976,11 @@ impl<'a> Game<'a> {
             if !self.cards[source].revealed || !self.ongoing_active(source) {
                 continue;
             }
-            if let Some(repetitions) = self.cards[source].ability_def().reveal_repetitions {
+            for repetitions in self.cards[source]
+                .ongoing_guard_abilities()
+                .filter(|a| a.supports(AbilityKind::Ongoing))
+                .filter_map(|a| a.def.reveal_repetitions)
+            {
                 let additional = usize::from(repetitions(self, source, card));
                 let extra: usize = self.lanes[lane]
                     .cards
@@ -3493,7 +4992,9 @@ impl<'a> Game<'a> {
                             && self.ongoing_active(other)
                             && self.cards[other].owner == self.cards[source].owner
                     })
-                    .map(|other| usize::from(self.cards[other].ability_def().extra_ongoing_runs))
+                    .flat_map(|other| self.cards[other].ongoing_guard_abilities())
+                    .filter(|a| a.supports(AbilityKind::Ongoing))
+                    .map(|a| usize::from(a.def.extra_ongoing_runs))
                     .sum();
                 runs += additional * ongoing_base * (1 + extra);
             }
@@ -3507,6 +5008,10 @@ impl<'a> Game<'a> {
         }
     }
     pub fn reveal(&mut self, id: usize) {
+        self.reveal_with_staging(id, None);
+    }
+
+    pub(crate) fn reveal_with_staging(&mut self, id: usize, staging: Option<StagingContext>) {
         let Some(lane) = self.cards[id].lane else {
             return;
         };
@@ -3522,14 +5027,38 @@ impl<'a> Game<'a> {
         }
         // DarkDimensionBehavior::MakeCardsHidden @ 0x7d4d94c stops
         // hiding cards once the client enters EndGame.
-        if self.delays_reveals
-            || (!self.ending_reveals
-                && self.lanes[lane].revealed
-                && self.lanes[lane].def.delays_reveals_until_end)
-        {
-            let pending = &mut self.delayed_reveals[self.cards[id].owner];
-            if !pending.contains(&id) {
-                pending.push(id);
+        let staging_owner = staging.map_or(self.cards[id].owner, |context| context.seat);
+        let owner_concealed = !self.ending_reveals
+            && (self.players[staging_owner]
+                .supergiant_hidden_turns
+                .iter()
+                .any(|&(turn, source)| turn == self.cards[id].turn_played && source != id)
+                || self.lanes[lane].cards.iter().copied().any(|source| {
+                    source != id
+                        && self.cards[source].owner == self.cards[id].owner
+                        && self.cards[source].revealed
+                        && self.ongoing_active(source)
+                        && self.cards[source].ongoing_guard_abilities().any(|ability| {
+                            ability.supports(AbilityKind::Ongoing)
+                                && ability.def.conceals_owner_cards
+                        })
+                }));
+        let lane_delayed = !self.ending_reveals
+            && self.location_abilities_active(lane)
+            && self.lanes[lane].def.delays_reveals_until_end;
+        if self.delays_reveals || owner_concealed || lane_delayed {
+            let owner = if cards::reference_rules_enabled() {
+                self.cards[id].owner
+            } else {
+                staging.map_or(self.cards[id].owner, |context| context.seat)
+            };
+            let pending = &mut self.delayed_reveals[owner];
+            if !pending.iter().any(|queued| queued.card == id) {
+                pending.push(QueuedReveal {
+                    card: id,
+                    staging,
+                    persistent: owner_concealed || lane_delayed,
+                });
             }
             return;
         }
@@ -3542,16 +5071,25 @@ impl<'a> Game<'a> {
             }
             left_moves = std::mem::take(&mut self.players[seat].pending_left_moves);
         }
-        if self.lanes[lane].revealed
+        if self.location_abilities_active(lane)
             && let Some(hook) = self.lanes[lane].def.before_card_reveal
         {
-            hook(self, lane, id);
+            let _ = self.counted_trigger(|game| hook(game, lane, id));
             if self.cards[id].lane.is_none() {
                 self.ongoing();
                 return;
             }
         }
         self.emit(Event::BeforeCardRevealed { card: id });
+        if self.cards[id].turn_played > 0
+            && let Some(context) = staging
+        {
+            self.emit(Event::StagedCardResolving {
+                card: id,
+                seat: context.seat,
+                lane: context.lane,
+            });
+        }
         if self.cards[id].lane.is_none() {
             return;
         }
@@ -3565,13 +5103,18 @@ impl<'a> Game<'a> {
                 return;
             }
         }
-        if self.cards[id].turn_played > 0 && self.cards[id].ability_def().reveal.is_some() {
+        // ThanosFracturedFrontierBehavior::SelfLoadShot 0x7cd7ec8 consumes
+        // PreCardResolvedTrigger, before this card's resolve abilities.
+        if self.cards[id].turn_played > 0 {
+            self.quickdraw_card_resolved(id, true);
+        }
+        if self.cards[id].turn_played > 0 && self.cards[id].default_ability().reveal.is_some() {
             self.played_on_reveal[self.cards[id].owner] = true;
         }
         if self.cards[id].turn_played > 0 {
             let seat = self.cards[id].owner;
-            if (self.cards[id].ability_def().move_limit > 0
-                || self.cards[id].ability_def().move_each_turn
+            if (self.cards[id].default_ability().move_limit > 0
+                || self.cards[id].default_ability().move_each_turn
                 || self.matching_move_grant(id, seat, None).is_some())
                 && !self.players[seat].movable_cards_played.contains(&id)
             {
@@ -3580,8 +5123,15 @@ impl<'a> Game<'a> {
         }
         // Card::ResolveForPlay @ 0x7cb9d90 can change the card's owner while
         // resolving; the play remains attributed to the staging player.
-        let staging_owner = self.cards[id].owner;
+        let staging_owner = if cards::reference_rules_enabled() {
+            self.cards[id].owner
+        } else {
+            staging.map_or(self.cards[id].owner, |context| context.seat)
+        };
         let was_played = self.cards[id].turn_played > 0;
+        let resolved_def_id = self.cards[id].def.id;
+        let resolved_printed_cost = self.printed_cost(id);
+        let resolved_lane = self.cards[id].lane;
         let post_resolve_start = self.post_resolve_plays.len();
         self.cards[id].latest_resolution_order = self.next_resolution_order;
         self.next_resolution_order += 1;
@@ -3592,6 +5142,7 @@ impl<'a> Game<'a> {
             self.players[staging_owner].on_reveal_cards_played += 1;
         }
         self.cards[id].revealed = true;
+        self.cards[id].turn_revealed = Some(self.turn);
         // ResolveForPlay (0x7cb9d90) updates ongoing after SetRevealed;
         // TriggerAbility::Activate (0x7c93fd8) refreshes after each resolve.
         self.ongoing();
@@ -3605,10 +5156,32 @@ impl<'a> Game<'a> {
                 .collect();
             for other in observers {
                 if self.card_triggers_allowed(other)
-                    && let Some(hook) = self.cards[other].ability_def().on_play
+                    && let Some(hook) = self.cards[other].default_ability().on_play
                 {
-                    hook(self, other, id);
+                    let _ = self.counted_trigger(|game| hook(game, other, id));
                 }
+            }
+        }
+        if was_played {
+            self.players[staging_owner]
+                .resolved_play_history
+                .push(ResolvedPlayEvent {
+                    turn: self.turn,
+                    card: id,
+                    def_id: resolved_def_id,
+                    printed_cost: resolved_printed_cost,
+                    lane: resolved_lane,
+                    staged_lane: staging.map(|context| context.lane),
+                    power: Some(self.cards[id].power()),
+                });
+            if self.cards[id].turn_played == 0
+                && let Some(play) = self.players[staging_owner]
+                    .staged_history
+                    .iter_mut()
+                    .rev()
+                    .find(|play| play.card == id && !play.resolved)
+            {
+                play.resolved = true;
             }
         }
         if self.cards[id].turn_played > 0 {
@@ -3631,24 +5204,50 @@ impl<'a> Game<'a> {
         if self.is_skill(id)
             && let Some(lane) = self.cards[id].lane
         {
-            self.lanes[lane].cards.retain(|&card| card != id);
-            self.cards[id].last_lane = Some(lane);
-            self.cards[id].lane = None;
-            self.players[self.cards[id].owner].banished.push(id);
-            self.ongoing();
+            if cards::reference_rules_enabled() {
+                self.detach_location(lane, id);
+                self.cards[id].last_lane = Some(lane);
+                self.cards[id].lane = None;
+                self.push_banished(self.cards[id].owner, id);
+                self.ongoing();
+            } else {
+                self.banish_card(id);
+            }
         }
         // Card::ResolveForPlay @ 0x7cb9d90: banish skills before
         // PostCardResolvedTrigger, which reaches cards and locations.
         self.emit(Event::CardResolved { card: id });
+        if was_played && let Some(context) = staging {
+            self.emit(Event::StagedCardResolved {
+                card: id,
+                seat: context.seat,
+                lane: context.lane,
+            });
+        }
         if self.cards[id].turn_played > 0 {
+            // LoadShot 0x7cd723c consumes PostCardResolvedTrigger for other cards.
+            self.quickdraw_card_resolved(id, false);
             self.trigger_player_effects(staging_owner, PlayerTrigger::CardResolved, Some(id));
         }
         if self.cards[id].turn_played > 0
             && let Some(lane) = self.cards[id].lane
-            && self.lanes[lane].revealed
+            && self.location_abilities_active(lane)
             && let Some(hook) = self.lanes[lane].def.after_card_play
         {
-            hook(self, lane, id);
+            let _ = self.counted_trigger(|game| hook(game, lane, id));
+            self.ongoing();
+        }
+        // SinisterLondon::CreateCopy (0x7d7fe8c) uses CardStaged's
+        // original location even after a resolved skill has been banished.
+        if !cards::reference_rules_enabled()
+            && was_played
+            && self.is_skill(id)
+            && let Some(context) = staging
+            && self.location_abilities_active(context.lane)
+            && self.lanes[context.lane].def.id == "SinisterLondon"
+            && let Some(hook) = self.lanes[context.lane].def.after_card_play
+        {
+            let _ = self.counted_trigger(|game| hook(game, context.lane, id));
             self.ongoing();
         }
         for _ in 0..left_moves {
@@ -3659,9 +5258,14 @@ impl<'a> Game<'a> {
                 break;
             }
         }
-        let post_resolve = self.post_resolve_plays.split_off(post_resolve_start);
-        for card in post_resolve {
-            self.reveal(card);
+        self.resolve_effect_plays(post_resolve_start);
+    }
+
+    /// Resolve the effect-staged batch after its enclosing action has finished.
+    pub(crate) fn resolve_effect_plays(&mut self, start: usize) {
+        let post_resolve = self.post_resolve_plays.split_off(start);
+        for queued in post_resolve {
+            self.reveal_with_staging(queued.card, queued.staging);
         }
     }
     /// Start the next turn: clear last turn's plays and draw, reveal and refresh.
@@ -3670,7 +5274,7 @@ impl<'a> Game<'a> {
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
                 .iter()
-                .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
+                .filter_map(|queued| self.cards[queued.card].lane.map(|lane| (queued.card, lane)))
                 .collect()
         });
         self.start_turn();
@@ -3692,17 +5296,23 @@ impl<'a> Game<'a> {
         priority: usize,
     ) -> Result<TurnTrace, String> {
         let plays = std::array::from_fn(|seat| {
-            plans[seat]
-                .iter()
-                .filter_map(|action| {
-                    if let Action::Play { card, lane } = *action {
-                        Some(Played {
-                            card: self.cards[card].def.id,
-                            lane,
-                        })
-                    } else {
-                        None
+            let mut staged = Vec::new();
+            for &action in &plans[seat] {
+                match action {
+                    Action::Play { card, lane } => staged.push((card, lane)),
+                    Action::Return { card } => {
+                        if let Some(index) = staged.iter().rposition(|&(id, _)| id == card) {
+                            staged.remove(index);
+                        }
                     }
+                    _ => {}
+                }
+            }
+            staged
+                .into_iter()
+                .map(|(card, lane)| Played {
+                    card: self.cards[card].def.id,
+                    lane,
                 })
                 .collect()
         });
@@ -3717,12 +5327,29 @@ impl<'a> Game<'a> {
             for &action in &plans[seat] {
                 let cost = match action {
                     Action::Play { card, .. } => view.card_cost(card),
-                    Action::Activate { card } => view.cards[card].ability_def().activate_cost,
-                    Action::Move { .. } => 0,
+                    Action::Activate { card } => view
+                        .activation_definition(card, seat)
+                        .map_or(0, |def| def.activate_cost),
+                    Action::Move { .. } | Action::Return { .. } => 0,
                 };
-                view.stage_action(seat, action)?;
+                view.stage_action(seat, action).map_err(|error| {
+                    let lanes: Vec<_> = view.lanes.iter().enumerate().map(|(lane, loc)| {
+                        (if loc.revealed { loc.def.id } else { "<hidden>" }, loc.revealed, loc.destroyed, view.lane_slot_capacity(lane),
+                         loc.cards.iter().map(|&id| {
+                             let card = &view.cards[id];
+                             (if card.revealed || view.human_seat == Some(card.owner) { card.def.id } else { "<hidden>" }, card.owner, card.revealed)
+                         }).collect::<Vec<_>>())
+                    }).collect();
+                    format!("{error}: turn {}, seat {seat}, action {action:?}, energy {:?}, cost {:?}, hand {:?}, lanes {lanes:?}",
+                        view.turn, (view.human_seat == Some(seat)).then_some(view.players[seat].energy),
+                        (view.human_seat == Some(seat)).then_some(cost),
+                        view.players[seat].hand.iter().map(|&id| if view.human_seat == Some(seat) { view.cards[id].def.id } else { "<hidden>" }).collect::<Vec<_>>())
+                })?;
                 costs[seat].push(cost);
             }
+        }
+        if !crate::cards::reference_rules_enabled() {
+            self.reveal_priority = Some(priority);
         }
         for (seat, plan) in plans.into_iter().enumerate() {
             for (action, cost) in plan.into_iter().zip(costs[seat].iter().copied()) {
@@ -3737,6 +5364,12 @@ impl<'a> Game<'a> {
                 player.energy_spent_this_turn,
                 player.energy == 0,
             ));
+            player.turn_energy_history.push(TurnEnergyEvent {
+                turn: self.turn,
+                spent: player.energy_spent_this_turn,
+                remaining: player.energy,
+                bonus: player.energy - i32::from(self.turn) - player.default_energy_offset,
+            });
         }
         self.end_turn_effects();
         let result = TurnTrace {
@@ -3766,7 +5399,8 @@ impl<'a> Game<'a> {
         let mut owners = [false; 2];
         for &id in self.lanes.iter().flat_map(|lane| &lane.cards) {
             let card = &self.cards[id];
-            if card.revealed && !card.abilities_removed && card.ability_def().id == "Daredevil" {
+            if card.revealed && !card.abilities_removed && card.default_ability().id == "Daredevil"
+            {
                 owners[card.owner] = true;
             }
         }
@@ -3825,23 +5459,51 @@ impl<'a> Game<'a> {
             return Ok(None);
         }
         let priority = self.action_priority(None);
+        let mut choose = |game: &Game<'_>, seat, priority| {
+            if game
+                .stakes
+                .as_ref()
+                .is_some_and(|stakes| stakes.pending_retreat[seat])
+            {
+                return Ok(Vec::new());
+            }
+            if let Some(controller) = game.autoplay_controller(seat) {
+                let mut rng = self.rng.borrow_mut();
+                Ok(game.autoplay_plan_with_rng(seat, controller, &mut **rng))
+            } else {
+                planner(game, seat, priority)
+            }
+        };
         let plans = if let Some(viewer) = self.daredevil_viewer() {
             let first = 1 - viewer;
-            let opponent = planner(self, first, priority)?;
+            let opponent = choose(self, first, priority)?;
             let mut rng = self.fork_rng();
             let mut view = self.fork(rng.as_mut());
             for &action in &opponent {
                 view.stage_action(first, action)?;
             }
-            let response = planner(&view, viewer, priority)?;
+            let response = choose(&view, viewer, priority)?;
             if viewer == 0 {
                 [response, opponent]
             } else {
                 [opponent, response]
             }
         } else {
-            [planner(self, 0, priority)?, planner(self, 1, priority)?]
+            [choose(self, 0, priority)?, choose(self, 1, priority)?]
         };
+        if self
+            .stakes
+            .as_ref()
+            .is_some_and(|stakes| stakes.pending_retreat.iter().any(|&v| v))
+        {
+            for (seat, plan) in plans.into_iter().enumerate() {
+                for action in plan {
+                    self.stage_action(seat, action)?;
+                }
+            }
+            self.ongoing();
+            return Ok(None);
+        }
         self.resolve_action_plans(plans, priority).map(Some)
     }
 
@@ -3851,22 +5513,30 @@ impl<'a> Game<'a> {
     {
         self.begin_turn();
         let priority = self.action_priority(None);
+        let mut choose = |game: &Game<'_>, seat, priority| {
+            if let Some(controller) = game.autoplay_controller(seat) {
+                let mut rng = self.rng.borrow_mut();
+                Ok(game.autoplay_plan_with_rng(seat, controller, &mut **rng))
+            } else {
+                planner(game, seat, priority)
+            }
+        };
         let plans = if let Some(viewer) = self.daredevil_viewer() {
             let first = 1 - viewer;
-            let opponent = planner(self, first, priority)?;
+            let opponent = choose(self, first, priority)?;
             let mut rng = self.fork_rng();
             let mut view = self.fork(rng.as_mut());
             for &action in &opponent {
                 view.stage_action(first, action)?;
             }
-            let response = planner(&view, viewer, priority)?;
+            let response = choose(&view, viewer, priority)?;
             if viewer == 0 {
                 [response, opponent]
             } else {
                 [opponent, response]
             }
         } else {
-            [planner(self, 0, priority)?, planner(self, 1, priority)?]
+            [choose(self, 0, priority)?, choose(self, 1, priority)?]
         };
         self.resolve_action_plans(plans, priority)
     }
@@ -3881,9 +5551,36 @@ impl<'a> Game<'a> {
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
                 .iter()
-                .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
+                .filter_map(|queued| self.cards[queued.card].lane.map(|lane| (queued.card, lane)))
                 .collect()
         });
+        if plays_only && (0..2).any(|seat| self.autoplay_controller(seat).is_some()) {
+            let priority = self.action_priority(priority);
+            let plans = {
+                let mut rng = self.rng.borrow_mut();
+                if let Some(viewer) = self.daredevil_viewer() {
+                    let first = 1 - viewer;
+                    let plan = self.autoplay_or_plays(first, policy, &mut **rng);
+                    let mut fork_rng = rng.clone_rng();
+                    let mut view = self.fork(fork_rng.as_mut());
+                    for &action in &plan {
+                        view.stage_action(first, action)?;
+                    }
+                    let response = view.autoplay_or_plays(viewer, policy, &mut **rng);
+                    if viewer == 0 {
+                        [response, plan]
+                    } else {
+                        [plan, response]
+                    }
+                } else {
+                    [
+                        self.autoplay_or_plays(0, policy, &mut **rng),
+                        self.autoplay_or_plays(1, policy, &mut **rng),
+                    ]
+                }
+            };
+            return self.resolve_action_plans(plans, priority);
+        }
         if plays_only {
             return self.resolve_started_turn(priority, |game, _| {
                 let mut rng = game.rng.borrow_mut();
@@ -3946,15 +5643,19 @@ impl<'a> Game<'a> {
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
                 .iter()
-                .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
+                .filter_map(|queued| self.cards[queued.card].lane.map(|lane| (queued.card, lane)))
                 .collect()
         });
         let priority = self.action_priority(priority);
+        let own = self.autoplay_controller(0).map_or_else(
+            || actions.to_vec(),
+            |controller| self.autoplay_plan(0, controller),
+        );
         let opponent = {
             let mut rng = self.rng.borrow_mut();
             policy.plan_actions(self, 1, &mut **rng)
         };
-        self.resolve_action_plans([actions.to_vec(), opponent], priority)
+        self.resolve_action_plans([own, opponent], priority)
     }
 
     pub fn play_turn(&mut self, policy: crate::policy::Policy) -> TurnTrace {
@@ -3965,6 +5666,11 @@ impl<'a> Game<'a> {
     /// Explicit frozen-reference playout: never voluntarily move or activate.
     pub fn play_turn_plays_only(&mut self, policy: crate::policy::Policy) -> TurnTrace {
         self.begin_turn();
+        if (0..2).any(|seat| self.autoplay_controller(seat).is_some()) {
+            return self
+                .play_position_policy_turn(policy, None, true)
+                .expect("built-in policies always plan");
+        }
         self.resolve_started_turn(None, |game, _| {
             let mut rng = game.rng.borrow_mut();
             if let Some(viewer) = game.daredevil_viewer() {
@@ -3999,6 +5705,38 @@ impl<'a> Game<'a> {
         F: for<'b> FnMut(&Game<'b>, usize, usize) -> Result<Vec<(usize, usize)>, String>,
     {
         self.begin_turn();
+        if (0..2).any(|seat| self.autoplay_controller(seat).is_some()) {
+            let priority = self.action_priority(None);
+            let mut choose = |game: &Game<'_>, seat| -> Result<Vec<Action>, String> {
+                if let Some(controller) = game.autoplay_controller(seat) {
+                    let mut rng = self.rng.borrow_mut();
+                    Ok(game.autoplay_plan_with_rng(seat, controller, &mut **rng))
+                } else {
+                    Ok(planner(game, seat, priority)?
+                        .into_iter()
+                        .map(|(card, lane)| Action::Play { card, lane })
+                        .collect())
+                }
+            };
+            let plans = if let Some(viewer) = self.daredevil_viewer() {
+                let first = 1 - viewer;
+                let plan = choose(self, first)?;
+                let mut rng = self.fork_rng();
+                let mut view = self.fork(rng.as_mut());
+                for &action in &plan {
+                    view.stage_action(first, action)?;
+                }
+                let response = choose(&view, viewer)?;
+                if viewer == 0 {
+                    [response, plan]
+                } else {
+                    [plan, response]
+                }
+            } else {
+                [choose(self, 0)?, choose(self, 1)?]
+            };
+            return self.resolve_action_plans(plans, priority);
+        }
         self.resolve_started_turn(None, |game, priority| {
             if let Some(viewer) = game.daredevil_viewer() {
                 let first = 1 - viewer;
@@ -4028,10 +5766,29 @@ impl<'a> Game<'a> {
         policy: crate::policy::Policy,
         priority: Option<usize>,
     ) -> TurnTrace {
+        if (0..2).any(|seat| self.autoplay_controller(seat).is_some()) {
+            let priority = self.action_priority(priority);
+            let own = self.autoplay_controller(0).map_or_else(
+                || {
+                    my_plan
+                        .iter()
+                        .map(|&(card, lane)| Action::Play { card, lane })
+                        .collect()
+                },
+                |controller| self.autoplay_plan(0, controller),
+            );
+            let opponent = {
+                let mut rng = self.rng.borrow_mut();
+                self.autoplay_or_plays(1, policy, &mut **rng)
+            };
+            return self
+                .resolve_action_plans([own, opponent], priority)
+                .expect("built-in policies always plan");
+        }
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
                 .iter()
-                .filter_map(|&id| self.cards[id].lane.map(|lane| (id, lane)))
+                .filter_map(|queued| self.cards[queued.card].lane.map(|lane| (queued.card, lane)))
                 .collect()
         });
         self.resolve_started_turn(priority, |game, _| {
@@ -4045,14 +5802,16 @@ impl<'a> Game<'a> {
     pub fn finish_reveals(&mut self) {
         self.delays_reveals = false;
         self.ending_reveals = true;
+        self.expire_location_silence(true);
         let pending = std::mem::take(&mut self.delayed_reveals);
         // EndTurn::GetOrderedStagedCardsThisGameForResolve @ 0x7e0a8e0
         // enumerates players in resolution order. Preserve the reference order
         // when no persistent lane delay was involved.
-        let persistent = pending.iter().flatten().any(|&card| {
-            self.cards[card].lane.is_some_and(|lane| {
-                self.lanes[lane].revealed && self.lanes[lane].def.delays_reveals_until_end
-            })
+        let persistent = pending.iter().flatten().any(|queued| {
+            queued.persistent
+                || self.cards[queued.card].lane.is_some_and(|lane| {
+                    self.lanes[lane].revealed && self.lanes[lane].def.delays_reveals_until_end
+                })
         });
         let first = if persistent {
             self.reveal_priority.unwrap_or(0)
@@ -4060,8 +5819,8 @@ impl<'a> Game<'a> {
             0
         };
         for seat in [first, 1 - first] {
-            for &id in &pending[seat] {
-                self.reveal(id);
+            for queued in &pending[seat] {
+                self.reveal_with_staging(queued.card, queued.staging);
             }
         }
         let unresolved: Vec<_> = self
@@ -4078,10 +5837,6 @@ impl<'a> Game<'a> {
 
     /// Dispatch card-owned proximity triggers independently of current text.
     pub fn resolve_attached_watches(&mut self, card: usize) {
-        if self.cards[card].abilities_removed {
-            self.cards[card].attached_abilities.clear();
-            return;
-        }
         let owner = self.cards[card].owner;
         let abilities = std::mem::take(&mut self.cards[card].attached_abilities);
         for ability in abilities {
@@ -4110,17 +5865,37 @@ impl<'a> Game<'a> {
         }
     }
 
+    /// Number of executions of an eligible revealed card's EndOfTurn trigger.
+    pub(crate) fn end_turn_repetitions(&self, card: usize) -> u32 {
+        let target = &self.cards[card];
+        let player = &self.players[target.owner];
+        if target.revealed
+            && target.lane.is_some()
+            && player.end_turn_multiplier_turn == Some(self.turn)
+        {
+            1 + player.end_turn_multiplier
+        } else {
+            1
+        }
+    }
+
     /// Apply the effects at the end of an already-revealed turn.
     pub fn end_turn_effects(&mut self) {
-        let observers: Vec<_> = self
-            .lanes
-            .iter()
-            .flat_map(|lane| lane.cards.iter().copied())
-            .filter(|&id| self.cards[id].revealed)
-            .collect();
-        // Fsm.EndTurn::OnEnter (0x7e09558) dispatches PreEndOfTurn before EndOfTurn.
-        // The frozen Python reference interleaves them per card.
         let interleave = crate::cards::reference_rules_enabled();
+        let observers: Vec<_> = if interleave {
+            self.lanes
+                .iter()
+                .flat_map(|lane| lane.cards.iter().copied())
+                .filter(|&id| self.cards[id].revealed)
+                .collect()
+        } else {
+            self.revealed_cards_in_resolution_order()
+        };
+        // EndTurn::OnEnter (0x7e09558) dispatches PreEndOfTurn first.
+        // GetAllRevealedCards (0x7dac98c) sorts by LatestResolutionOrder
+        // (key 0x7dc6bfc); Game::ActivateTriggerAbility (0x7da93a0)
+        // visits locations before that card list, independent of player priority.
+        // The frozen reference instead interleaves the pre/end hooks per card.
         let turn = self.turn;
         let expire = |game: &mut Self, id: usize| {
             game.cards[id].attached_abilities.retain(|ability| !matches!(
@@ -4135,39 +5910,102 @@ impl<'a> Game<'a> {
                 }
                 if !self.cards[id].abilities_removed
                     && self.card_triggers_allowed(id)
-                    && let Some(hook) = self.cards[id].ability_def().pre_end_turn
+                    && let Some(hook) = self.cards[id].default_ability().pre_end_turn
                 {
-                    hook(self, id);
+                    let _ = self.counted_trigger(|game| hook(game, id));
                 }
             }
         }
-        for id in observers {
-            if interleave {
+        if interleave {
+            for &id in &observers {
                 expire(self, id);
                 if self.card_triggers_allowed(id) {
                     self.resolve_attached_watches(id);
                 }
+                if !self.cards[id].abilities_removed
+                    && self.card_triggers_allowed(id)
+                    && let Some(hook) = self.cards[id].default_ability().end_turn
+                {
+                    for _ in 0..self.end_turn_repetitions(id) {
+                        let _ = self.counted_trigger(|game| hook(game, id));
+                    }
+                }
             }
-            if !self.cards[id].abilities_removed
-                && self.card_triggers_allowed(id)
-                && let Some(hook) = self.cards[id].ability_def().end_turn
-            {
-                hook(self, id);
+            let hand_observers: Vec<_> = self
+                .players
+                .iter()
+                .flat_map(|player| player.hand.iter().copied())
+                .filter(|&id| self.cards[id].default_ability().end_turn_in_hand)
+                .collect();
+            for id in hand_observers {
+                let owner = self.cards[id].owner;
+                if self.players[owner].hand.contains(&id)
+                    && !self.cards[id].abilities_removed
+                    && let Some(hook) = self.cards[id].default_ability().end_turn
+                {
+                    let _ = self.counted_trigger(|game| hook(game, id));
+                }
             }
+            self.ongoing();
         }
-        self.ongoing();
         self.end_turn_lane_order = Some([0, 1, 2]);
         for original in 0..3 {
             let lane = self.end_turn_lane_order.unwrap()[original];
-            if self.lanes[lane].revealed
-                && let Some(hook) = self.lanes[lane].def.on_turn_end
-            {
-                hook(self, lane);
-                self.ongoing();
+            if self.location_abilities_active(lane) {
+                if let Some(hook) = self.lanes[lane].def.on_turn_end {
+                    let _ = self.counted_trigger(|game| hook(game, lane));
+                    self.ongoing();
+                }
+                if !interleave && let Some(hook) = self.lanes[lane].def.on_event {
+                    let _ = self.counted_trigger(|game| hook(game, lane, Event::TurnEnd));
+                }
             }
         }
         self.end_turn_lane_order = None;
-        self.emit(Event::TurnEnd);
+        if interleave {
+            self.emit(Event::TurnEnd);
+        } else {
+            for id in self.revealed_cards_in_resolution_order() {
+                if self.cards[id].lane.is_none() || !self.card_triggers_allowed(id) {
+                    continue;
+                }
+                if !self.cards[id].abilities_removed
+                    && let Some(hook) = self.cards[id].default_ability().end_turn
+                {
+                    for _ in 0..self.end_turn_repetitions(id) {
+                        self.execute_default_ability(id, hook);
+                    }
+                }
+                let attached: Vec<_> = self.cards[id]
+                    .composed_abilities
+                    .iter()
+                    .filter(|ability| ability.kind == AbilityKind::Trigger)
+                    .filter_map(|ability| ability.def.end_turn.map(|hook| (ability.id, hook)))
+                    .collect();
+                for (instance, hook) in attached {
+                    for _ in 0..self.end_turn_repetitions(id) {
+                        self.execute_ability(id, instance, hook);
+                    }
+                }
+                self.dispatch_card_event(id, Event::TurnEnd, true, false);
+            }
+            let observers: Vec<_> = self
+                .players
+                .iter()
+                .flat_map(|player| player.hand.iter().chain(&player.deck).copied())
+                .collect();
+            for id in observers {
+                let owner = self.cards[id].owner;
+                if self.players[owner].hand.contains(&id)
+                    && !self.cards[id].abilities_removed
+                    && self.cards[id].default_ability().end_turn_in_hand
+                    && let Some(hook) = self.cards[id].default_ability().end_turn
+                {
+                    self.execute_default_ability(id, hook);
+                }
+                self.dispatch_card_event(id, Event::TurnEnd, true, false);
+            }
+        }
         for seat in 0..2 {
             self.trigger_player_effects(seat, PlayerTrigger::EndTurn, None);
         }
@@ -4177,9 +6015,9 @@ impl<'a> Game<'a> {
                 let id = self.lanes[lane].cards[index];
                 if self.cards[id].revealed
                     && !self.cards[id].abilities_removed
-                    && let Some(hook) = self.cards[id].ability_def().objective_freeze
+                    && let Some(hook) = self.cards[id].default_ability().objective_freeze
                 {
-                    hook(self, id);
+                    self.execute_default_ability(id, hook);
                 }
             }
         }
@@ -4187,8 +6025,14 @@ impl<'a> Game<'a> {
         // SandcastleBehavior (0x7d7e0fc) and TVA behavior (0x7d8f724)
         // end the match after this turn's effects, without shortening an
         // already-started turn.
-        if self.lanes.iter().any(|lane| {
-            lane.revealed && lane.def.maximum_turns != 0 && self.turn >= lane.def.maximum_turns
+        if self.lanes.iter().enumerate().any(|(index, lane)| {
+            self.location_abilities_active(index)
+                && lane.def.maximum_turns != 0
+                && if cards::reference_rules_enabled() {
+                    self.turn >= lane.def.maximum_turns
+                } else {
+                    self.turn == lane.def.maximum_turns
+                }
         }) {
             self.set_total_turns(self.turn);
         }
@@ -4212,6 +6056,9 @@ impl<'a> Game<'a> {
             }
         });
         let plans = plan(self, priority)?;
+        if !crate::cards::reference_rules_enabled() {
+            self.reveal_priority = Some(priority);
+        }
         let plays = std::array::from_fn(|seat| {
             plans[seat]
                 .iter()
@@ -4236,7 +6083,7 @@ impl<'a> Game<'a> {
                     .position(|&card| card == id)
                     .expect("planned card not in hand");
                 self.emit(Event::CardStaged { card: id, seat });
-                self.players[seat].hand.remove(slot);
+                self.take_hand(seat, slot);
                 let spent = self.card_cost(id);
                 self.players[seat].energy_spent_this_turn += spent;
                 let energy = self.players[seat].energy - spent;
@@ -4252,7 +6099,10 @@ impl<'a> Game<'a> {
                     resolved: false,
                 };
                 self.players[seat].staged_history.push(entry);
-                self.lanes[lane].cards.push(id);
+                self.players[seat]
+                    .staged_lane_history
+                    .push((self.turn, lane));
+                self.push_location(lane, id);
                 self.notify_added(id, lane);
             }
         }
@@ -4262,12 +6112,12 @@ impl<'a> Game<'a> {
         self.is_wait_for_staging = false;
         self.location_staging_end();
         for seat in [priority, 1 - priority] {
-            for &id in &pending[seat] {
-                self.reveal(id);
+            for queued in &pending[seat] {
+                self.reveal_with_staging(queued.card, queued.staging);
             }
             for index in 0..self.played[seat].len() {
-                let id = self.played[seat][index].0;
-                self.reveal(id);
+                let (id, lane) = self.played[seat][index];
+                self.reveal_with_staging(id, Some(StagingContext { seat, lane }));
             }
         }
         for player in &mut self.players {
@@ -4276,6 +6126,12 @@ impl<'a> Game<'a> {
                 player.energy_spent_this_turn,
                 player.energy == 0,
             ));
+            player.turn_energy_history.push(TurnEnergyEvent {
+                turn: self.turn,
+                spent: player.energy_spent_this_turn,
+                remaining: player.energy,
+                bonus: player.energy - i32::from(self.turn) - player.default_energy_offset,
+            });
         }
         self.end_turn_effects();
         let result = TurnTrace {
@@ -4372,9 +6228,12 @@ mod staging_tests {
                 if path.extension().is_none_or(|ext| ext != "rs") {
                     continue;
                 }
-                // no_text.rs is the client-wide inventory generated by
-                // parity/generate_no_text.py, not an effect target list.
-                if directory == "cards" && path.file_name().is_some_and(|name| name == "no_text.rs")
+                // Client-wide generated inventories, not effect target lists:
+                // parity/generate_no_text.py and parity/generate_ongoing_priorities.py.
+                if directory == "cards"
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name == "no_text.rs" || name == "ongoing_priorities.rs")
                 {
                     continue;
                 }
@@ -4462,6 +6321,218 @@ mod staging_tests {
     }
 
     #[test]
+    fn staging_preserves_non_staging_power_and_cost_contributions() {
+        let mut rng = PythonRandom::seed(401);
+        let mut game = game(&mut rng);
+        game.lanes[0].def = crate::locations::get("Elysium").unwrap();
+        let source = game.create_card("BlueMarvel", 0);
+        let target = game.create_card("Hulk", 0);
+        let hand = game.create_card("Hulk", 0);
+        assert!(game.add_card(source, 1, 0, false));
+        assert!(game.add_card(target, 2, 0, false));
+        assert!(game.add_hand(0, hand, false));
+        game.is_wait_for_staging = false;
+        game.ongoing();
+        let power = game.cards[target].power();
+        let cost = game.card_cost(hand);
+        assert_eq!(power, game.printed_power(target) + 1);
+        assert_eq!(cost, game.printed_cost(hand) - 1);
+        game.is_wait_for_staging = true;
+        game.ongoing();
+        game.ongoing();
+        assert_eq!(game.cards[target].power(), power);
+        assert_eq!(game.card_cost(hand), cost);
+    }
+
+    #[test]
+    fn staging_replaces_ability_contributions_by_source() {
+        fn contribution(game: &mut Game<'_>, card: usize) {
+            game.add_ongoing_power(card, i32::from(game.turn), 0);
+            game.add_ongoing_cost(card, i32::from(game.turn), 0);
+        }
+        // Agony's client ongoing metadata is active while staging.
+        static TEST_ABILITY: CardDef = CardDef {
+            ongoing: Some(contribution),
+            ..CardDef::vanilla("Agony")
+        };
+        let mut rng = PythonRandom::seed(402);
+        let mut game = game(&mut rng);
+        let card = game.create_card("Agony", 0);
+        game.cards[card].override_ability = Some(&TEST_ABILITY);
+        assert!(game.add_card(card, 0, 0, false));
+        game.turn = 1;
+        game.is_wait_for_staging = false;
+        game.ongoing();
+        game.turn = 2;
+        game.is_wait_for_staging = true;
+        game.ongoing();
+        let power = game.cards[card].power();
+        let cost = game.card_cost(card);
+        game.ongoing();
+        assert_eq!(game.cards[card].power(), power);
+        assert_eq!(game.card_cost(card), cost);
+        assert_eq!(power, game.printed_power(card) + 2);
+        assert_eq!(cost, game.printed_cost(card) + 2);
+        // A later, independent Set must remain after this ability's Add.
+        game.set_ongoing_cost(card, 7, 0);
+        game.turn = 3;
+        game.ongoing();
+        assert_eq!(game.card_cost(card), 7);
+    }
+
+    #[test]
+    fn failed_conditional_ability_retries_after_later_success() {
+        // Lancelot's HasTargets condition (0x7d29874) initially fails;
+        // Captain Carter (0x7e7d22c) then increases the back-row card.
+        let mut rng = PythonRandom::seed(403);
+        let mut game = game(&mut rng);
+        let lancelot = game.create_card("Lancelot", 0);
+        let carter = game.create_card("CaptainCarter", 0);
+        let filler = game.create_card("Wasp", 0);
+        let target = game.create_card("MistyKnight", 0);
+        assert!(game.add_card(lancelot, 0, 0, false));
+        assert!(game.add_card(carter, 1, 0, false));
+        assert!(game.add_card(filler, 1, 0, false));
+        assert!(game.add_card(target, 1, 0, false));
+        game.is_wait_for_staging = false;
+        game.ongoing();
+        assert_eq!(
+            game.cards[target].power(),
+            game.printed_power(target) + game.cards[carter].power() + 1
+        );
+    }
+    #[test]
+    fn copied_conditional_retries_after_later_success() {
+        let mut rng = PythonRandom::seed(404);
+        let mut game = game(&mut rng);
+        let skrull = game.create_card("SuperSkrull", 0);
+        let lancelot = game.create_card("Lancelot", 1);
+        let carter = game.create_card("CaptainCarter", 0);
+        let filler = game.create_card("Wasp", 0);
+        let target = game.create_card("MistyKnight", 0);
+        assert!(game.add_card(skrull, 0, 0, false));
+        assert!(game.add_card(lancelot, 2, 1, false));
+        assert!(game.add_card(carter, 1, 0, false));
+        assert!(game.add_card(filler, 1, 0, false));
+        assert!(game.add_card(target, 1, 0, false));
+        game.is_wait_for_staging = false;
+        game.ongoing();
+        assert_eq!(
+            game.cards[target].power(),
+            game.printed_power(target) + game.cards[carter].power() + 1
+        );
+    }
+
+    #[test]
+    fn attached_reveals_run_in_independent_context_even_after_default_removal() {
+        fn increment(game: &mut Game<'_>, card: usize) {
+            let value = game.cards[card]
+                .ability_state_mut()
+                .unwrap()
+                .as_any_mut()
+                .downcast_mut::<u32>()
+                .unwrap();
+            *value += 1;
+        }
+        static REVEAL: CardDef = CardDef {
+            reveal: Some(increment),
+            ..CardDef::vanilla("RevealContextTest")
+        };
+        let mut rng = PythonRandom::seed(5);
+        let mut game = game(&mut rng);
+        let card = place(&mut game, "Wasp", 0, 0);
+        game.cards[card].abilities_removed = true;
+        game.cards[card]
+            .composed_abilities
+            .push(AbilityInstance::new(
+                &REVEAL,
+                AbilityKind::Reveal,
+                None,
+                false,
+                true,
+                Some(Box::new(3_u32)),
+            ));
+        assert!(game.cards[card].has_resolve_trigger());
+        game.trigger_on_reveal(card);
+        assert_eq!(
+            game.cards[card].composed_abilities[0]
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<u32>(),
+            Some(&4)
+        );
+    }
+
+    #[test]
+    fn attached_start_and_activation_use_own_context() {
+        fn increment(game: &mut Game<'_>, card: usize) {
+            *game.cards[card]
+                .ability_state_mut()
+                .unwrap()
+                .as_any_mut()
+                .downcast_mut::<u32>()
+                .unwrap() += 1;
+        }
+        static START: CardDef = CardDef {
+            start_turn: Some(increment),
+            ..CardDef::vanilla("AttachedStartTest")
+        };
+        static ACTIVATE: CardDef = CardDef {
+            on_activate: Some(increment),
+            activate_cost: 2,
+            ..CardDef::vanilla("AttachedActivateTest")
+        };
+        let mut rng = PythonRandom::seed(15);
+        let mut game = game(&mut rng);
+        let card = place(&mut game, "Wasp", 0, 0);
+        game.cards[card].abilities_removed = true;
+        game.cards[card]
+            .composed_abilities
+            .push(AbilityInstance::new(
+                &START,
+                AbilityKind::Trigger,
+                None,
+                false,
+                true,
+                Some(Box::new(0_u32)),
+            ));
+        game.cards[card]
+            .composed_abilities
+            .push(AbilityInstance::new(
+                &ACTIVATE,
+                AbilityKind::Activate,
+                None,
+                false,
+                true,
+                Some(Box::new(0_u32)),
+            ));
+        game.start_turn();
+        assert_eq!(
+            game.cards[card].composed_abilities[0]
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<u32>(),
+            Some(&1)
+        );
+        game.players[0].energy = 2;
+        assert!(game.activate_card(card, 0));
+        assert_eq!(game.players[0].energy, 0);
+        assert_eq!(
+            game.cards[card].composed_abilities[1]
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<u32>(),
+            Some(&1)
+        );
+    }
+
+    #[test]
     fn deep_space_blocks_trigger_and_activate() {
         fn increment(game: &mut Game<'_>, card: usize) {
             game.cards[card].permanent += 1;
@@ -4476,12 +6547,12 @@ mod staging_tests {
         let mut game = game(&mut rng);
         let card = place(&mut game, "Wasp", 0, 0);
         game.cards[card].override_ability = Some(&ABILITY);
-        game.lanes[0].def = &DEEP;
+        game.replace_location_def(0, &DEEP, None);
         let before = game.cards[card].permanent;
         assert!(!game.can_activate(card, 0));
         game.end_turn_effects();
         assert_eq!(game.cards[card].permanent, before);
-        game.lanes[0].def = locations::get("Ruins").unwrap();
+        game.replace_location(0, "Ruins");
         assert!(game.can_activate(card, 0));
         game.end_turn_effects();
         assert_eq!(game.cards[card].permanent, before + 1);
@@ -4527,6 +6598,85 @@ mod staging_tests {
         game.cards[card].revealed = true;
         game.lanes[lane].cards.push(card);
         card
+    }
+
+    fn check_sinister_staged_skill(expected_gain: i32) {
+        let mut rng = PythonRandom::seed(73);
+        let mut game = game(&mut rng);
+        game.turn = 3;
+        game.lanes[0].def = locations::get("SinisterLondon").unwrap();
+        let horde = place(&mut game, "ZombieHorde", 0, 1);
+        let before = game.cards[horde].power();
+        let skill = place(&mut game, "TheHunger", 0, 0);
+        game.cards[skill].revealed = false;
+        game.cards[skill].turn_played = game.turn;
+        game.reveal_with_staging(skill, Some(StagingContext { seat: 0, lane: 0 }));
+        assert!(game.players[0].banished.contains(&skill));
+        assert_eq!(game.cards[horde].power(), before + expected_gain);
+    }
+
+    #[test]
+    fn sinister_london_copies_staged_skill_after_banishment() {
+        check_sinister_staged_skill(6);
+    }
+
+    #[test]
+    fn reference_sinister_london_does_not_copy_banished_skill() {
+        const CHILD: &str = "SNAPSIM_TEST_REFERENCE_SINISTER_SKILL";
+        if std::env::var_os(CHILD).is_some() {
+            check_sinister_staged_skill(3);
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "game::staging_tests::reference_sinister_london_does_not_copy_banished_skill",
+            ])
+            .env(CHILD, "1")
+            .env("SNAPSIM_REFERENCE_RULES", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn copied_objective_updates_with_new_default_context() {
+        let mut rng = PythonRandom::seed(74);
+        let mut game = game(&mut rng);
+        let rogue = place(&mut game, "RogueScionOfDivision", 0, 0);
+        let objective = game.create_card("PolarisHorseman", 1);
+        game.players[1].hand = vec![objective];
+        game.trigger_on_reveal(rogue);
+        assert_eq!(game.cards[rogue].default_ability().id, "PolarisHorseman");
+        assert!(game.cards[rogue].ability_frames.is_empty());
+        assert!(game.cards[rogue].state.is_some());
+    }
+
+    #[test]
+    fn delayed_reveal_preserves_original_staging_context() {
+        let mut rng = PythonRandom::seed(13);
+        let mut game = game(&mut rng);
+        game.turn = 2;
+        let card = place(&mut game, "Wasp", 1, 1);
+        game.cards[card].revealed = false;
+        game.cards[card].turn_played = 2;
+        game.delays_reveals = true;
+        let staging = StagingContext { seat: 0, lane: 0 };
+        game.reveal_with_staging(card, Some(staging));
+        assert_eq!(
+            game.delayed_reveals[0],
+            [QueuedReveal {
+                card,
+                staging: Some(staging),
+                persistent: false
+            }]
+        );
+        game.delays_reveals = false;
+        game.finish_reveals();
+        let event = game.players[0].resolved_play_history.last().unwrap();
+        assert_eq!(event.card, card);
+        assert_eq!(event.staged_lane, Some(0));
+        assert_eq!(event.lane, Some(1));
     }
 
     #[test]
@@ -4840,6 +6990,46 @@ mod staging_tests {
         assert_eq!(game.total_turns, 4);
     }
 
+    #[test]
+    fn end_turn_location_then_card_resolution_order_across_hook_types() {
+        fn location(game: &mut Game<'_>, _: usize) {
+            game.players[0].energy = game.players[0].energy * 10 + 1;
+        }
+        fn direct(game: &mut Game<'_>, _: usize) {
+            game.players[0].energy = game.players[0].energy * 10 + 3;
+        }
+        fn event(game: &mut Game<'_>, _: usize, event: Event) {
+            if matches!(event, Event::TurnEnd) {
+                game.players[0].energy = game.players[0].energy * 10 + 2;
+            }
+        }
+        static LOCATION: LocationDef = LocationDef {
+            on_turn_end: Some(location),
+            ..locations::location("EndOrderTest", 0, 0, 1, false)
+        };
+        static DIRECT: CardDef = CardDef {
+            end_turn: Some(direct),
+            ..CardDef::vanilla("EndDirectTest")
+        };
+        static EVENT: CardDef = CardDef {
+            on_event: Some(event),
+            end_turn_trigger: true,
+            ..CardDef::vanilla("EndEventTest")
+        };
+        let mut rng = PythonRandom::seed(42);
+        let mut game = game(&mut rng);
+        game.lanes[0].def = &LOCATION;
+        let later = place(&mut game, "Wasp", 0, 0);
+        let earlier = place(&mut game, "Wasp", 1, 2);
+        game.cards[later].override_ability = Some(&DIRECT);
+        game.cards[earlier].override_ability = Some(&EVENT);
+        game.cards[later].latest_resolution_order = 8;
+        game.cards[earlier].latest_resolution_order = 2;
+        game.players[0].energy = 0;
+        game.end_turn_effects();
+        assert_eq!(game.players[0].energy, 123);
+    }
+
     fn check_pre_end_order(expected: i32) {
         let mut rng = PythonRandom::seed(33);
         let mut game = game(&mut rng);
@@ -4909,6 +7099,7 @@ mod staging_tests {
             end_turn: game.turn,
             remaining: 1,
             unlimited: false,
+            condition: None,
             on_move: None,
         });
         let card = game.create_card("Wasp", 1);

@@ -157,6 +157,31 @@ impl Position {
                 &format!("{path}.revealed_turn"),
                 Some(0),
             )?;
+            if let Some(destroyed) = lane.get("destroyed") {
+                let destroyed = destroyed
+                    .as_bool()
+                    .ok_or_else(|| format!("{path}.destroyed must be a boolean"))?;
+                if destroyed
+                    && (!id.is_null()
+                        || !lane["mine"].as_array().unwrap().is_empty()
+                        || !theirs.as_array().unwrap().is_empty()
+                        || lane
+                            .get("theirs_face_down")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0)
+                            != 0
+                        || lane
+                            .get("revealed_turn")
+                            .is_some_and(|value| !value.is_null())
+                        || lane
+                            .get("history_state")
+                            .is_some_and(|value| !value.is_null()))
+                {
+                    return Err(format!(
+                        "{path}: destroyed locations cannot contain a location or cards"
+                    ));
+                }
+            }
         }
         let opponent = object(root.get("opponent").unwrap_or(&null), "opponent")?;
         if let Some(prior) = opponent.get("prior")

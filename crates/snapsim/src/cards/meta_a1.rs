@@ -114,7 +114,7 @@ fn echo(game: &mut Game<'_>, card: usize, played: usize) {
         && game.cards[card].owner != owner
         && game.cards[card].lane.is_some()
         && game.cards[card].lane == played_lane
-        && game.cards[played].has_ongoing()
+        && game.cards[played].has_ongoing(false)
     {
         game.cards[played].abilities_removed = true;
     }
@@ -134,7 +134,7 @@ fn jubilee(game: &mut Game<'_>, card: usize) {
         return;
     };
     if game.can_add(target, lane, owner) {
-        game.players[owner].deck.remove(0);
+        game.take_deck(owner, 0);
         game.add_card(target, lane, owner, true);
     }
 }
@@ -209,8 +209,7 @@ fn surge(game: &mut Game<'_>, card: usize) {
         return;
     };
     if let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<Option<usize>>())
     {
         *state = Some(target);
@@ -224,13 +223,13 @@ fn surge_played(game: &mut Game<'_>, card: usize, played: usize) {
         return;
     }
     let target = game.cards[card]
-        .state
-        .as_deref()
+        .ability_state()
         .and_then(|state| state.as_any().downcast_ref::<Option<usize>>())
         .copied()
         .flatten();
     if target == Some(played) {
-        game.trigger_on_reveal(card);
+        // RetriggerBuffIfPossible (0x7ccf5c8) activates the card's text only.
+        game.trigger_text_reveal(card);
     }
 }
 
@@ -294,7 +293,9 @@ fn werewolf(game: &mut Game<'_>, card: usize, played: usize) {
     if game.cards[card].abilities_removed
         || game.cards[played].owner != owner
         || game.cards[played].abilities_removed
-        || game.cards[played].ability_def().reveal.is_none()
+        || !game.cards[played].abilities().any(|a| {
+            a.supports(crate::engine_ext::abilities::AbilityKind::Reveal) && a.def.reveal.is_some()
+        })
     {
         return;
     }
@@ -543,6 +544,8 @@ mod tests {
         );
         let mut rng = PythonRandom::seed(9);
         let mut game = build_game(&p, &mut rng).unwrap();
+        // On Reveal resolves outside WaitForStaging (Card::ResolveForPlay 0x7cb9d90).
+        game.is_wait_for_staging = false;
         let source = game.lanes[0].cards[0];
         let small = game.lanes[0].cards[1];
         let enemy = game.lanes[0].cards[2];
@@ -575,6 +578,34 @@ mod tests {
         werewolf(&mut game, wolf, played);
         assert_eq!(game.cards[wolf].lane, Some(1));
         assert_eq!(game.cards[wolf].power(), power + 2);
+    }
+    #[test]
+    fn werewolf_detects_only_attached_reveal_abilities() {
+        use crate::engine_ext::abilities::{AbilityInstance, AbilityKind};
+        let p = position(
+            json!([{"id":"WerewolfByNight"}, {"id":"MistyKnight"}]),
+            json!([]),
+        );
+        let mut rng = PythonRandom::seed(10);
+        let mut game = build_game(&p, &mut rng).unwrap();
+        let wolf = game.lanes[0].cards[0];
+        let played = game.lanes[0].cards[1];
+        game.played[0].push((played, 1));
+        game.cards[played]
+            .composed_abilities
+            .push(AbilityInstance::new(
+                crate::cards::get("Hawkeye").unwrap(),
+                AbilityKind::Ongoing,
+                None,
+                false,
+                true,
+                None,
+            ));
+        werewolf(&mut game, wolf, played);
+        assert_eq!(game.cards[wolf].lane, Some(0));
+        game.cards[played].composed_abilities[0].kind = AbilityKind::Reveal;
+        werewolf(&mut game, wolf, played);
+        assert_eq!(game.cards[wolf].lane, Some(1));
     }
     #[test]
     fn shuri_effect_survives_source_destruction_and_is_consumed() {

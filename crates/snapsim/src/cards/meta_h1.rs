@@ -48,12 +48,12 @@ fn drax(game: &mut Game<'_>, card: usize) {
     }
 }
 
-fn torch_state() -> Box<dyn CardState> {
+pub(crate) fn torch_state() -> Box<dyn CardState> {
     Box::new(false)
 }
 
 // HumanTorchFirstStepsBehavior::BuffCard (0x7ec812c).
-fn torch(game: &mut Game<'_>, card: usize) {
+pub(crate) fn torch(game: &mut Game<'_>, card: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
     };
@@ -65,8 +65,7 @@ fn torch(game: &mut Game<'_>, card: usize) {
         .count()
         >= 4;
     let used = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<bool>())
         .expect("Torch state");
     if full && !*used {
@@ -222,6 +221,8 @@ mod tests {
     fn luke_protects_front_row_and_restores_prior_debuff() {
         let mut rng = PythonRandom::seed(4);
         let mut game = build_game(&position("LukeCage"), &mut rng).unwrap();
+        // Added/revealed cards resolve outside WaitForStaging (0x7cba060).
+        game.is_wait_for_staging = false;
         let luke = game.lanes[0].cards[0];
         let ally = game.create_card("Hulk", 0);
         game.add_power(ally, -2, 1);

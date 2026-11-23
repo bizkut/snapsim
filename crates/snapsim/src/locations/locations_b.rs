@@ -10,11 +10,11 @@ pub const MOJOWORLD: LocationDef = LocationDef {
     ..location("Mojoworld", 0, 0, 1, false)
 };
 pub const MONSTER_METROPOLIS: LocationDef = LocationDef {
-    ongoing: Some(monster_metropolis),
+    conditional_ongoing: Some(monster_metropolis),
     ..location("MonsterMetropolis", 0, 0, 1, false)
 };
 pub const THRONE_ROOM: LocationDef = LocationDef {
-    ongoing: Some(throne_room),
+    conditional_ongoing: Some(throne_room),
     ..location("WakandanThroneRoom", 0, 0, 1, false)
 };
 pub const MONSTER_ISLAND: LocationDef = LocationDef {
@@ -93,7 +93,7 @@ fn mojoworld(game: &mut Game<'_>, lane: usize) {
         counts[game.cards[id].owner] += 1;
     }
     if counts[0] != counts[1] {
-        game.lanes[lane].bonus[usize::from(counts[1] > counts[0])] += 100;
+        game.add_lane_bonus(lane, usize::from(counts[1] > counts[0]), 100);
     }
 }
 fn highest(game: &Game<'_>, lane: usize) -> Option<i32> {
@@ -112,25 +112,30 @@ fn washington_dc(game: &mut Game<'_>, lane: usize) {
         }
     }
 }
-fn monster_metropolis(game: &mut Game<'_>, lane: usize) {
-    if let Some(max) = highest(game, lane) {
-        for index in 0..game.lanes[lane].cards.len() {
-            let id = game.lanes[lane].cards[index];
-            if game.cards[id].revealed && game.cards[id].power() == max {
-                game.add_location_power(id, 3);
-            }
+// ActionReturns2: an empty target set asks the scheduler to retry.
+fn monster_metropolis(game: &mut Game<'_>, lane: usize) -> bool {
+    let Some(max) = highest(game, lane) else {
+        return false;
+    };
+    for index in 0..game.lanes[lane].cards.len() {
+        let id = game.lanes[lane].cards[index];
+        if game.cards[id].revealed && game.cards[id].power() == max {
+            game.add_location_power(id, 3);
         }
     }
+    true
 }
-fn throne_room(game: &mut Game<'_>, lane: usize) {
-    if let Some(max) = highest(game, lane) {
-        for index in 0..game.lanes[lane].cards.len() {
-            let id = game.lanes[lane].cards[index];
-            if game.cards[id].revealed && game.cards[id].power() == max {
-                game.add_location_power(id, max);
-            }
+fn throne_room(game: &mut Game<'_>, lane: usize) -> bool {
+    let Some(max) = highest(game, lane) else {
+        return false;
+    };
+    for index in 0..game.lanes[lane].cards.len() {
+        let id = game.lanes[lane].cards[index];
+        if game.cards[id].revealed && game.cards[id].power() == max {
+            game.add_location_power(id, max);
         }
     }
+    true
 }
 fn tokens(game: &mut Game<'_>, lane: usize, id: &str, count: usize) {
     for seat in 0..2 {

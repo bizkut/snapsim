@@ -14,7 +14,7 @@ pub const AVENGERS_COMPOUND: LocationDef = LocationDef {
     ..location("AvengersCompound", 0, 0, 1, false)
 };
 pub const BAXTER_BUILDING: LocationDef = LocationDef {
-    ongoing: Some(baxter),
+    conditional_ongoing: Some(baxter),
     ..location("BaxterBuilding", 0, 0, 1, false)
 };
 pub const CASTLE_BLACKSTONE: LocationDef = LocationDef {
@@ -134,7 +134,7 @@ fn draw_slot(game: &mut Game<'_>, seat: usize, slot: Option<usize>) {
     if game.players[seat].hand.len() < 7
         && let Some(slot) = slot
     {
-        let card = game.players[seat].deck.remove(slot);
+        let card = game.take_deck(seat, slot);
         game.add_hand(seat, card, true);
     }
 }
@@ -168,14 +168,16 @@ fn atlantis(game: &mut Game<'_>, lane: usize) {
         }
     }
 }
-fn baxter(game: &mut Game<'_>, lane: usize) {
+// ActionReturns2: Baxter's action succeeds even when there is no winner.
+fn baxter(game: &mut Game<'_>, lane: usize) -> bool {
     if let Some(seat) = leader(game, lane) {
         for other in 0..3 {
             if other != lane {
-                game.lanes[other].bonus[seat] += 4;
+                game.add_lane_bonus(other, seat, 4);
             }
         }
     }
+    true
 }
 fn castle(game: &Game<'_>, lane: usize, seat: usize) -> i32 {
     i32::from(leader(game, lane) == Some(seat))
@@ -338,7 +340,7 @@ fn grand_central(game: &mut Game<'_>, lane: usize) {
         let slot = game.rng.borrow_mut().randbelow(len);
         let card = game.players[seat].hand[slot];
         if game.can_add(card, lane, seat) {
-            game.players[seat].hand.remove(slot);
+            game.take_hand(seat, slot);
             game.add_card(card, lane, seat, false);
         }
     }

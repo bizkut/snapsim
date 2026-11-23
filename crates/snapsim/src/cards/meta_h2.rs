@@ -69,8 +69,7 @@ struct Objective {
 
 pub(crate) fn restore_objective(card: &mut crate::game::Card, progress: usize, completed: bool) {
     if let Some(state) = card
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<Objective>())
     {
         state.progress = progress;
@@ -107,8 +106,7 @@ fn objective_update(game: &mut Game<'_>, card: usize) {
         }
     }
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Objective>()
@@ -120,8 +118,7 @@ fn objective_update(game: &mut Game<'_>, card: usize) {
 
 fn objective_freeze(game: &mut Game<'_>, card: usize) {
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Objective>()
@@ -136,8 +133,7 @@ fn objective_complete(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Objective>()

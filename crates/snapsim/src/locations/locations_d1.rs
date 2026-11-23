@@ -94,7 +94,7 @@ fn subterranea_tutorial(game: &mut Game<'_>, _: usize) {
                 .rng
                 .borrow_mut()
                 .randbelow(game.players[seat].deck.len() + 1);
-            game.players[seat].deck.insert(index, rock);
+            game.put_deck(seat, index, rock);
         }
     }
     let Some(&bottom) = game.players[human].deck.last() else {
@@ -189,7 +189,7 @@ mod tests {
         game.ongoing();
         assert_eq!(game.lanes[0].multiplier[0], 1);
         assert!(!game.ongoing_active(id));
-        assert!(game.cards[id].has_ongoing());
+        assert!(game.cards[id].has_ongoing(false));
         game.lanes[0].revealed = false;
         game.ongoing();
         assert_eq!(game.lanes[0].multiplier[0], 2);

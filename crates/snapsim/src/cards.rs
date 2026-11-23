@@ -9,14 +9,21 @@ mod core_rules;
 mod kahhori;
 mod meta_a1;
 mod meta_a2;
+mod meta_auto;
 mod meta_b1;
 mod meta_b2;
 mod meta_b3a;
 mod meta_b3b;
 mod meta_c;
+mod meta_comp;
+mod meta_comp2;
+mod meta_comp3;
+pub(crate) mod meta_comp4;
+mod meta_comp5;
 mod meta_d;
 mod meta_e1;
 mod meta_e2;
+mod meta_evolved;
 mod meta_f1;
 mod meta_f2;
 mod meta_f3;
@@ -42,13 +49,28 @@ pub(crate) mod meta_m3;
 mod meta_m4;
 mod meta_m5;
 mod meta_m6;
+mod meta_na;
+mod meta_nc;
+pub(crate) mod meta_nd;
+mod meta_nd_rings;
+mod meta_ne;
+mod meta_skills_a;
+mod meta_skills_b;
+mod meta_tff;
+mod meta_variants1;
+mod meta_variants_a;
+mod meta_variants_b;
+pub(crate) mod meta_variants_c;
+mod meta_zd2;
 pub(crate) mod no_text;
+pub(crate) mod ongoing_priorities;
 mod recruit_a;
 mod recruit_b;
 pub(crate) mod reference_rules;
 mod representative;
 mod sword_master;
 pub(crate) use meta_h2::restore_objective;
+pub(crate) use meta_zd2::swap_punisher_marked_locations;
 pub(crate) use recruit_a::angel_replace;
 
 /// Tokens a deck may not contain: the reference's `ownable = False` cards.
@@ -95,6 +117,18 @@ static TOKEN_GROUPS: &[&[&str]] = &[
     meta_l2::TOKENS,
     meta_l1::TOKENS,
     meta_m5::TOKENS,
+    meta_na::TOKENS,
+    meta_nc::TOKENS,
+    meta_nd::TOKENS,
+    meta_nd_rings::TOKENS,
+    meta_tff::TOKENS,
+    meta_zd2::TOKENS,
+    meta_evolved::TOKENS,
+    meta_comp5::TOKENS,
+    meta_ne::TOKENS,
+    meta_skills_b::TOKENS,
+    meta_skills_a::TOKENS,
+    meta_variants_a::TOKENS,
 ];
 
 /// Whether a card is a token, which decks may not contain.
@@ -174,30 +208,37 @@ pub fn beyond_reference(id: &str) -> bool {
 }
 
 pub type CardHook = fn(&mut Game, usize);
+pub type ConditionalCardHook = fn(&mut Game, usize) -> bool;
 pub type PlayHook = fn(&mut Game, usize, usize);
 pub type PlayRequirement = fn(&Game<'_>, usize, usize, usize) -> bool;
 pub type ActivateRequirement = fn(&Game<'_>, usize) -> bool;
 /// Arguments: the guarding card, the card whose cost would change, its old and its new cost.
 pub type CostGuard = fn(&Game<'_>, usize, usize, i32, i32) -> bool;
 pub type OngoingPlayGuard = fn(&Game<'_>, usize, usize, usize, usize) -> bool;
+pub type GlobalPlayGuard = fn(&Game<'_>, usize, usize, usize, usize, usize) -> bool;
 
 pub struct CardDef {
     pub id: &'static str,
+    /// Game-start ability dispatched before either opening deck is shuffled or drawn.
+    pub pre_game_start: Option<CardHook>,
     pub reveal: Option<CardHook>,
     pub ongoing: Option<CardHook>,
     pub in_hand_ongoing: Option<CardHook>,
     pub late_in_hand_ongoing: Option<CardHook>,
+    pub conditional_in_hand_ongoing: Option<ConditionalCardHook>,
     /// Refresh objective progress after all ongoing effects have run.
     pub objective_update: Option<CardHook>,
     /// Freeze readiness before any post-end-turn objective completes.
     pub objective_freeze: Option<CardHook>,
     /// Ongoing effect evaluated after normal card and location contributions.
-    pub late_ongoing: Option<CardHook>,
+    pub late_ongoing: Option<ConditionalCardHook>,
     /// Final hand-cost adjustment after ordinary location modifiers.
     pub modify_final_cost: Option<fn(&Game<'_>, usize, i32) -> i32>,
     /// Return false to block a proposed cost transition.
     pub cost_guard: Option<CostGuard>,
     pub ongoing_ability: bool,
+    /// Ongoing grants the owner's hand cards permission to ignore play restrictions.
+    pub grants_unrestricted_hand_plays: bool,
     pub extra_ongoing_runs: u8,
     pub reveal_repetitions: Option<fn(&Game<'_>, usize, usize) -> u8>,
     pub on_play: Option<PlayHook>,
@@ -205,6 +246,8 @@ pub struct CardDef {
     pub can_play: Option<PlayRequirement>,
     /// Source, target card, destination lane, playing seat; false blocks the play.
     pub ongoing_play_guard: Option<OngoingPlayGuard>,
+    /// Source, target, destination, playing seat and number already queued.
+    pub global_play_guard: Option<GlobalPlayGuard>,
     /// Once-per-game player activation, and an optional additional requirement.
     pub on_activate: Option<CardHook>,
     pub can_activate: Option<ActivateRequirement>,
@@ -219,6 +262,8 @@ pub struct CardDef {
     pub blocks_player_move: Option<fn(&Game<'_>, usize, usize) -> bool>,
     pub pre_end_turn: Option<CardHook>,
     pub end_turn: Option<CardHook>,
+    /// The End-of-Turn ability also runs while this card is in its owner's hand.
+    pub end_turn_in_hand: bool,
     /// An End-of-Turn trigger implemented through the event hook.
     pub end_turn_trigger: bool,
     pub on_move_here: Option<PlayHook>,
@@ -229,10 +274,14 @@ pub struct CardDef {
     pub start_turn: Option<CardHook>,
     pub post_start_turn: Option<CardHook>,
     pub on_event: Option<fn(&mut Game<'_>, usize, crate::game::Event)>,
+    /// Receives permanent power increase events while face down on the board.
+    pub event_active_when_unrevealed: bool,
     pub on_added: Option<CardHook>,
     pub initial_state: Option<fn() -> Box<dyn crate::game::CardState>>,
     pub clear_reveal_state: Option<fn(&mut crate::game::Card)>,
     pub blocks_reveal: bool,
+    /// Ongoing source stops its owner's cards at its location revealing until EndGame.
+    pub conceals_owner_cards: bool,
     pub prevents_destroy: bool,
     /// Source-specific ongoing protection for a destruction target.
     pub destroy_guard: Option<fn(&Game<'_>, usize, usize) -> bool>,
@@ -253,21 +302,25 @@ impl CardDef {
     pub const fn vanilla(id: &'static str) -> Self {
         Self {
             id,
+            pre_game_start: None,
             reveal: None,
             ongoing: None,
             in_hand_ongoing: None,
             late_in_hand_ongoing: None,
+            conditional_in_hand_ongoing: None,
             objective_update: None,
             objective_freeze: None,
             late_ongoing: None,
             modify_final_cost: None,
             cost_guard: None,
             ongoing_ability: false,
+            grants_unrestricted_hand_plays: false,
             extra_ongoing_runs: 0,
             reveal_repetitions: None,
             on_play: None,
             can_play: None,
             ongoing_play_guard: None,
+            global_play_guard: None,
             on_activate: None,
             can_activate: None,
             activate_cost: 0,
@@ -279,8 +332,10 @@ impl CardDef {
             pre_end_turn: None,
             blocks_spawns: false,
             end_turn: None,
+            end_turn_in_hand: false,
             end_turn_trigger: false,
             blocks_reveal: false,
+            conceals_owner_cards: false,
             prevents_destroy: false,
             destroy_guard: None,
             blocks_expensive_plays: false,
@@ -297,6 +352,7 @@ impl CardDef {
             start_turn: None,
             post_start_turn: None,
             on_event: None,
+            event_active_when_unrevealed: false,
             on_added: None,
             initial_state: None,
             clear_reveal_state: None,
@@ -406,11 +462,14 @@ static GROUPS: &[&[CardDef]] = &[
     BASE,
     meta_a1::CARDS,
     meta_a2::CARDS,
+    meta_auto::CARDS,
     meta_b1::CARDS,
     meta_b2::CARDS,
     meta_b3a::CARDS,
     meta_b3b::CARDS,
     meta_c::CARDS,
+    meta_comp::CARDS,
+    meta_comp3::CARDS,
     meta_d::CARDS,
     meta_e1::CARDS,
     meta_e2::CARDS,
@@ -439,7 +498,24 @@ static GROUPS: &[&[CardDef]] = &[
     meta_m4::CARDS,
     meta_m5::CARDS,
     meta_m6::CARDS,
+    meta_na::CARDS,
+    meta_nc::CARDS,
+    meta_nd::CARDS,
+    meta_nd_rings::CARDS,
+    meta_ne::CARDS,
+    meta_tff::CARDS,
     kahhori::CARDS,
+    meta_zd2::CARDS,
+    meta_evolved::CARDS,
+    meta_comp2::CARDS,
+    meta_comp5::CARDS,
+    meta_comp4::CARDS,
+    meta_variants1::CARDS,
+    meta_variants_b::CARDS,
+    meta_variants_a::CARDS,
+    meta_skills_b::CARDS,
+    meta_skills_a::CARDS,
+    meta_variants_c::CARDS,
 ];
 
 /// Every registered card rule.

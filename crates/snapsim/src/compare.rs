@@ -1,7 +1,7 @@
 //! Duplicate-seat match evaluation and SearchAI's public-information projection.
 use crate::{
     advise::{self, AdviseOptions},
-    game::{Action, Game, RetreatCost, Stakes},
+    game::{Action, Game, Stakes},
     position::{self, CardRef, LocationRef, Opponent, Position},
     random::PythonRandom,
 };
@@ -102,7 +102,9 @@ fn card_ref(game: &Game<'_>, id: usize, board: bool) -> CardRef {
     CardRef {
         id: card.def.id.to_owned(),
         cost: Some(game.card_cost(id)),
+        cost_basis: Some(card.cost),
         power: Some(card.power()),
+        created: (!crate::cards::reference_rules_enabled()).then_some(card.created),
         revealed: card.revealed,
         played_turn: board.then_some(card.turn_played),
         activated: (board && card.activated).then_some(true),
@@ -154,6 +156,7 @@ pub fn search_position(
         };
         LocationRef {
             id: lane.revealed.then(|| lane.def.id.to_owned()),
+            destroyed: lane.destroyed,
             mine,
             theirs,
             theirs_face_down,
@@ -168,12 +171,18 @@ pub fn search_position(
     });
     let player = &game.players[seat];
     let other = &game.players[opponent];
-    let mut deck: Vec<_> = player
+    let mut entries: Vec<_> = player
         .deck
         .iter()
-        .map(|&id| game.cards[id].def.id.to_owned())
+        .map(|&id| {
+            (
+                game.cards[id].def.id.to_owned(),
+                Some(game.cards[id].created),
+            )
+        })
         .collect();
-    deck.sort();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let (deck, origins): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
     Position {
         turn: game.turn,
         total_turns: game.total_turns,
@@ -184,6 +193,7 @@ pub fn search_position(
             .map(|&id| card_ref(game, id, false))
             .collect(),
         deck,
+        deck_created: (!crate::cards::reference_rules_enabled()).then_some(origins),
         locations,
         opponent: Opponent {
             hand: other.hand.len(),
@@ -232,6 +242,7 @@ pub fn search_plan(
             .unwrap_or(32) as usize,
         seed,
         position_rollouts: 0,
+        stake_rollouts: 0,
         max_plans: 1,
         time_limit,
         approximate: true,
@@ -562,6 +573,19 @@ pub enum StakeDecision {
     Stay,
     Snap,
     Retreat,
+    RetreatLater,
+}
+
+fn legal_stake_decision(game: &Game<'_>, seat: usize, decision: StakeDecision) -> StakeDecision {
+    if matches!(
+        decision,
+        StakeDecision::Retreat | StakeDecision::RetreatLater
+    ) && !game.can_retreat_seat(seat, false)
+    {
+        StakeDecision::Stay
+    } else {
+        decision
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -581,6 +605,53 @@ impl StakePolicy for ThresholdStakePolicy {
         }
     }
 }
+/// Apply sampled requests in arrival order. Immediate concessions end the game;
+/// two concurrently sampled requests have no observed ordering, so use a fair draw.
+fn apply_stake_decisions(
+    game: &mut Game<'_>,
+    decisions: [StakeDecision; 2],
+    rng: &mut PythonRandom,
+) -> Result<Option<[i64; 2]>, String> {
+    let first = if decisions.iter().all(|d| *d != StakeDecision::Stay) && rng.random() >= 0.5 {
+        1
+    } else {
+        0
+    };
+    let mut deferred = game
+        .stakes
+        .as_ref()
+        .ok_or("missing stakes")?
+        .pending_retreat;
+    for player in [first, 1 - first] {
+        match legal_stake_decision(game, player, decisions[player]) {
+            StakeDecision::Retreat => {
+                deferred[player] = true;
+                return Ok(game
+                    .stakes
+                    .as_ref()
+                    .ok_or("missing stakes")?
+                    .deferred_retreat(deferred));
+            }
+            StakeDecision::RetreatLater => deferred[player] = true,
+            StakeDecision::Snap => {
+                let stakes = game.stakes.as_mut().ok_or("missing stakes")?;
+                if stakes.can_raise && !stakes.snapped[player] && stakes.next < stakes.maximum {
+                    stakes.snap(player)?;
+                    game.players[player].snapped_turns.push(game.turn);
+                    if deferred[1 - player] {
+                        return Ok(stakes.deferred_retreat(deferred));
+                    }
+                }
+            }
+            StakeDecision::Stay => {}
+        }
+    }
+    game.stakes
+        .as_mut()
+        .ok_or("missing stakes")?
+        .pending_retreat = deferred;
+    Ok(None)
+}
 
 fn stake_estimate(
     game: &Game<'_>,
@@ -595,6 +666,7 @@ fn stake_estimate(
     let options = AdviseOptions {
         rollouts,
         position_rollouts: 0,
+        stake_rollouts: 0,
         seed,
         max_plans: 1,
         time_limit: None,
@@ -609,6 +681,294 @@ fn stake_estimate(
         .and_then(|plans| plans.first())
         .and_then(|plan| plan["win"].as_f64())
         .ok_or_else(|| "stake estimate unavailable".to_owned())
+}
+
+/// Restore only uniquely decomposable cube state. At the cap the individual
+/// multipliers cannot be recovered from the displayed values alone.
+fn restored_stakes(position: &Position, local_can_raise: bool) -> Option<Stakes> {
+    let observed = position.stakes.as_ref()?;
+    let maximum = observed.maximum.unwrap_or(8);
+    if observed.current == 0 || observed.current > maximum || observed.next > maximum {
+        return None;
+    }
+    let end = observed
+        .end_game_multiplier
+        .unwrap_or(if position.turn == position.total_turns {
+            2
+        } else {
+            1
+        });
+    let game = observed.game_multiplier.unwrap_or(1);
+    let base = observed.current.checked_mul(end)?.checked_mul(game)?;
+    let player = match observed.player_multiplier {
+        Some(value) => value,
+        None if observed.next < maximum && base > 0 && observed.next % base == 0 => {
+            observed.next / base
+        }
+        None if observed.next == maximum && base == maximum && !local_can_raise => 1,
+        _ => return None,
+    };
+    if player == 0 || base.saturating_mul(player).min(maximum) != observed.next {
+        return None;
+    }
+    let opponent_can_raise = observed.can_raise.and_then(|v| v[1]).unwrap_or(true);
+    Some(Stakes {
+        current: observed.current,
+        next: observed.next,
+        maximum,
+        can_raise: true,
+        player_multiplier: [player, 1],
+        end_game_multiplier: end,
+        game_multiplier: game,
+        snapped: [!local_can_raise, !opponent_can_raise],
+        last_raiser: observed.last_raiser.filter(|seat| *seat < 2),
+        pending_retreat: [false; 2],
+    })
+}
+
+const MEPHISTO_STAKE_REASON: &str = "Mephisto winnings are server-side (no client behaviour def)";
+
+enum StakeOutcome {
+    Known(i64),
+    UnknownMephisto,
+    Unavailable,
+}
+
+fn stake_outcome(game: &Game<'_>, value: i64) -> StakeOutcome {
+    if game
+        .lanes
+        .iter()
+        .flat_map(|lane| &lane.cards)
+        .any(|&card| game.cards[card].revealed && game.cards[card].def.id == "Mephisto")
+    {
+        StakeOutcome::UnknownMephisto
+    } else {
+        StakeOutcome::Known(value)
+    }
+}
+
+/// One stand-in policy game from a visible planning position.
+fn stake_position_game(
+    position: &Position,
+    initial: StakeDecision,
+    local_can_raise: bool,
+    opponent: ThresholdStakePolicy,
+    seed: i128,
+) -> Result<StakeOutcome, String> {
+    let Some(stakes) = restored_stakes(position, local_can_raise) else {
+        return Ok(StakeOutcome::Unavailable);
+    };
+    if initial == StakeDecision::Snap && (!local_can_raise || stakes.next >= stakes.maximum) {
+        return Ok(StakeOutcome::Unavailable);
+    }
+    let mut random = PythonRandom::seed(seed);
+    let mut game = position::build_game(position, &mut random)?;
+    game.stakes = Some(stakes);
+    if initial == StakeDecision::Retreat && !game.can_retreat_seat(0, false) {
+        return Ok(StakeOutcome::Unavailable);
+    }
+    let mut decisions_rng = PythonRandom::seed(seed ^ 0x0053_5441_4b45);
+    if let Some(result) = apply_stake_decisions(
+        &mut game,
+        [initial, StakeDecision::Stay],
+        &mut decisions_rng,
+    )? {
+        return Ok(stake_outcome(&game, result[0]));
+    }
+    let estimate = stake_estimate(&game, 1, position.mode.as_deref(), 4, seed ^ 1)
+        .map_err(|error| format!("opponent stake estimate: {error}"))?;
+    let response = opponent.decide(estimate, game.stakes.as_ref().unwrap().snapped[1]);
+    if let Some(result) = apply_stake_decisions(
+        &mut game,
+        [StakeDecision::Stay, response],
+        &mut decisions_rng,
+    )? {
+        return Ok(stake_outcome(&game, result[0]));
+    }
+    let priority = match position.priority.as_deref() {
+        Some("me") => Some(0),
+        Some("opponent") => Some(1),
+        _ => None,
+    };
+    game.play_position_policy_turn(crate::policy::Policy::Spread, priority, false)
+        .map_err(|error| format!("position policy turn: {error}"))?;
+    let own = ThresholdStakePolicy {
+        snap: Some(0.85),
+        retreat: Some(0.25),
+    };
+    while game.turn <= game.total_turns {
+        let turn = game.turn;
+        let mut retreat = None;
+        let played = game
+            .play_turn_with_stakes(
+                |game| {
+                    let mut decisions = [StakeDecision::Stay; 2];
+                    for (seat, decision) in decisions.iter_mut().enumerate() {
+                        let estimate = stake_estimate(
+                            game,
+                            seat,
+                            position.mode.as_deref(),
+                            4,
+                            seed.wrapping_add(i128::from(turn) * 2 + seat as i128),
+                        )
+                        .map_err(|error| {
+                            format!("turn {turn}, seat {seat} stake estimate: {error}")
+                        })?;
+                        let policy = if seat == 0 { own } else { opponent };
+                        *decision =
+                            policy.decide(estimate, game.stakes.as_ref().unwrap().snapped[seat]);
+                    }
+                    if let Some(result) =
+                        apply_stake_decisions(game, decisions, &mut decisions_rng)?
+                    {
+                        retreat = Some(result[0]);
+                        return Ok(false);
+                    }
+                    Ok(true)
+                },
+                |game, seat, priority| {
+                    search_plan(
+                        game,
+                        seat,
+                        Some(priority),
+                        position.mode.as_deref(),
+                        &json!({"rollouts": 4, "playout": "spread"}),
+                        seed,
+                        None,
+                    )
+                },
+            )
+            .map_err(|error| format!("stake continuation turn {turn}: {error}"))?;
+        if played.is_none() {
+            let outcome = retreat.or_else(|| {
+                game.stakes
+                    .as_ref()
+                    .and_then(|stakes| stakes.deferred_retreat(stakes.pending_retreat))
+                    .map(|outcome| outcome[0])
+            });
+            return Ok(outcome.map_or(StakeOutcome::Unavailable, |value| {
+                stake_outcome(&game, value)
+            }));
+        }
+    }
+    let winner = game.winner();
+    let stakes = game.stakes.as_mut().ok_or("missing stakes")?;
+    stakes.set_end_game_multiplier(2);
+    stakes.finish_game();
+    let value = stakes.showdown((winner < 2).then_some(winner as usize))[0];
+    Ok(stake_outcome(&game, value))
+}
+
+fn stake_sample_value(total: i64, count: u32, unknown: u32, available: bool) -> Result<Value, ()> {
+    if u64::from(unknown) * 20 > u64::from(count) + u64::from(unknown) {
+        return Err(());
+    }
+    if count == 0 {
+        Ok(json!({"reason": if available { "not_enough_time" } else { "unavailable" }}))
+    } else {
+        Ok(json!({"net_cubes": total as f64 / f64::from(count),
+            "samples": count, "unknown_samples": unknown}))
+    }
+}
+
+pub(crate) fn stake_position_sweep(
+    position: &Position,
+    samples: u32,
+    seed: i128,
+    stopped: &(dyn Fn() -> bool + Sync),
+) -> Result<Value, String> {
+    if position
+        .locations
+        .iter()
+        .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+        .any(|card| card.id == "Mephisto")
+    {
+        return Ok(json!({"declined": MEPHISTO_STAKE_REASON, "unknown_samples": 0}));
+    }
+    let policies = [
+        ("stay", None, None),
+        ("retreat_025", None, Some(0.25)),
+        ("retreat_035", None, Some(0.35)),
+        ("retreat_050", None, Some(0.50)),
+        ("snap_075", Some(0.75), None),
+        ("snap_085", Some(0.85), None),
+    ];
+    let observed = position
+        .stakes
+        .as_ref()
+        .and_then(|s| s.can_raise)
+        .and_then(|v| v[0]);
+    let actions = [
+        ("snap", StakeDecision::Snap),
+        ("stay", StakeDecision::Stay),
+        ("retreat", StakeDecision::Retreat),
+    ];
+    let mut totals = [[[0_i64; 3]; 6]; 2];
+    let mut counts = [[[0_u32; 3]; 6]; 2];
+    let mut unknown = [[[0_u32; 3]; 6]; 2];
+    let mut available = [[[true; 3]; 6]; 2];
+    for policy in &mut available[1] {
+        policy[0] = false;
+    }
+    // Interleave the policies so a deadline cannot consume all samples on the
+    // first policy while leaving the remaining assumptions unexamined.
+    'sampling: for index in 0..samples {
+        for (seat_case, eligible) in [true, false].into_iter().enumerate() {
+            if observed.is_some_and(|value| value != eligible) {
+                continue;
+            }
+            for (policy_index, (_, snap, retreat)) in policies.iter().copied().enumerate() {
+                let policy = ThresholdStakePolicy { snap, retreat };
+                for (action_index, (_, action)) in actions.iter().copied().enumerate() {
+                    if !available[seat_case][policy_index][action_index] {
+                        continue;
+                    }
+                    if stopped() {
+                        break 'sampling;
+                    }
+                    match stake_position_game(position, action, eligible, policy,
+                        seed.wrapping_add(i128::from(index))).map_err(|error| format!(
+                            "stake rollout sample {index}, eligibility {eligible}, policy {policy_index}, action {action:?}: {error}"
+                        ))? {
+                        StakeOutcome::Known(value) => {
+                            totals[seat_case][policy_index][action_index] += value;
+                            counts[seat_case][policy_index][action_index] += 1;
+                        }
+                        StakeOutcome::UnknownMephisto => unknown[seat_case][policy_index][action_index] += 1,
+                        StakeOutcome::Unavailable => available[seat_case][policy_index][action_index] = false,
+                    }
+                }
+            }
+        }
+    }
+    let mut scenarios = Vec::new();
+    for (seat_case, eligible) in [true, false].into_iter().enumerate() {
+        if observed.is_some_and(|value| value != eligible) {
+            continue;
+        }
+        for (policy_index, (name, _, _)) in policies.iter().copied().enumerate() {
+            let mut values = serde_json::Map::new();
+            for (action_index, (action, _)) in actions.iter().copied().enumerate() {
+                let count = counts[seat_case][policy_index][action_index];
+                let unknown_count = unknown[seat_case][policy_index][action_index];
+                let Ok(value) = stake_sample_value(
+                    totals[seat_case][policy_index][action_index],
+                    count,
+                    unknown_count,
+                    available[seat_case][policy_index][action_index],
+                ) else {
+                    return Ok(json!({"declined": MEPHISTO_STAKE_REASON,
+                        "unknown_samples": unknown_count, "known_samples": count}));
+                };
+                values.insert(action.into(), value);
+            }
+            scenarios
+                .push(json!({"you_can_snap": eligible, "opponent_policy": name, "values": values}));
+        }
+    }
+    Ok(
+        json!({"scenarios": scenarios, "basis": "provisional policy sweep; opponent eligibility assumed when unobserved; 4-rollout threshold estimates; immediate retreat uses displayed current cubes"}),
+    )
 }
 
 /// Whether snaps may raise the stake. In the owner's recordings RankedRecruit matches stayed at
@@ -627,7 +987,7 @@ fn stake_game(
     a_seat: usize,
     mode: Option<&str>,
     args: &Value,
-) -> Result<i64, String> {
+) -> Result<Option<i64>, String> {
     let mut rng = PythonRandom::seed(seed);
     let mut game = Game::new(
         [&decks[0], &decks[1]],
@@ -666,6 +1026,8 @@ fn stake_game(
         end_game_multiplier: 1,
         game_multiplier: 1,
         snapped: [false; 2],
+        last_raiser: None,
+        pending_retreat: [false; 2],
     });
     let policies = [
         ThresholdStakePolicy {
@@ -703,8 +1065,11 @@ fn stake_game(
                 let mut decisions = [StakeDecision::Stay; 2];
                 for player in 0..2 {
                     let side = usize::from(player != a_seat);
-                    decisions[player] =
-                        policies[side].decide(estimates[player], stakes.snapped[player]);
+                    decisions[player] = legal_stake_decision(
+                        game,
+                        player,
+                        policies[side].decide(estimates[player], stakes.snapped[player]),
+                    );
                     if decisions[player] == StakeDecision::Snap
                         && (!stakes.can_raise || stakes.next >= stakes.maximum)
                     {
@@ -718,7 +1083,7 @@ fn stake_game(
                             ))
                             .and_then(Value::as_f64)
                             .unwrap_or(1.0),
-                        StakeDecision::Retreat => args
+                        StakeDecision::Retreat | StakeDecision::RetreatLater => args
                             .get(format!(
                                 "{}_retreat_probability",
                                 if side == 0 { "a" } else { "b" }
@@ -734,25 +1099,12 @@ fn stake_game(
                         decisions[player] = StakeDecision::Stay;
                     }
                 }
-                if decisions == [StakeDecision::Retreat; 2] || decisions == [StakeDecision::Snap; 2]
-                {
-                    return Err("simultaneous retreat or snap is not established".into());
-                }
-                if let Some(player) = decisions.iter().position(|d| *d == StakeDecision::Retreat) {
-                    retreat_result = Some(
-                        game.stakes
-                            .as_ref()
-                            .unwrap()
-                            .retreat_now(player, RetreatCost::DisplayedCurrent)?[a_seat],
-                    );
+                // HandleRaiseStakesRequest 0x7db6da8 applies one request and
+                // updates eligibility; EndGameWithConceder 0x7da9fe8 ends on
+                // the first immediate concession.
+                if let Some(result) = apply_stake_decisions(game, decisions, &mut policy_rng)? {
+                    retreat_result = Some(result[a_seat]);
                     return Ok(false);
-                }
-                if let Some(player) = decisions.iter().position(|d| *d == StakeDecision::Snap) {
-                    let stakes = game.stakes.as_mut().unwrap();
-                    if stakes.can_raise && stakes.next < stakes.maximum {
-                        stakes.snap(player)?;
-                        game.players[player].snapped_turns.push(turn);
-                    }
                 }
                 Ok(true)
             },
@@ -769,14 +1121,31 @@ fn stake_game(
             },
         )?;
         if result.is_none() {
-            return retreat_result.ok_or_else(|| "retreat result unavailable".into());
+            let value = retreat_result
+                .or_else(|| {
+                    game.stakes
+                        .as_ref()
+                        .and_then(|stakes| stakes.deferred_retreat(stakes.pending_retreat))
+                        .map(|outcome| outcome[a_seat])
+                })
+                .ok_or_else(|| "retreat result unavailable".to_owned())?;
+            return match stake_outcome(&game, value) {
+                StakeOutcome::Known(value) => Ok(Some(value)),
+                StakeOutcome::UnknownMephisto => Ok(None),
+                StakeOutcome::Unavailable => unreachable!(),
+            };
         }
     }
     let winner = game.winner();
     let stakes = game.stakes.as_mut().ok_or("missing stakes")?;
     stakes.set_end_game_multiplier(final_multiplier);
     stakes.finish_game();
-    Ok(stakes.showdown((winner < 2).then_some(winner as usize))[a_seat])
+    let value = stakes.showdown((winner < 2).then_some(winner as usize))[a_seat];
+    match stake_outcome(&game, value) {
+        StakeOutcome::Known(value) => Ok(Some(value)),
+        StakeOutcome::UnknownMephisto => Ok(None),
+        StakeOutcome::Unavailable => unreachable!(),
+    }
 }
 
 fn compare_stakes(args: &Value) -> Result<Value, String> {
@@ -840,7 +1209,7 @@ fn compare_stakes(args: &Value) -> Result<Value, String> {
         .num_threads(workers)
         .build()
         .map_err(|e| e.to_string())?;
-    let pairs: Vec<f64> = pool.install(|| {
+    let results: Vec<(Option<i64>, Option<i64>)> = pool.install(|| {
         (0..games)
             .into_par_iter()
             .map(|index| {
@@ -864,23 +1233,52 @@ fn compare_stakes(args: &Value) -> Result<Value, String> {
                     [a, b]
                 };
                 let second = stake_game(&second_decks, s, 1, mode, args)?;
-                Ok((first + second) as f64 / 2.0)
+                Ok((first, second))
             })
             .collect::<Result<_, String>>()
     })?;
-    let mean = pairs.iter().sum::<f64>() / games as f64;
-    let ci = if games > 1 {
-        let variance = pairs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (games - 1) as f64;
-        let radius = 1.959963984540054 * (variance / games as f64).sqrt();
-        Some([mean - radius, mean + radius])
+    let unknown = results
+        .iter()
+        .map(|(a, b)| usize::from(a.is_none()) + usize::from(b.is_none()))
+        .sum::<usize>();
+    let known = 2 * games - unknown;
+    if unknown > 0 && unknown.saturating_mul(20) > 2 * games {
+        return Ok(
+            json!({"declined": MEPHISTO_STAKE_REASON, "unknown_samples": unknown, "known_samples": known, "config": args}),
+        );
+    }
+    let pairs: Vec<f64> = results
+        .iter()
+        .filter_map(|&(a, b)| a.zip(b).map(|(a, b)| (a + b) as f64 / 2.0))
+        .collect();
+    let pair_mean = pairs.iter().sum::<f64>() / pairs.len() as f64;
+    let mean = if unknown == 0 {
+        pair_mean
+    } else {
+        results
+            .iter()
+            .flat_map(|&(a, b)| [a, b])
+            .flatten()
+            .map(|value| value as f64)
+            .sum::<f64>()
+            / known as f64
+    };
+    let ci = if pairs.len() > 1 {
+        let variance =
+            pairs.iter().map(|x| (x - pair_mean).powi(2)).sum::<f64>() / (pairs.len() - 1) as f64;
+        let radius = 1.959963984540054 * (variance / pairs.len() as f64).sqrt();
+        Some([pair_mean - radius, pair_mean + radius])
     } else {
         None
     };
-    Ok(
-        json!({"net_cubes_per_game": mean, "paired": {"score": mean, "ci95": ci, "pairs": games},
+    let mut result = json!({"net_cubes_per_game": mean, "paired": {"score": pair_mean, "ci95": ci, "pairs": pairs.len()},
         "pair_scores": pairs, "retreat_semantics": if args.get("a_retreat_threshold").and_then(Value::as_f64).is_some() || args.get("b_retreat_threshold").and_then(Value::as_f64).is_some() { "provisional" } else { "not_used" },
-        "draw_semantics": "provisional", "snap_acceptance": "provisional", "config": args}),
-    )
+        "draw_semantics": "provisional", "snap_acceptance": "provisional", "config": args});
+    if unknown > 0 {
+        result["unknown_samples"] = json!(unknown);
+        result["known_samples"] = json!(known);
+    }
+    Ok(result)
 }
 
 /// Run the duplicate-seat compare harness with seed-ordered pair results.
@@ -1032,12 +1430,270 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn stake_policy_cannot_retreat_from_vesuvius_after_turn_five() {
+        let mut rng = crate::random::PythonRandom::seed(3);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "MountVesuvius", "Wakanda"].map(str::to_owned);
+        let mut game = crate::game::Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.lanes[1].def = crate::locations::get("MountVesuvius").unwrap();
+        game.lanes[1].revealed = true;
+        game.turn = 5;
+        assert_eq!(
+            super::legal_stake_decision(&game, 0, super::StakeDecision::Retreat),
+            super::StakeDecision::Retreat
+        );
+        game.turn = 6;
+        assert_eq!(
+            super::legal_stake_decision(&game, 0, super::StakeDecision::Retreat),
+            super::StakeDecision::Stay
+        );
+        assert_eq!(
+            super::legal_stake_decision(&game, 0, super::StakeDecision::Snap),
+            super::StakeDecision::Snap
+        );
+    }
+
+    #[test]
+    fn deferred_retreat_waits_for_opponent_staging_before_resolution() {
+        let mut rng = crate::random::PythonRandom::seed(7);
+        let deck = [
+            "Wasp",
+            "AntMan",
+            "Hawkeye",
+            "Quicksilver",
+            "SquirrelGirl",
+            "Nightcrawler",
+            "MistyKnight",
+            "Korg",
+            "Sunspot",
+            "Iceman",
+            "Blade",
+            "RocketRaccoon",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Wakanda", "ThePeak"].map(str::to_owned);
+        let mut game = crate::game::Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.stakes = Some(super::Stakes {
+            current: 1,
+            next: 2,
+            maximum: 8,
+            can_raise: true,
+            player_multiplier: [2, 1],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
+        });
+        let mut order = crate::random::PythonRandom::seed(1);
+        assert!(
+            super::apply_stake_decisions(
+                &mut game,
+                [
+                    super::StakeDecision::RetreatLater,
+                    super::StakeDecision::RetreatLater
+                ],
+                &mut order,
+            )
+            .unwrap()
+            .is_none()
+        );
+        let stakes = game.stakes.as_mut().unwrap();
+        assert_eq!(
+            stakes.deferred_retreat(stakes.pending_retreat),
+            Some([0, 0])
+        );
+        stakes.pending_retreat = [false; 2];
+        let result = game
+            .play_turn_with_stakes(
+                |game| {
+                    assert!(
+                        super::apply_stake_decisions(
+                            game,
+                            [
+                                super::StakeDecision::RetreatLater,
+                                super::StakeDecision::Stay
+                            ],
+                            &mut order
+                        )?
+                        .is_none()
+                    );
+                    Ok(true)
+                },
+                |game, seat, _| {
+                    Ok(if seat == 1 {
+                        vec![super::Action::Play {
+                            card: game.players[1].hand[0],
+                            lane: 0,
+                        }]
+                    } else {
+                        vec![]
+                    })
+                },
+            )
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(game.turn, 1);
+        assert_eq!(game.lanes[0].cards.len(), 1);
+        assert!(!game.cards[game.lanes[0].cards[0]].revealed);
+        let stakes = game.stakes.unwrap();
+        assert_eq!(stakes.current, 1);
+        assert_eq!(
+            stakes.deferred_retreat(stakes.pending_retreat),
+            Some([-1, 1])
+        );
+    }
+
+    #[test]
+    fn last_raiser_cannot_concede_on_their_snap_turn() {
+        let mut rng = crate::random::PythonRandom::seed(3);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Wakanda", "ThePeak"].map(str::to_owned);
+        let mut game = crate::game::Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.turn = 3;
+        game.stakes = Some(super::Stakes {
+            current: 1,
+            next: 1,
+            maximum: 8,
+            can_raise: true,
+            player_multiplier: [1; 2],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
+        });
+        assert!(game.can_retreat_seat(0, false));
+        let mut order = crate::random::PythonRandom::seed(1);
+        super::apply_stake_decisions(
+            &mut game,
+            [super::StakeDecision::Snap, super::StakeDecision::Stay],
+            &mut order,
+        )
+        .unwrap();
+        assert!(!game.can_retreat_seat(0, false));
+        assert!(game.can_retreat_seat(1, false));
+        super::apply_stake_decisions(
+            &mut game,
+            [super::StakeDecision::Stay, super::StakeDecision::Snap],
+            &mut order,
+        )
+        .unwrap();
+        assert!(game.can_retreat_seat(0, false));
+        assert!(!game.can_retreat_seat(1, false));
+        game.turn = 4;
+        assert!(game.can_retreat_seat(1, false));
+    }
+
+    #[test]
     fn stake_comparison_is_seed_deterministic() {
         let options = json!({"stakes": true, "mode": "recruit", "games": 2,
             "workers": 1, "rollouts": 2, "seed": 19, "a_snap_threshold": 0.8});
         let first = super::compare(&options).unwrap();
         let second = super::compare(&options).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn both_seats_can_request_a_snap_on_the_same_turn() {
+        let options = json!({"stakes": true, "mode": "recruit", "games": 2,
+            "workers": 1, "rollouts": 2, "seed": 19, "stake_prevent_raise": false,
+            "a_snap_threshold": 0.0, "b_snap_threshold": 0.0});
+        assert!(super::compare(&options).is_ok());
+    }
+
+    #[test]
+    fn stake_restore_requires_unambiguous_pending_multiplier() {
+        let mut position = crate::position::Position {
+            turn: 5,
+            total_turns: 6,
+            ..Default::default()
+        };
+        position.stakes = Some(serde_json::from_value(json!({"current": 1, "next": 2})).unwrap());
+        let stakes = super::restored_stakes(&position, true).unwrap();
+        assert_eq!(stakes.player_multiplier, [2, 1]);
+        position.turn = 6;
+        let stakes = super::restored_stakes(&position, true).unwrap();
+        assert_eq!(
+            (stakes.player_multiplier, stakes.end_game_multiplier),
+            ([1, 1], 2)
+        );
+        position.stakes = Some(serde_json::from_value(json!({"current": 4, "next": 8})).unwrap());
+        assert!(super::restored_stakes(&position, true).is_none());
+    }
+
+    #[test]
+    fn mephisto_stake_outcomes_are_declined_or_counted() {
+        let mut position = crate::position::Position::default();
+        position.locations[0]
+            .mine
+            .push(serde_json::from_value(json!({"id":"Mephisto"})).unwrap());
+        let result = super::stake_position_sweep(&position, 1, 1, &|| false).unwrap();
+        assert_eq!(result["declined"], super::MEPHISTO_STAKE_REASON);
+        assert_eq!(
+            super::stake_sample_value(12, 19, 1, true).unwrap(),
+            json!({"net_cubes":12.0 / 19.0,"samples":19,"unknown_samples":1})
+        );
+        assert!(super::stake_sample_value(12, 18, 2, true).is_err());
+        let mut rng = crate::random::PythonRandom::seed(3);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Wakanda", "ThePeak"].map(str::to_owned);
+        let mut game = crate::game::Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let card = game.create_card("Mephisto", 1);
+        game.cards[card].lane = Some(0);
+        game.lanes[0].cards.push(card);
+        game.cards[card].revealed = true;
+        assert!(matches!(
+            super::stake_outcome(&game, 2),
+            super::StakeOutcome::UnknownMephisto
+        ));
+        game.lanes[0].cards.clear();
+        assert!(matches!(
+            super::stake_outcome(&game, 2),
+            super::StakeOutcome::Known(2)
+        ));
     }
 
     #[test]
@@ -1127,6 +1783,31 @@ mod tests {
         });
         for seed in 0..3 {
             compare_pair(seed, &options).unwrap();
+        }
+    }
+    #[test]
+    fn recorded_stake_samples_stage_legal_actions() {
+        let opponent = super::ThresholdStakePolicy {
+            snap: None,
+            retreat: None,
+        };
+        for (fixture, sample) in [
+            (include_str!("../tests/fixtures/stakes-milano.json"), 35),
+            (include_str!("../tests/fixtures/stakes-kyln.json"), 21),
+        ] {
+            let position: crate::position::Position = serde_json::from_str(fixture).unwrap();
+            let outcome = super::stake_position_game(
+                &position,
+                super::StakeDecision::Snap,
+                true,
+                opponent,
+                20_261_123 + sample,
+            )
+            .unwrap();
+            assert!(matches!(
+                outcome,
+                super::StakeOutcome::Known(_) | super::StakeOutcome::UnknownMephisto
+            ));
         }
     }
 }

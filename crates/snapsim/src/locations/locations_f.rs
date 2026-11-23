@@ -50,8 +50,7 @@ fn attilan(game: &mut Game<'_>, _: usize) {
         return;
     }
     for seat in 0..2 {
-        let hand = std::mem::take(&mut game.players[seat].hand);
-        game.players[seat].deck.extend(hand);
+        game.move_hand_to_deck(seat);
         game.shuffle_deck(seat);
         for _ in 0..3 {
             game.draw(seat);

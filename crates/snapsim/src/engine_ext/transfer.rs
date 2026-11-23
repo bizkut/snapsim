@@ -19,9 +19,9 @@ impl Game<'_> {
         let lane = self.cards[card].lane.unwrap();
         let old = self.cards[card].owner;
         let new = 1 - old;
-        self.lanes[lane].cards.retain(|&id| id != card);
+        self.detach_location(lane, card);
         self.cards[card].owner = new;
-        self.lanes[lane].cards.push(card);
+        self.push_location(lane, card);
         self.ongoing();
         self.emit(Event::CardOwnerChanged { card, old, new });
         true

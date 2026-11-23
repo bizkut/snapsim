@@ -253,7 +253,13 @@ mod tests {
         assert!(!game.cards[hidden].revealed);
         assert!(game.cards[ordinary].revealed);
         game.reveal(hidden);
-        assert_eq!(game.delayed_reveals[0], vec![hidden]);
+        assert_eq!(
+            game.delayed_reveals[0]
+                .iter()
+                .map(|entry| entry.card)
+                .collect::<Vec<_>>(),
+            vec![hidden]
+        );
         game.finish_reveals();
         assert!(game.cards[hidden].revealed);
     }

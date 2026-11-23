@@ -249,7 +249,7 @@ fn silk(game: &mut Game<'_>, card: usize, event: Event) {
 }
 // MoveCardHere (0x7eb473c) uses Player.LastCardPlayed and only moves
 // that exact card when it remains in play, not an earlier eligible card.
-fn ghost_spider(game: &mut Game<'_>, card: usize) {
+pub(crate) fn ghost_spider(game: &mut Game<'_>, card: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
     };
@@ -314,7 +314,7 @@ fn juggernaut(game: &mut Game<'_>, card: usize) {
 }
 // MoveCards (0x7eecd64) shuffles the revealed opposing 3/4-Cost
 // candidates at other locations and moves them until all empty slots are filled.
-fn magneto(game: &mut Game<'_>, card: usize) {
+pub(crate) fn magneto(game: &mut Game<'_>, card: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
     };
@@ -437,7 +437,7 @@ fn lowest_power_location(game: &Game<'_>, card: usize) -> Option<usize> {
 // SpawnAtLowPowerLocation (0x7f1b318) resurrects from the discard zone.
 fn proxima_midnight(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
-    game.players[owner].discard.push(card);
+    game.push_discard(owner, card);
     if let Some(lane) = lowest_power_location(game, card) {
         game.resurrect_from_zone(card, lane, owner);
     }
@@ -496,8 +496,7 @@ fn hercules(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<Option<u8>>())
     else {
         return;
@@ -622,6 +621,7 @@ fn grant_destination(game: &mut Game<'_>, card: usize, both: bool) {
             end_turn: turn,
             remaining: 0,
             unlimited: true,
+            condition: None,
             on_move: None,
         });
     }
@@ -650,8 +650,7 @@ fn batroc(game: &mut Game<'_>, card: usize, event: Event) {
     }
     let turn = game.turn;
     let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<Option<u8>>())
     else {
         return;
@@ -664,8 +663,7 @@ fn batroc(game: &mut Game<'_>, card: usize, event: Event) {
     if game.move_card(card, destination) {
         game.add_power(card, 2, game.cards[card].owner);
     } else if let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<Option<u8>>())
     {
         *state = previous;
@@ -727,6 +725,7 @@ fn miek(game: &mut Game<'_>, card: usize, event: Event) {
         end_turn: turn,
         remaining: 1,
         unlimited: false,
+        condition: None,
         on_move: None,
     });
 }
@@ -743,8 +742,12 @@ fn aunt_may(game: &mut Game<'_>, card: usize) {
     let mut targets = [0; 7];
     let mut count = 0;
     for &target in &game.players[owner].hand {
-        let def = game.cards[target].ability_def();
-        if !game.cards[target].abilities_removed && (def.move_limit != 0 || def.move_each_turn) {
+        if !game.cards[target].abilities_removed
+            && game.cards[target].abilities().any(|a| {
+                a.supports(crate::engine_ext::abilities::AbilityKind::Trigger)
+                    && (a.def.move_limit != 0 || a.def.move_each_turn)
+            })
+        {
             targets[count] = target;
             count += 1;
         }
@@ -823,8 +826,7 @@ fn shield_move(game: &mut Game<'_>, card: usize, _: usize) {
 // whether the hand is empty or the previous location permits additions.
 fn redwing(game: &mut Game<'_>, card: usize, previous: usize) {
     let Some(consumed) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<bool>())
     else {
         return;
@@ -846,13 +848,16 @@ fn redwing(game: &mut Game<'_>, card: usize, previous: usize) {
 // location with the fewest allied cards, rolling ties.
 fn zombie_black_cat(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
-    game.players[owner].discard.push(card);
+    game.push_discard(owner, card);
     let mut choices = [0; 7];
     let mut count = 0;
     for &target in &game.players[owner].hand {
         if target != card
             && !game.cards[target].abilities_removed
-            && game.cards[target].ability_def().on_discard.is_some()
+            && game.cards[target].abilities().any(|a| {
+                a.supports(crate::engine_ext::abilities::AbilityKind::Trigger)
+                    && a.def.on_discard.is_some()
+            })
         {
             choices[count] = target;
             count += 1;

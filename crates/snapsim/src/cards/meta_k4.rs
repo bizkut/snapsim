@@ -207,7 +207,7 @@ fn ultron_time(game: &mut Game<'_>, card: usize) {
         .randbelow(game.players[owner].hand.len());
     let target = game.players[owner].hand[index];
     if game.can_add(target, lane, owner) {
-        game.players[owner].hand.remove(index);
+        game.take_hand(owner, index);
         game.add_card(target, lane, owner, true);
     }
 }
@@ -229,14 +229,15 @@ fn miles(game: &mut Game<'_>, card: usize) {
 }
 
 // AddMjolnir (0x7cdcc10) creates the token and shuffles the deck.
-fn thor(game: &mut Game<'_>, card: usize) {
+pub(crate) fn thor(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let token = game.create_card("Mjolnir", owner);
-    game.players[owner].deck.push(token);
+    game.push_deck(owner, token);
     game.shuffle_deck(owner);
 }
 
-// BuffThor (0x7efba30), GetTargets (0x7efb8e8): revealed allied Thor.
+// BuffThor 0x7efba30; predicate 0x7efc18c uses Mjolnir's Card_Modified
+// list, which includes both Thor and ThorChampion.
 fn mjolnir(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let targets: Vec<_> = game
@@ -246,7 +247,7 @@ fn mjolnir(game: &mut Game<'_>, card: usize) {
         .filter(|&id| {
             game.cards[id].owner == owner
                 && game.cards[id].revealed
-                && game.cards[id].def.id == "Thor"
+                && matches!(game.cards[id].def.id, "Thor" | "ThorChampion")
         })
         .collect();
     for id in targets {

@@ -47,7 +47,7 @@ fn enchantress_removes_active_ongoing_and_armor_protection() {
     let ally = play(&mut game, "MistyKnight", 0, 0);
     assert!(!game.destroy_card(ally));
     play(&mut game, "Enchantress", 0, 1);
-    assert!(!game.cards[armor].has_ongoing());
+    assert!(!game.cards[armor].has_ongoing(false));
     assert!(game.destroy_card(ally));
 }
 
@@ -101,21 +101,30 @@ fn delayed_card_is_not_revealed_until_delay_clears() {
     game.replace_location(0, "Lemuria");
     let card = play(&mut game, "Medusa", 1, 0);
     assert!(!game.cards[card].revealed);
-    assert_eq!(game.delayed_reveals[0], vec![card]);
+    assert_eq!(
+        game.delayed_reveals[0]
+            .iter()
+            .map(|entry| entry.card)
+            .collect::<Vec<_>>(),
+        vec![card]
+    );
     game.delays_reveals = false;
     game.reveal(card);
     assert!(game.cards[card].revealed);
 }
 
 #[test]
-fn copies_preserve_custom_state_but_clear_hawkeye_watches() {
+fn copies_preserve_custom_state_and_hawkeye_watches() {
     let mut rng = PythonRandom::seed(21);
     let mut game = game(&mut rng);
     let hawkeye = play(&mut game, "Hawkeye", 0, 0);
     assert!(!game.cards[hawkeye].watch_contexts().is_empty());
     game.cards[hawkeye].state = Some(Box::new(vec![3_i32, 5]));
     let copy = game.copy_card(hawkeye, 1);
-    assert!(game.cards[copy].watch_contexts().is_empty());
+    assert_eq!(
+        game.cards[copy].watch_contexts(),
+        game.cards[hawkeye].watch_contexts()
+    );
     assert_eq!(
         game.cards[copy]
             .state

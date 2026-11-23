@@ -67,7 +67,7 @@ fn symbiote(game: &mut Game<'_>, card: usize) {
     if game.merge_card(card, target) {
         game.copy_text(card, target, false);
         game.clone_external_abilities(card, target);
-        game.trigger_on_reveal(card);
+        game.trigger_text_reveal(card);
     }
 }
 
@@ -152,7 +152,7 @@ fn king_eitri(game: &mut Game<'_>, card: usize) {
         .map(|(slot, _)| slot)
         .expect("selected a counted created card");
     if game.players[owner].hand.len() < 7 {
-        let target = game.players[owner].deck.remove(slot);
+        let target = game.take_deck(owner, slot);
         game.add_hand(owner, target, true);
     }
 }
@@ -463,14 +463,14 @@ mod tests {
         let nico = game.create_card("NicoMinoru", 0);
         game.players[0].hand.push(nico);
         game.prepare_nico(nico, 0);
-        let spell = game.cards[nico].ability_def().id;
+        let spell = game.cards[nico].abilities().next().unwrap().def.id;
         game.players[0].hand.retain(|&id| id != nico);
         game.cards[nico].lane = Some(0);
         game.cards[nico].revealed = true;
         game.lanes[0].cards.push(nico);
         let sym = place(&mut game, "SymbioteSpiderMan", 0, 0, true);
         symbiote(&mut game, sym);
-        assert_eq!(game.cards[sym].ability_def().id, spell);
+        assert_eq!(game.cards[sym].abilities().next().unwrap().def.id, spell);
         assert_eq!(game.cards[nico].merged_to, Some(sym));
         assert_eq!(game.players[0].pending_effects.len(), 1);
         assert!(matches!(game.cards[sym].attached_abilities[0].kind,
@@ -478,7 +478,7 @@ mod tests {
         assert!(game.take_from_board(sym));
         game.players[0].hand.push(sym);
         game.prepare_nico(sym, 0);
-        assert_ne!(game.cards[sym].ability_def().id, spell);
+        assert_ne!(game.cards[sym].abilities().next().unwrap().def.id, spell);
     }
 
     #[test]
@@ -549,6 +549,7 @@ mod tests {
             end_turn: game.turn,
             remaining: 1,
             unlimited: false,
+            condition: None,
             on_move: Some(power),
         });
         game.stage_action(

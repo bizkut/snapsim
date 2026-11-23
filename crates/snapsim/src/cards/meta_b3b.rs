@@ -247,6 +247,7 @@ impl Game<'_> {
         ];
         let def = super::get(ids[usize::from(spell - 1)]).expect("registered Nico spell");
         self.cards[card].override_ability = Some(def);
+        self.cards[card].default_ability_generation += 1;
         self.cards[card].state = def.initial_state.map(|init| init());
     }
 }
@@ -372,13 +373,12 @@ fn zombie_event(game: &mut Game<'_>, card: usize, event: Event) {
         let index = game.rng.borrow_mut().randbelow(candidates.len());
         selected.push(candidates.remove(index));
     }
-    game.cards[card].state = Some(Box::new(Some((card, selected))));
+    game.cards[card].set_ability_state(Some(Box::new(Some((card, selected)))));
 }
 
 fn zombie_reveal(game: &mut Game<'_>, card: usize) {
     let Some((chooser, chosen)) = game.cards[card]
-        .state
-        .as_ref()
+        .ability_state()
         .and_then(|s| s.as_any().downcast_ref::<Option<(usize, Vec<usize>)>>())
         .and_then(Option::as_ref)
     else {
@@ -521,7 +521,7 @@ mod tests {
         let mut seen = 0u8;
         for _ in 0..7 {
             game.prepare_nico(nico, 0);
-            let spell = game.cards[nico].ability_def().id;
+            let spell = game.cards[nico].abilities().next().unwrap().def.id;
             let bit = 1 << (spell.as_bytes()[6] - b'1');
             assert_eq!(seen & bit, 0);
             seen |= bit;
@@ -697,11 +697,11 @@ mod tests {
         let nico = game.create_card("NicoMinoru", 0);
         game.players[0].hand.push(nico);
         game.prepare_nico(nico, 0);
-        let spell = game.cards[nico].ability_def().id;
+        let spell = game.cards[nico].abilities().next().unwrap().def.id;
         game.players[0].hand.retain(|&id| id != nico);
         game.players[0].deck.insert(0, nico);
         iron_lad(&mut game, lad);
-        assert_eq!(game.cards[lad].ability_def().id, spell);
+        assert_eq!(game.cards[lad].abilities().next().unwrap().def.id, spell);
         assert!(game.cards[lad].attached_abilities.is_empty());
         assert_eq!(game.players[0].pending_effects.len(), 1);
     }

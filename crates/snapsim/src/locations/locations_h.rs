@@ -210,7 +210,7 @@ fn subterranea(game: &mut Game<'_>, _: usize) {
         for _ in 0..4 {
             let card = game.create_card("Rock", seat);
             game.cards[card].created_by_location_id = Some("Subterranea".into());
-            game.players[seat].deck.push(card);
+            game.push_deck(seat, card);
         }
         game.shuffle_deck(seat);
     }
@@ -239,7 +239,7 @@ fn lechuguilla(game: &mut Game<'_>, lane: usize, event: Event) {
         for _ in 0..3 {
             let rock = game.create_card("Rock", seat);
             game.cards[rock].created_by_location_id = Some("Lechuguilla".into());
-            game.players[seat].deck.push(rock);
+            game.push_deck(seat, rock);
         }
         game.shuffle_deck(seat);
     }
@@ -300,7 +300,7 @@ fn vibranium_mines(game: &mut Game<'_>, lane: usize, event: Event) {
         for _ in 0..3 {
             let token = game.create_card("Vibranium", seat);
             game.cards[token].created_by_location_id = Some("VibraniumMines".into());
-            game.players[seat].deck.push(token);
+            game.push_deck(seat, token);
         }
         game.shuffle_deck(seat);
     }

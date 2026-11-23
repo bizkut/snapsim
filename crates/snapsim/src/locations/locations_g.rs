@@ -220,7 +220,7 @@ fn parker_industries(game: &Game<'_>, lane: usize, seat: usize, queued: usize) -
 fn smithsonian_museum(game: &mut Game<'_>, lane: usize) {
     let mut count = [0; 2];
     for &card in &game.lanes[lane].cards {
-        if game.cards[card].revealed && game.cards[card].has_ongoing() {
+        if game.cards[card].revealed && game.cards[card].has_ongoing(false) {
             count[game.cards[card].owner] += 1;
         }
     }

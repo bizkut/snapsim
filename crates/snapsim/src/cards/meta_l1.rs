@@ -18,7 +18,7 @@ pub(crate) static CARDS: &[CardDef] = &[
         ..CardDef::vanilla("Thena")
     },
     CardDef {
-        late_in_hand_ongoing: Some(skaar),
+        conditional_in_hand_ongoing: Some(skaar),
         ..CardDef::vanilla("Skaar")
     },
     CardDef {
@@ -182,8 +182,11 @@ fn thena(game: &mut Game<'_>, card: usize) {
 
 // DiscountSelf (0x7f40af4) sets cost to max(0, current cost - 2 per
 // revealed ally whose current power is at least 10; predicate 0x7f41050.
-fn skaar(game: &mut Game<'_>, card: usize) {
+fn skaar(game: &mut Game<'_>, card: usize) -> bool {
     let owner = game.cards[card].owner;
+    if !game.players[owner].hand.contains(&card) {
+        return false;
+    }
     let count = game
         .lanes
         .iter()
@@ -198,6 +201,7 @@ fn skaar(game: &mut Game<'_>, card: usize) {
         let cost = game.cards[card].cost + game.cards[card].ongoing_cost;
         game.set_ongoing_cost(card, (cost - count * 2).max(0), owner);
     }
+    true
 }
 
 // DiscardCardsToGainEnergy (0x7e83c18) shuffles a hand snapshot, attempts
@@ -261,15 +265,13 @@ fn quicksand(game: &mut Game<'_>, card: usize) {
     let opponent = 1 - game.cards[card].owner;
     let bonus = game.bonus_energy(opponent);
     let used = game.cards[card]
-        .state
-        .as_ref()
+        .ability_state()
         .and_then(|state| state.as_any().downcast_ref::<bool>())
         .copied()
         .unwrap_or(false);
     if !used && bonus > 0 {
         if let Some(state) = game.cards[card]
-            .state
-            .as_mut()
+            .ability_state_mut()
             .and_then(|state| state.as_any_mut().downcast_mut::<bool>())
         {
             *state = true;
@@ -302,8 +304,7 @@ fn frankie_raye(game: &mut Game<'_>, card: usize, event: Event) {
     };
     let owner = game.cards[card].owner;
     let used = game.cards[card]
-        .state
-        .as_ref()
+        .ability_state()
         .and_then(|state| state.as_any().downcast_ref::<bool>())
         .copied()
         .unwrap_or(false);
@@ -314,8 +315,7 @@ fn frankie_raye(game: &mut Game<'_>, card: usize, event: Event) {
             .any(|&(target, _)| target == played)
     {
         if let Some(state) = game.cards[card]
-            .state
-            .as_mut()
+            .ability_state_mut()
             .and_then(|state| state.as_any_mut().downcast_mut::<bool>())
         {
             *state = true;
@@ -363,14 +363,17 @@ fn ms_marvel(game: &mut Game<'_>, card: usize) {
                 })
         });
         if count >= 2 && !duplicate {
-            game.lanes[lane].bonus[owner] += 6;
+            game.add_lane_bonus(lane, owner, 6);
         }
     }
 }
 
 // BuffHighestPowerCard (0x7e7f490) snapshots the highest current Power among
 // revealed allies, then applies +2 to every card tied at that value.
-fn cerebro(game: &mut Game<'_>, card: usize) {
+fn cerebro(game: &mut Game<'_>, card: usize) -> bool {
+    if game.cards[card].lane.is_none() {
+        return false;
+    }
     let owner = game.cards[card].owner;
     let highest = game
         .lanes
@@ -381,7 +384,7 @@ fn cerebro(game: &mut Game<'_>, card: usize) {
         })
         .map(|id| game.cards[id].power())
         .max();
-    let Some(highest) = highest else { return };
+    let Some(highest) = highest else { return false };
     for lane in 0..game.lanes.len() {
         for index in 0..game.lanes[lane].cards.len() {
             let target = game.lanes[lane].cards[index];
@@ -394,6 +397,7 @@ fn cerebro(game: &mut Game<'_>, card: usize) {
             }
         }
     }
+    true
 }
 
 // NewRecruitsCostOneLess (0x7f1e884) affects created cards in hand and
@@ -562,10 +566,14 @@ fn aurora(game: &mut Game<'_>, card: usize) {
                         && game.cards[id].revealed
                         && match kind {
                             0 => game.cards[id].has_resolve_trigger(),
-                            1 => game.cards[id].has_ongoing(),
+                            1 => game.cards[id].has_ongoing(false),
                             2 => {
                                 !game.cards[id].abilities_removed
-                                    && game.cards[id].ability_def().on_activate.is_some()
+                                    && game.cards[id].abilities().any(|a| {
+                                        a.supports(
+                                            crate::engine_ext::abilities::AbilityKind::Activate,
+                                        ) && a.def.on_activate.is_some()
+                                    })
                             }
                             _ => game.cards[id].has_end_turn_trigger(),
                         }
@@ -594,8 +602,7 @@ fn mysterio_reveal(game: &mut Game<'_>, card: usize) {
         let lane = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
         if game.add_card(illusion, lane, owner, true)
             && let Some(state) = game.cards[card]
-                .state
-                .as_mut()
+                .ability_state_mut()
                 .and_then(|state| state.as_any_mut().downcast_mut::<Option<usize>>())
         {
             *state = Some(illusion);
@@ -607,8 +614,7 @@ fn mysterio_reveal(game: &mut Game<'_>, card: usize) {
 // ongoing and location contributions, with the exact linked illusion.
 fn mysterio_activate(game: &mut Game<'_>, card: usize) {
     let target = game.cards[card]
-        .state
-        .as_ref()
+        .ability_state()
         .and_then(|state| state.as_any().downcast_ref::<Option<usize>>())
         .copied()
         .flatten();
@@ -1088,6 +1094,8 @@ mod tests {
         let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
         let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
         let source = game.create_card("Skaar", 0);
+        // DiscountSelf 0x7f40af4 only activates from the hand zone.
+        assert!(game.add_hand(0, source, false));
         for (owner, revealed) in [(0, true), (0, true), (1, true), (0, false)] {
             let card = game.create_card("Hulk", owner);
             game.cards[card].revealed = revealed;

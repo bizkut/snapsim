@@ -3,6 +3,7 @@ use crate::{
     game::{Game, Lane, Player},
     locations, position,
     random::PythonRandom,
+    zones::CardZone,
 };
 use serde_json::Value;
 use std::{cell::RefCell, collections::BTreeSet};
@@ -252,11 +253,14 @@ pub(super) fn simulate(
             def,
             observed_id: None,
             revealed: id.is_some(),
-            destroyed: false,
+            destroyed: start.destroyed_lanes[i],
+            ability_flags: crate::game::LocationAbilityFlags::default(),
+            copied_reveal_turn: None,
             revealed_turn,
             cards: Vec::new(),
             bonus: [0; 2],
             multiplier: [1; 2],
+            contributions: Vec::new(),
             state,
         }
     });
@@ -276,10 +280,15 @@ pub(super) fn simulate(
         }
     }
     let mut order: Vec<_> = (0..3).filter(|&i| lanes[i].revealed).collect();
-    let current_location = order.len();
+    let current_location = if start.destroyed_lanes.iter().any(|&destroyed| destroyed) {
+        usize::try_from(start.turn).unwrap_or(0).min(3)
+    } else {
+        order.len()
+    };
     order.extend((0..3).filter(|&i| !lanes[i].revealed));
     let mut game = Game {
         cards: Vec::new(),
+        ability_call_depth: 0,
         players: [Player::default(), Player::default()],
         human_seat: Some(0),
         lanes,
@@ -310,6 +319,9 @@ pub(super) fn simulate(
         current_location,
         location_reveal_order: [order[0], order[1], order[2]],
         destroyed: Some(Vec::new()),
+        score_overrides: [None; 2],
+        current_ongoing_source: None,
+        merge_batches: Vec::new(),
         rng: RefCell::new(&mut game_rng),
     };
     // CaveOfTheDragonBehavior::AddCard (0x7d45454) makes one random
@@ -368,18 +380,22 @@ pub(super) fn simulate(
     for card in &start.hand {
         let id = card["card_id"].as_str().ok_or("missing card_id")?;
         let index = push(&mut game, id, 0, &card["cost"], &card["power"])?;
-        game.players[0].hand.push(index);
+        game.cards[index].zone = Some(CardZone::Hand(0));
+        game.put_hand(0, game.players[0].hand.len(), index);
     }
     for id in &my_deck {
         let index = push(&mut game, id, 0, &Value::Null, &Value::Null)?;
-        game.players[0].deck.push(index);
+        game.cards[index].zone = Some(CardZone::Deck(0));
+        game.push_deck(0, index);
     }
     for (i, id) in hidden.iter().enumerate() {
         let index = push(&mut game, id, 1, &Value::Null, &Value::Null)?;
         if i < opp_hand {
-            game.players[1].hand.push(index);
+            game.cards[index].zone = Some(CardZone::Hand(1));
+            game.put_hand(1, game.players[1].hand.len(), index);
         } else {
-            game.players[1].deck.push(index);
+            game.cards[index].zone = Some(CardZone::Deck(1));
+            game.push_deck(1, index);
         }
     }
     let mut cards: Vec<(Value, usize)> = Vec::new();
@@ -419,11 +435,15 @@ pub(super) fn simulate(
                 label(&card.entity)
             ));
         }
+        game.cards[index].zone = Some(CardZone::Location(card.lane));
         game.cards[index].lane = Some(card.lane);
         game.cards[index].revealed = true;
         game.cards[index].turn_played = flipped.unwrap_or(0) as u8;
-        game.lanes[card.lane].cards.push(index);
+        game.push_location(card.lane, index);
         cards.push((card.entity.clone(), index));
+    }
+    if !crate::cards::reference_rules_enabled() {
+        game.refresh_location_ability_flags();
     }
     if !crate::cards::reference_rules_enabled() {
         for seat in 0..2 {
@@ -445,21 +465,27 @@ pub(super) fn simulate(
         {
             let lane = game.cards[index].lane.unwrap();
             let before = game.cards[index].turn_played;
+            // Reconstruction heuristic, not a client predicate: excluding hidden
+            // abilities is provisional; restored cards have no hidden instances.
             let sources: Vec<_> = game.lanes[lane]
                 .cards
                 .iter()
                 .copied()
                 .filter(|&s| {
                     game.cards[s].revealed
-                        && game.cards[s].has_ongoing()
+                        && game.cards[s].has_ongoing(false)
                         && game.cards[s].turn_played < before
                 })
                 .collect();
-            if !sources
-                .iter()
-                .any(|&s| game.cards[s].ability_def().blocks_reveal)
+            if game.lanes[lane].ability_flags.on_reveal
+                && !sources.iter().any(|&s| {
+                    game.cards[s].ongoing_guard_abilities().any(|a| {
+                        a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing)
+                            && a.def.blocks_reveal
+                    })
+                })
             {
-                let active = game.lanes[lane].revealed
+                let active = game.location_abilities_active(lane)
                     && game.lanes[lane].revealed_turn.unwrap_or(0) <= before;
                 let base = if active {
                     game.lanes[lane].def.ongoing_repeats as usize
@@ -472,7 +498,11 @@ pub(super) fn simulate(
                     1
                 };
                 for &source in &sources {
-                    if let Some(repetitions) = game.cards[source].ability_def().reveal_repetitions {
+                    for repetitions in game.cards[source]
+                        .ongoing_guard_abilities()
+                        .filter(|a| a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing))
+                        .filter_map(|a| a.def.reveal_repetitions)
+                    {
                         let extra: usize = sources
                             .iter()
                             .filter(|&&other| {
@@ -480,7 +510,15 @@ pub(super) fn simulate(
                                     && game.cards[other].owner == game.cards[source].owner
                             })
                             .map(|&other| {
-                                game.cards[other].ability_def().extra_ongoing_runs as usize
+                                game.cards[other]
+                                    .ongoing_guard_abilities()
+                                    .filter(|a| {
+                                        a.supports(
+                                            crate::engine_ext::abilities::AbilityKind::Ongoing,
+                                        )
+                                    })
+                                    .map(|a| a.def.extra_ongoing_runs as usize)
+                                    .sum::<usize>()
                             })
                             .sum();
                         runs += repetitions(&game, source, index) as usize * base * (1 + extra);
@@ -499,6 +537,8 @@ pub(super) fn simulate(
             }
         }
     }
+    // Reconstruct the full ongoing ledger before entering the staging window.
+    game.is_wait_for_staging = false;
     game.ongoing();
     for (entity_id, index) in &cards {
         let refcard = entity(start, entity_id).unwrap();
@@ -581,9 +621,8 @@ pub(super) fn simulate(
             }
         }
     }
-    game.players[1]
-        .hand
-        .truncate(staged.opponent_count.max(0) as usize);
+    game.is_wait_for_staging = true;
+    game.truncate_sampled_hand(1, staged.opponent_count.max(0) as usize);
     // A resolved Morph's observed identity proves that card was in the
     // opposing hand when it resolved. Include it in the sampled hand rather
     // than hoping a small seed budget rediscovers a now-large card pool.
@@ -671,14 +710,31 @@ pub(super) fn simulate(
         }
         game.cards[index].lane = Some(play.card.lane);
         game.cards[index].turn_played = play.turn as u8;
-        game.lanes[play.card.lane].cards.push(index);
+        game.push_location(play.card.lane, index);
         cards.push((play.card.entity.clone(), index));
+        let seat = play.card.owner;
+        let turn = play.turn as u8;
+        let printed_cost = game.printed_cost(index);
+        game.players[seat]
+            .staged_history
+            .push(crate::game::StagedPlay {
+                turn,
+                card: index,
+                def_id: game.cards[index].def.id,
+                printed_cost,
+                created: game.cards[index].created,
+                resolved: false,
+            });
+        game.players[seat]
+            .staged_lane_history
+            .push((turn, play.card.lane));
         if play.turn == start.turn {
             game.played[play.card.owner].push((index, play.card.lane));
         } else {
             game.pending_plays[play.card.owner].push((index, play.card.lane));
         }
     }
+    game.is_wait_for_staging = false;
     game.ongoing();
     for play in &staged.plays {
         let index = cards
@@ -686,7 +742,67 @@ pub(super) fn simulate(
             .find(|(id, _)| *id == play.card.entity)
             .unwrap()
             .1;
-        game.reveal(index);
+        if !crate::cards::reference_rules_enabled()
+            && play.id == "Polymorph"
+            && staged
+                .plays
+                .iter()
+                .filter(|other| other.flip_line == play.flip_line)
+                .count()
+                == 1
+        {
+            // TransformCard 0x7d05c8c chooses a random one-cost-higher
+            // character. Only a unique identity change observed after this
+            // reveal and before the next play proves the random outcome.
+            let next_flip = staged
+                .plays
+                .iter()
+                .filter_map(|other| (other.flip_line > play.flip_line).then_some(other.flip_line))
+                .min()
+                .unwrap_or(target.line + 1);
+            let observed: Vec<_> = start
+                .board
+                .iter()
+                .filter_map(|before| {
+                    if !before.revealed
+                        || before.owner != play.card.owner
+                        || before.lane != play.card.lane
+                    {
+                        return None;
+                    }
+                    let (_, target_index) =
+                        cards.iter().find(|(entity, _)| *entity == before.entity)?;
+                    let changed = frames
+                        .iter()
+                        .filter(|frame| frame.line > play.flip_line && frame.line < next_flip)
+                        .filter_map(|frame| entity(frame, &before.entity))
+                        .find(|after| after.revealed && after.id != before.id)?;
+                    let id = changed.id.as_str()?;
+                    let def = crate::cards::get(id)?;
+                    if !crate::cards::deck_eligible_ids().contains(&def.id)
+                        || !crate::data::cards().iter().any(|row| {
+                            row.carddefid == id
+                                && !row.random_pool_excluded
+                                && row.card_type == "Character"
+                                && row.cost == game.printed_cost(*target_index) + 1
+                        })
+                    {
+                        return None;
+                    }
+                    Some((*target_index, def.id))
+                })
+                .collect();
+            if let [choice] = observed.as_slice() {
+                game.cards[index].state = Some(Box::new(*choice));
+            }
+        }
+        game.reveal_with_staging(
+            index,
+            Some(crate::game::StagingContext {
+                seat: play.card.owner,
+                lane: play.card.lane,
+            }),
+        );
     }
     game.end_turn_effects();
     if target.terminal {
@@ -714,10 +830,14 @@ pub(super) fn simulate(
         }
         if target.turn != start.turn && target.turn <= 3 {
             let lane = (target.turn - 1) as usize;
-            if start.locations[lane].is_null() && target.locations[lane].is_null() {
+            if !target.destroyed_lanes[lane]
+                && start.locations[lane].is_null()
+                && target.locations[lane].is_null()
+            {
                 return Err("next scheduled location was not observed revealed".into());
             }
-            if start.locations[lane].is_null()
+            if !target.destroyed_lanes[lane]
+                && start.locations[lane].is_null()
                 && target.location_turns[lane].as_i64() == Some(target.turn)
                 && !game.lanes[lane].revealed
             {
@@ -984,6 +1104,18 @@ fn compare(game: &Game<'_>, target: &Frame, cards: &[(Value, usize)]) -> Vec<Dif
     }
     for (lane, board) in game.lanes.iter().enumerate() {
         let id = (board.revealed && !board.def.id.is_empty()).then_some(board.def.id);
+        if board.destroyed != target.destroyed_lanes[lane] {
+            out.push(diff(
+                format!(
+                    "lane {} destroyed: simulator {}, observed {}",
+                    lane + 1,
+                    board.destroyed,
+                    target.destroyed_lanes[lane]
+                ),
+                vec![],
+                vec![lane],
+            ));
+        }
         let actual = target.locations[lane].as_str();
         if id != actual {
             out.push(diff(

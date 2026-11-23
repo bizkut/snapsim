@@ -384,10 +384,10 @@ fn bucky_barnes(game: &mut Game<'_>, card: usize) {
 fn beta_ray_bill(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let token = game.create_card("Stormbreaker", owner);
-    game.players[owner].deck.push(token);
+    game.push_deck(owner, token);
     for index in (1..game.players[owner].deck.len()).rev() {
         let selected = game.rng.borrow_mut().randbelow(index + 1);
-        game.players[owner].deck.swap(index, selected);
+        game.swap_deck(owner, index, selected);
     }
 }
 
@@ -442,7 +442,7 @@ fn jane_foster(game: &mut Game<'_>, card: usize) {
     while slot < game.players[owner].deck.len() && game.players[owner].hand.len() < 7 {
         let target = game.players[owner].deck[slot];
         if game.card_cost(target) == 0 {
-            game.players[owner].deck.remove(slot);
+            game.take_deck(owner, slot);
             game.add_hand(owner, target, true);
         } else {
             slot += 1;
@@ -472,9 +472,9 @@ fn fantasticar(game: &mut Game<'_>, card: usize) {
 
 // DiamondbackBehavior::GetValidTargets (0x7e8b98c) tests for a negative
 // additive Power modifier or update (predicates 0x7e8c4f4/0x7e8c57c).
-fn diamondback(game: &mut Game<'_>, card: usize) {
+fn diamondback(game: &mut Game<'_>, card: usize) -> bool {
     let Some(lane) = game.cards[card].lane else {
-        return;
+        return false;
     };
     let owner = game.cards[card].owner;
     for index in 0..game.lanes[lane].cards.len() {
@@ -490,6 +490,7 @@ fn diamondback(game: &mut Game<'_>, card: usize) {
             game.add_ongoing_power(target, -2, owner);
         }
     }
+    true
 }
 
 // PatriotBehavior::BuffVanillaCards (0x7f14258) calls Card::HasNoText
@@ -532,7 +533,7 @@ fn tao_mandala(game: &mut Game<'_>, card: usize) {
         if target != card
             && game.cards[target].owner == owner
             && game.cards[target].revealed
-            && game.cards[target].has_ongoing()
+            && game.cards[target].has_ongoing(false)
         {
             sources[count] = target;
             count += 1;
@@ -1415,6 +1416,9 @@ mod tests {
             game.lanes[0].cards.push(id);
         }
         tao_mandala(&mut game, tao);
-        assert_eq!(game.cards[target].ability_def().id, "IronMan");
+        assert_eq!(
+            game.cards[target].abilities().next().unwrap().def.id,
+            "IronMan"
+        );
     }
 }

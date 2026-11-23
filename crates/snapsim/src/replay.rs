@@ -35,6 +35,9 @@ pub struct Frame {
     pub ready: bool,
     pub recruit: bool,
     pub locations: Vec<Value>,
+    /// Whether the three physical lane slots are identifiable in this frame.
+    pub lane_layout_complete: bool,
+    pub destroyed_lanes: [bool; 3],
     pub location_turns: Vec<Value>,
     pub previous_turn_locations: Option<crate::position::PreviousTurnLocations>,
     pub observed_history: Option<crate::position::ObservedHistory>,
@@ -119,6 +122,8 @@ pub fn matches(
     let mut matches = Vec::new();
     let mut frames: Vec<Frame> = Vec::new();
     let mut watch = LocationWatch::default();
+    let mut lane_entities: Option<[Value; 3]> = None;
+    let mut destroyed_lanes = [false; 3];
     for (line, observation) in observations {
         if !truthy(&observation) || observation["status"] == "no-active-game" {
             continue;
@@ -140,7 +145,6 @@ pub fn matches(
         if players
             .iter()
             .any(|p| p["slot"] != "local" && p["slot"] != "opponent")
-            || array(&game["locations"]).len() != 3
         {
             continue;
         }
@@ -155,13 +159,77 @@ pub fn matches(
         }) {
             matches.push(std::mem::take(&mut frames));
             watch = LocationWatch::default();
+            lane_entities = None;
+            destroyed_lanes = [false; 3];
+        }
+        let observed_locations = array(&game["locations"]);
+        let valid_ids = observed_locations
+            .iter()
+            .all(|location| location["entity_id"].as_i64().is_some())
+            && observed_locations
+                .iter()
+                .enumerate()
+                .all(|(index, location)| {
+                    observed_locations[..index]
+                        .iter()
+                        .all(|other| other["entity_id"] != location["entity_id"])
+                });
+        let mut layout_complete = false;
+        let mut lanes: [Option<&Value>; 3] = [None; 3];
+        if observed_locations.len() == 3
+            && observed_locations.iter().all(Value::is_object)
+            && (valid_ids
+                || observed_locations
+                    .iter()
+                    .all(|location| location["entity_id"].is_null()))
+            && !destroyed_lanes.iter().any(|&destroyed| destroyed)
+        {
+            for (lane, location) in observed_locations.iter().enumerate() {
+                lanes[lane] = Some(location);
+            }
+            layout_complete = true;
+            lane_entities = valid_ids
+                .then(|| std::array::from_fn(|i| observed_locations[i]["entity_id"].clone()));
+        } else if game["locations"].is_array()
+            && observed_locations.len() <= 3
+            && valid_ids
+            && let Some(entities) = &lane_entities
+        {
+            let mut last = None;
+            let mut valid = true;
+            for location in observed_locations {
+                let Some(lane) = entities.iter().position(|id| *id == location["entity_id"]) else {
+                    valid = false;
+                    break;
+                };
+                if destroyed_lanes[lane] || last.is_some_and(|previous| lane <= previous) {
+                    valid = false;
+                    break;
+                }
+                lanes[lane] = Some(location);
+                last = Some(lane);
+            }
+            if valid {
+                layout_complete = true;
+                for lane in 0..3 {
+                    destroyed_lanes[lane] |= lanes[lane].is_none();
+                }
+            }
+        }
+        if !layout_complete {
+            lane_entities = None;
+            lanes = [None; 3];
         }
         let ended = local["ended_turn"]
             .as_i64()
             .is_some_and(|ended| ended >= turn);
         let zones = [&local["zones"], &opponent["zones"]];
         let mut board = Vec::new();
-        for (lane, location) in array(&game["locations"]).iter().enumerate() {
+        for (lane, location) in lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(lane, location)| location.map(|location| (lane, location)))
+        {
             for card in array(&location["cards"]) {
                 let owner = ids
                     .iter()
@@ -239,11 +307,13 @@ pub fn matches(
                 .and_then(|last| last.previous_turn_locations.clone())
         } else if frames.last().is_some_and(|last| last.turn == turn - 1) {
             let mut ids: [Vec<String>; 3] = Default::default();
+            let mut complete = true;
             for prior in frames
                 .iter()
                 .rev()
                 .take_while(|frame| frame.turn == turn - 1)
             {
+                complete &= prior.lane_layout_complete;
                 for (lane, id) in prior.locations.iter().enumerate() {
                     if let Some(id) = id.as_str()
                         && !ids[lane].iter().any(|seen| seen == id)
@@ -252,10 +322,7 @@ pub fn matches(
                     }
                 }
             }
-            Some(crate::position::PreviousTurnLocations {
-                complete: true,
-                ids,
-            })
+            Some(crate::position::PreviousTurnLocations { complete, ids })
         } else {
             serde_json::from_value(game["previous_turn_locations"].clone()).ok()
         };
@@ -274,9 +341,19 @@ pub fn matches(
                 && !truthy(&game["pending_stage_request"])
                 && truthy(&game["legal_actions"]),
             recruit: observation["source"]["league"] == "RankedRecruit",
-            locations: array(&game["locations"]).iter().map(revealed_id).collect(),
+            locations: lanes
+                .iter()
+                .map(|location| location.map_or(Value::Null, revealed_id))
+                .collect(),
+            lane_layout_complete: layout_complete,
+            destroyed_lanes,
             previous_turn_locations,
-            observed_history: if observation["schema_version"] == 2 {
+            // History action lane indices are validated against the compact reader list;
+            // they cannot safely be interpreted as physical slots after destruction.
+            observed_history: if observation["schema_version"] == 2
+                && observed_locations.len() == 3
+                && layout_complete
+            {
                 serde_json::from_value::<crate::position::ObservedHistory>(game["history"].clone())
                     .ok()
                     .filter(|history| {
@@ -287,20 +364,28 @@ pub fn matches(
             } else {
                 None
             },
-            location_turns: watch.update(&observation),
-            location_history: array(&game["locations"])
+            location_turns: if layout_complete {
+                watch.update_lanes(turn, lanes.iter().copied())
+            } else {
+                vec![Value::Null; 3]
+            },
+            location_history: lanes
                 .iter()
                 .map(|location| {
-                    if observation["schema_version"] == 2 && !revealed_id(location).is_null() {
-                        serde_json::from_value(location["history_state"].clone()).ok()
-                    } else {
-                        None
-                    }
+                    location.and_then(|location| {
+                        if observation["schema_version"] == 2 && !revealed_id(location).is_null() {
+                            serde_json::from_value(location["history_state"].clone()).ok()
+                        } else {
+                            None
+                        }
+                    })
                 })
                 .collect(),
-            totals: array(&game["locations"])
+            totals: lanes
                 .iter()
-                .map(|location| location["total_power"].clone())
+                .map(|location| {
+                    location.map_or(Value::Null, |location| location["total_power"].clone())
+                })
                 .collect(),
             board,
             hand: array(&zones[0]["hand"]["cards"]).to_vec(),
@@ -617,6 +702,145 @@ mod tests {
                 ]
             }
         })
+    }
+
+    fn identified_observation(turn: u8) -> Value {
+        let mut value = observation(turn, "identified", false);
+        for lane in 0..3 {
+            value["game"]["locations"][lane]["entity_id"] = json!(10 + lane);
+            value["game"]["locations"][lane]["location_id"] = json!("Ruins");
+        }
+        value
+    }
+
+    #[test]
+    fn missing_location_preserves_physical_lane_and_survivor_card() {
+        let start = identified_observation(3);
+        let mut destroyed = identified_observation(4);
+        destroyed["game"]["locations"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        destroyed["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 50, "owner_entity_id": 1, "card_id": "Wasp",
+            "revealed": true, "power": 1
+        }]);
+        let frames = matches(vec![(1, start), (2, destroyed)]).unwrap();
+        let frame = &frames[0][1];
+        assert!(frame.lane_layout_complete);
+        assert_eq!(frame.destroyed_lanes, [false, true, false]);
+        assert_eq!(
+            frame.locations,
+            [json!("Ruins"), Value::Null, json!("Ruins")]
+        );
+        assert_eq!(frame.board[0].lane, 2);
+    }
+
+    #[test]
+    fn two_destroyed_lanes_remain_distinct_from_hidden_lanes() {
+        let full = identified_observation(3);
+        let mut partial = identified_observation(4);
+        let locations = partial["game"]["locations"].as_array_mut().unwrap();
+        locations.remove(2);
+        locations.remove(0);
+        locations[0]["location_id"] = json!("RevealOn2");
+        let frames = matches(vec![(1, full), (2, partial)]).unwrap();
+        let frame = &frames[0][1];
+        assert!(frame.lane_layout_complete);
+        assert_eq!(frame.destroyed_lanes, [true, false, true]);
+        assert_eq!(frame.locations, [Value::Null, Value::Null, Value::Null]);
+    }
+
+    #[test]
+    fn replay_after_location_destruction_checks_surviving_lanes() {
+        let full = identified_observation(3);
+        let mut start = identified_observation(4);
+        start["game"]["locations"].as_array_mut().unwrap().remove(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        let mut next = start.clone();
+        next["game"]["turn"] = json!(5);
+        let result = check_observations(
+            vec![(1, full), (2, start), (3, submitted), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(result[1].status, super::Status::Consistent);
+    }
+
+    #[test]
+    fn replay_detects_unexplained_location_destruction() {
+        let start = identified_observation(4);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        let mut target = identified_observation(5);
+        target["game"]["locations"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        let result =
+            check_observations(vec![(1, start), (2, submitted), (3, target)], &[], 1).unwrap();
+        assert_eq!(result[0].status, super::Status::Inconsistent);
+        assert!(
+            result[0]
+                .differences
+                .iter()
+                .any(|difference| difference.item.contains("lane 2 destroyed"))
+        );
+    }
+
+    #[test]
+    fn missing_or_ambiguous_location_ids_fail_closed() {
+        let mut first = identified_observation(4);
+        first["game"]["locations"].as_array_mut().unwrap().remove(1);
+        let mut next = first.clone();
+        next["game"]["turn"] = json!(5);
+        let result = check_observations(vec![(1, first), (2, next)], &[], 1).unwrap();
+        assert_eq!(result[0].status, super::Status::Uncheckable);
+        assert!(result[0].detail.contains("destroyed-lane layout"));
+
+        let full = identified_observation(3);
+        let mut duplicate = identified_observation(4);
+        duplicate["game"]["locations"][1]["entity_id"] = json!(10);
+        let frames = matches(vec![(1, full), (2, duplicate)]).unwrap();
+        assert!(!frames[0][1].lane_layout_complete);
+        let full = identified_observation(3);
+        let mut unknown = identified_observation(4);
+        unknown["game"]["locations"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        unknown["game"]["locations"][1]["entity_id"] = json!(999);
+        let frames = matches(vec![(1, full), (2, unknown)]).unwrap();
+        assert!(!frames[0][1].lane_layout_complete);
+
+        let mut extra = identified_observation(4);
+        extra["game"]["locations"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"entity_id": 13}));
+        let frames = matches(vec![(1, extra)]).unwrap();
+        assert!(!frames[0][0].lane_layout_complete);
+        let full = identified_observation(3);
+        let mut absent = identified_observation(4);
+        absent["game"]["locations"] = Value::Null;
+        let frames = matches(vec![(1, full), (2, absent)]).unwrap();
+        assert!(!frames[0][1].lane_layout_complete);
+    }
+
+    #[test]
+    fn location_ids_reset_between_matches() {
+        let full = identified_observation(3);
+        let mut missing = identified_observation(4);
+        missing["game"]["locations"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        missing["game"]["game_key"] = json!("new-match");
+        let frames = matches(vec![(1, full), (2, missing)]).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(!frames[1][0].lane_layout_complete);
     }
 
     #[test]

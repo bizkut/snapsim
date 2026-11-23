@@ -218,11 +218,11 @@ fn daredevil(game: &mut Game<'_>, card: usize) {
     // ShuffleDemons (0x7f38068) inserts all three then shuffles the entire deck.
     for _ in 0..3 {
         let demon = game.create_card("Demon", seat);
-        game.players[seat].deck.push(demon);
+        game.push_deck(seat, demon);
     }
     for i in (1..game.players[seat].deck.len()).rev() {
         let j = game.rng.borrow_mut().randbelow(i + 1);
-        game.players[seat].deck.swap(i, j);
+        game.swap_deck(seat, i, j);
     }
 }
 

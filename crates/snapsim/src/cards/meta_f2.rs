@@ -152,7 +152,10 @@ mod tests {
         game.players[0].energy = 2;
         game.players[0].deck.extend([iron, medusa]);
         magus(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "Medusa");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "Medusa"
+        );
         assert_eq!(game.cards[source].power(), 4);
     }
 
@@ -196,6 +199,6 @@ mod tests {
     fn jameson_is_an_ongoing_card() {
         let mut rng = PythonRandom::seed(5);
         let game = build_game(&position("JJonahJameson"), &mut rng).unwrap();
-        assert!(game.cards[game.lanes[0].cards[0]].has_ongoing());
+        assert!(game.cards[game.lanes[0].cards[0]].has_ongoing(false));
     }
 }

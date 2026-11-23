@@ -128,7 +128,7 @@ fn starbrand(game: &mut Game<'_>, card: usize) {
     let opponent = 1 - game.cards[card].owner;
     for lane in 0..3 {
         if lane != source {
-            game.lanes[lane].bonus[opponent] += 3;
+            game.add_lane_bonus(lane, opponent, 3);
         }
     }
 }
@@ -225,7 +225,7 @@ fn debrii(game: &mut Game<'_>, card: usize) {
     }
 }
 
-fn dr_doom(game: &mut Game<'_>, card: usize) {
+pub(crate) fn dr_doom(game: &mut Game<'_>, card: usize) {
     let Some(source) = game.cards[card].lane else {
         return;
     };

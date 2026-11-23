@@ -58,11 +58,26 @@ end-game multiplier × game multiplier)`. `Game::CheckIncreaseStakesForNextTurn`
 `CheckEndOfGameIncreaseStakesGameBehavior::CheckIncreaseStakesForEndGame`
 (0x7dccd14) uses a configured end multiplier and caps the result. A supplied
 initial `next` is a snapshot value; subsequent projections use the formula.
-`RetreatCost::DisplayedCurrent` is provisional, inferred from the displayed
-value rather than verified against client results; comparisons using retreats
-report `"retreat_semantics": "provisional"`. Draws paying zero, one snap per
-seat, and snap request acceptance are also provisional. Simultaneous snaps or
-retreats fail closed, and Retreat Later is not implemented.
+The concession request checks the displayed current stake, and result creation
+copies that current stake (client 0x7e50204 and 0x7dd4324). The last player to
+raise cannot concede on their own snap turn (0x7dd1bf4). Deferred concessions
+are checked before reveal and stake promotion (0x7e09570); both players
+conceding is a tie (0x7dd3a6c). Simultaneously sampled requests are ordered
+randomly. Comparisons still label retreat and draw semantics provisional.
+
+The JSON advisor accepts `stake_rollouts` (default 0), alongside
+`position_rollouts`, and opt-in SNAP adapter option `include_stakes`. It reports
+separate scenarios for observed or assumed local snap eligibility and six
+opponent threshold policies. Values use simulated play and stake decisions for
+both seats; they are policy sensitivity estimates, not fitted probabilities.
+The simulator assumes an eight-cube cap if unobserved, standard final doubling,
+and opponent eligibility if unknown; it omits scenarios whose displayed
+current/next values cannot uniquely establish the pending multiplier. Deadline
+or cancellation may leave individual scenarios without samples.
+Mephisto's extra winnings are server-side, with no client behavior definition:
+stake advice declines when he is observed in play or exceeds 5% of sampled
+end states. Otherwise it reports unknown sample counts and estimates from known
+outcomes. This does not prevent ordinary board advice.
 
 
 The engine exposes location replacement, delayed reveal scheduling, location cost hooks, ability removal, On Reveal and Ongoing repetition, movement, off-board placement, hand swaps and Horde creation. Lasting card costs are stored on cards. `Game::card_cost` mirrors Python's `energy_cost`: revealed locations modify the cost of hand cards only, in lane order, while board and deck cards keep their lasting cost. `Card::has_ongoing`, `can_reduce_power` and `reduce_power` support ability and immunity checks. `Game::copy_card` clones `CardState`, resets temporary board state and invokes the descriptor's optional `clear_reveal_state` hook. `cards::deck_eligible_ids()` matches the reference's sorted `deck_eligible_ids()`, which Agent 13 draws from. Registry membership alone is not a parity proof.
@@ -130,10 +145,19 @@ Stat updates are history, not deltas: the client's power and cost getters alread
 
 Optional per-player `default_energy` and `max_energy` fields are forwarded when
 present; the default is separate from the persistent maximum and current energy.
+The simulator tracks each player's lifetime peak current energy as energy changes;
+schema v2 does not export that historical peak, so Cyclops X-Men positions fail closed.
 The reader does not guarantee either field. Public graveyard cards retain
 `zone_position` order when every entry has a position. During simulation, the
 combined discard/destroy graveyard preserves insertion order and removes cards
 when they leave; restored discarded-vs-destroyed provenance may still be unknown.
+
+When the reader omits destroyed locations, `position_from_snap` accepts
+`lane_layout: {"complete":true,"lanes":[entity_id,null,entity_id]}` in its
+options. The three entries are in original lane order, and null denotes a
+destroyed lane. Supply it only when all three lane entity IDs were observed
+before destruction; incomplete or inconsistent layouts are rejected. Without a
+complete layout, frames with fewer than three locations remain unavailable.
 
 For coverage of pending energy from a replaced Feast or Altar of Death,
 `position_from_snap` accepts `previous_turn_locations` either in `options` or
@@ -234,8 +258,13 @@ Two kinds of record are reported rather than compared:
 
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
 * Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of an engine change is listed with its exact first-divergence path and values in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. A changed card keeps the reference's version in `cards/reference_rules.rs`, which the gates switch to with `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`; live play never does. The `replay-client` gate then checks the client rules, these changes included, against every real recording. The changes:
+  * Ongoing stat effects use the 59.15.1 client's Init → modifiers → Default → ConditionalCard → ConditionalLocation → PostConditional ordering, with player effects before locations and cards. Staging preserves non-staging contributions; conditional abilities that fail are retried after later successes. Reference rules retain the frozen ordering.
+  * Morph completion and copied-text activation run only the selected default text's resolve ability (`Card::ActivateTextResolveAbility`, `0x7cbb424`), not foreign attached resolves. Reference rules retain the earlier all-resolves dispatch.
+  * Nested ability dispatch uses the client's 32-active-ability limit (`Ability::CanActivate`, `0x7c8a6e0`).
   * Horde grows every owned Zombie Horde (`ZombieHordeAbilityDef::GrowZombieHorde`), not just the first; it changes one spread game. A new Horde is placed before it grows, so the growth triggers in play.
+  * Sinister London copies a staged Skill after it resolves even though the Skill has already been banished (`SinisterLondonBehavior::CreateCopy`, `0x7d7fe8c`). Reference rules retain the earlier lane-based behavior.
   * Wolfsbane counts every other card its owner has at its location, face-down ones included (`WolfsbaneBehavior::GetTargets` over `Location::GetAllCards`); the reference counted revealed cards only. Reference rules: `cards/reference_rules.rs`.
+  * Yondu banishes a randomly chosen lowest-current-cost card from the opponent's deck (`YonduBehavior::BanishLowestCostInDeck`, `0x7cf8068`); the reference drops it without recording a zone transition. Reference rules: `cards/reference_rules.rs`.
   * Zenn-La recruits the first card in deck order with printed cost 3 and reveals it (`ZennLaBehavior::RecruitThreeCostCard`, predicate `0x7d9c414`); the reference checks effective cost and skips On Reveal. Reference rules: `cards/reference_rules.rs`.
   * Shuri's Lab doubles a card played there at PostCardResolved, even if it moved away; cards played elsewhere and moved into the Lab are not doubled (`ShurisLabBehavior::DoublePower`). Reference rules retain the original current-location behavior.
   * A card whose text was removed no longer reacts to events.

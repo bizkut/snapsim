@@ -42,8 +42,12 @@ pub(crate) static CARDS: &[CardDef] = &[
 pub(crate) static TOKENS: &[&str] = &[];
 
 // WithIncreasedPower (0x7d29874) compares current Power to original Power.
-fn lancelot(game: &mut Game<'_>, card: usize) {
+fn lancelot(game: &mut Game<'_>, card: usize) -> bool {
+    if game.cards[card].lane.is_none() {
+        return false;
+    }
     let owner = game.cards[card].owner;
+    let mut activated = false;
     for lane in 0..3 {
         for index in 0..game.lanes[lane].cards.len() {
             let target = game.lanes[lane].cards[index];
@@ -51,14 +55,20 @@ fn lancelot(game: &mut Game<'_>, card: usize) {
                 && game.cards[target].revealed
                 && game.has_increased_power(target)
             {
+                activated = true;
                 game.add_ongoing_power(target, 1, owner);
             }
         }
     }
+    activated
 }
 
-fn scorpion(game: &mut Game<'_>, card: usize) {
+fn scorpion(game: &mut Game<'_>, card: usize) -> bool {
+    if game.cards[card].lane.is_none() {
+        return false;
+    }
     game.double_afflictions(card);
+    true
 }
 
 // ResetCardPower (0x7f37c24) clears modifiers on all revealed cards here.
@@ -74,8 +84,12 @@ fn shadow_king(game: &mut Game<'_>, card: usize) {
     }
 }
 
-fn superior_iron_man(game: &mut Game<'_>, card: usize) {
+fn superior_iron_man(game: &mut Game<'_>, card: usize) -> bool {
+    if game.cards[card].lane.is_none() {
+        return false;
+    }
     game.double_power_increases(card);
+    true
 }
 
 fn superior_iron_man_cost(game: &Game<'_>, card: usize, cost: i32) -> i32 {
@@ -292,6 +306,7 @@ mod tests {
         g.players[0].hand.push(card);
         g.add_cost(card, -1, 0);
         g.add_cost(card, 1, 0);
+        g.ongoing();
         assert_eq!(g.card_cost(card), 4);
         g.players[0].hand.retain(|&id| id != card);
         g.cards[card].lane = Some(0);

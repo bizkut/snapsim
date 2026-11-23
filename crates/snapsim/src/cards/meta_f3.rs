@@ -60,7 +60,7 @@ fn goliath(game: &mut Game<'_>, card: usize) {
             id != card
                 && game.cards[id].owner == owner
                 && game.cards[id].revealed
-                && game.cards[id].has_ongoing()
+                && game.cards[id].has_ongoing(false)
         })
         .count();
     game.add_ongoing_power(card, count as i32, owner);
@@ -128,18 +128,19 @@ fn maverick_buff(game: &mut Game<'_>, effect: &mut PendingEffect, target: Option
 }
 
 // OmegaRedBehavior::BuffLocations (0x7f1124c).
-fn omega_red(game: &mut Game<'_>, card: usize) {
+fn omega_red(game: &mut Game<'_>, card: usize) -> bool {
     let Some(lane) = game.cards[card].lane else {
-        return;
+        return false;
     };
     let owner = game.cards[card].owner;
     if game.lane_winner(lane) == Some(owner) {
         for destination in 0..3 {
             if destination != lane {
-                game.lanes[destination].bonus[owner] += 3;
+                game.add_lane_bonus(destination, owner, 3);
             }
         }
     }
+    true
 }
 
 #[cfg(test)]

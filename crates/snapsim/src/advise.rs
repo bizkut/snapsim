@@ -55,6 +55,9 @@ pub struct AdviseOptions {
     /// Independent policy-vs-policy samples of the current position (zero disables it).
     #[serde(default)]
     pub position_rollouts: u32,
+    /// Independent cube-policy samples per scenario; zero preserves legacy advice.
+    #[serde(default)]
+    pub stake_rollouts: u32,
     pub max_plans: usize,
     pub time_limit: Option<f64>,
     #[serde(default)]
@@ -124,6 +127,9 @@ impl Candidate {
 }
 
 fn legal_plans(game: &Game<'_>, stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<Play>> {
+    if game.autoplay_controller(0).is_some() {
+        return vec![Vec::new()];
+    }
     fn extend(
         game: &Game<'_>,
         stopped: &(dyn Fn() -> bool + Sync),
@@ -179,6 +185,9 @@ fn legal_action_plans(
     authority: Option<(&Game<'_>, usize)>,
     stopped: &(dyn Fn() -> bool + Sync),
 ) -> Vec<Vec<PlanStep>> {
+    if game.autoplay_controller(0).is_some() {
+        return vec![Vec::new()];
+    }
     let hand: Vec<_> = game.players[0]
         .hand
         .iter()
@@ -429,7 +438,9 @@ pub(crate) fn advise_with_game(
         .time_limit
         .and_then(|v| start.checked_add(Duration::from_secs_f64(v)));
     let plan_deadline = options.time_limit.and_then(|v| {
-        let fraction = if options.position_rollouts > 0 {
+        let fraction = if options.stake_rollouts > 0 {
+            0.5
+        } else if options.position_rollouts > 0 {
             0.7
         } else {
             1.0
@@ -437,11 +448,23 @@ pub(crate) fn advise_with_game(
         start.checked_add(Duration::from_secs_f64(v * fraction))
     });
     let stopped = || cancel() || plan_deadline.is_some_and(|end| Instant::now() >= end);
-    let position_stopped = || cancel() || deadline.is_some_and(|end| Instant::now() >= end);
+    let position_deadline = if options.stake_rollouts > 0 {
+        options
+            .time_limit
+            .and_then(|v| start.checked_add(Duration::from_secs_f64(v * 0.7)))
+    } else {
+        deadline
+    };
+    let position_stopped =
+        || cancel() || position_deadline.is_some_and(|end| Instant::now() >= end);
+    let stake_stopped = || cancel() || deadline.is_some_and(|end| Instant::now() >= end);
     let mut rng = PythonRandom::seed(options.seed);
     let mut sample_seed = rng.getrandbits(64) as u64;
     let mut first_rng = PythonRandom::seed(sample_seed as i128);
     let mut first_game = build_game(position, &mut first_rng)?;
+    let retreat_available = first_game.can_retreat(false)
+        && !(position.stakes.as_ref().and_then(|s| s.last_raiser) == Some(0)
+            && position.snapped_this_turn.is_some_and(|snapped| snapped[0]));
     let mut legal = if options.plays_only {
         legal_plans(&first_game, &stopped)
             .into_iter()
@@ -569,6 +592,9 @@ pub(crate) fn advise_with_game(
     let mut result = json!({"engine": "simulator-rollout", "status": status,
         "rollouts": options.rollouts - remaining, "plans": plans,
         "unsupported": unsupported, "priors": priors});
+    if !crate::cards::reference_rules_enabled() {
+        result["retreat_available"] = json!(retreat_available);
+    }
     if options.position_rollouts > 0 {
         // This stream is independent of plan sampling and never changes plan results.
         let mut position_rng = PythonRandom::seed(options.seed ^ 0x504f_5349_5449_4f4e);
@@ -606,12 +632,53 @@ pub(crate) fn advise_with_game(
             });
         }
     }
+    if options.stake_rollouts > 0 && position.stakes.is_some() && result.get("position").is_some() {
+        result["stake_rollouts"] = crate::compare::stake_position_sweep(
+            position,
+            options.stake_rollouts,
+            options.seed,
+            &stake_stopped,
+        )?;
+    }
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unregistered_cards_in_discarded_zones_are_declined() {
+        let options = json!({"rollouts":1,"seed":42,"max_plans":1,"time_limit":null,
+            "approximate":false,"playout":"spread","workers":1});
+        for (opponent, zone) in [
+            (false, "graveyard"),
+            (false, "banished"),
+            (true, "graveyard"),
+            (true, "banished"),
+        ] {
+            let mut position = json!({
+                "turn":1,"energy":1,"hand":[],"deck":[],
+                "locations":[{"id":"Ruins","mine":[],"theirs":[]},
+                    {"id":"Ruins","mine":[],"theirs":[]},
+                    {"id":"Ruins","mine":[],"theirs":[]}],
+                "opponent":{"hand":0,"deck":0}
+            });
+            let owner = if opponent {
+                &mut position["opponent"]
+            } else {
+                &mut position
+            };
+            owner[zone] = json!([{"id":"UnregisteredCard"}]);
+            let result: Value = serde_json::from_str(
+                &advise_json(&position.to_string(), &options.to_string()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result["status"], "unsupported", "{opponent} {zone}");
+            assert_eq!(result["unsupported"]["cards"], json!(["UnregisteredCard"]));
+            assert_eq!(result["rollouts"], 0);
+        }
+    }
 
     #[test]
     fn position_estimate_is_opt_in_and_independent() {
@@ -653,6 +720,34 @@ mod tests {
             .sum::<f64>();
         assert!((total - 1.0).abs() < 1e-12);
         assert_eq!(enabled, serde_json::from_str::<Value>(&default).unwrap());
+    }
+
+    #[test]
+    fn advice_reports_vesuvius_retreat_legality() {
+        let mut position = json!({
+            "turn": 6, "energy": 6, "hand": [], "deck": [],
+            "locations": [
+                {"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"MountVesuvius","mine":[],"theirs":[]},
+                {"id":"Wakanda","mine":[],"theirs":[]}
+            ],
+            "opponent":{"hand":0,"deck":0}
+        });
+        let options = json!({
+            "rollouts":1,"seed":1,"max_plans":1,"time_limit":null,
+            "approximate":true,"playout":"spread","workers":1
+        });
+        let result: Value = serde_json::from_str(
+            &advise_json(&position.to_string(), &options.to_string()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["retreat_available"], false);
+        position["turn"] = json!(5);
+        let result: Value = serde_json::from_str(
+            &advise_json(&position.to_string(), &options.to_string()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["retreat_available"], true);
     }
 
     #[test]
@@ -728,5 +823,87 @@ mod tests {
                 staged.stage_action(0, action).unwrap();
             }
         }
+    }
+
+    fn merge_plan_game(rng: &mut PythonRandom) -> Game<'_> {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &locations, rng).unwrap();
+        game.players[0].hand.clear();
+        game.players[0].energy = 0;
+        game
+    }
+
+    fn plan_contains_move(game: &Game<'_>, card: usize) -> bool {
+        legal_action_plans(game, None, &|| false)
+            .iter()
+            .flatten()
+            .any(|step| matches!(step, PlanStep::Move { card: id, .. } if *id == card))
+    }
+
+    #[test]
+    fn phoenix_movement_survives_merge_in_real_plans() {
+        let mut rng = PythonRandom::seed(91);
+        let mut game = merge_plan_game(&mut rng);
+        let dead = game.create_card("Wasp", 0);
+        game.cards[dead].observed_move_targets = Some(0);
+        game.players[0].graveyard.push((dead, Some(1)));
+        let phoenix = game.create_card("ThePhoenixForce", 0);
+        assert!(game.add_card(phoenix, 0, 0, true));
+        assert_eq!(game.cards[phoenix].merged_to, Some(dead));
+        assert!(plan_contains_move(&game, dead));
+        let receiver = game.create_card("Hulk", 0);
+        assert!(game.add_card(receiver, 0, 0, false));
+        game.cards[receiver].observed_move_targets = Some(0);
+        assert!(game.merge_card(receiver, dead));
+        assert!(plan_contains_move(&game, receiver));
+        game.turn += 1;
+        game.start_turn();
+        game.players[0].hand.clear();
+        game.players[0].energy = 0;
+        assert!(plan_contains_move(&game, receiver));
+    }
+
+    #[test]
+    fn peni_suit_movement_survives_merge_and_expires_in_real_plans() {
+        let mut rng = PythonRandom::seed(92);
+        let mut game = merge_plan_game(&mut rng);
+        let peni = game.create_card("PeniParker", 0);
+        assert!(game.add_card(peni, 0, 0, true));
+        game.cards[peni].observed_move_targets = Some(0);
+        let suit = game.players[0].hand.pop().unwrap();
+        assert_eq!(game.cards[suit].def.id, "SPdr");
+        assert!(game.add_card(suit, 0, 0, true));
+        assert_eq!(game.cards[suit].merged_to, Some(peni));
+        let receiver = game.create_card("Wasp", 0);
+        assert!(game.add_card(receiver, 0, 0, false));
+        game.cards[receiver].observed_move_targets = Some(0);
+        assert!(game.merge_card(receiver, peni));
+        assert!(!plan_contains_move(&game, receiver));
+        game.turn += 1;
+        game.start_turn();
+        game.players[0].hand.clear();
+        game.players[0].energy = 0;
+        assert!(plan_contains_move(&game, receiver));
+        game.turn += 1;
+        game.start_turn();
+        game.players[0].hand.clear();
+        game.players[0].energy = 0;
+        assert!(!game.cards[receiver].has_ongoing(true));
+        assert!(!plan_contains_move(&game, receiver));
     }
 }

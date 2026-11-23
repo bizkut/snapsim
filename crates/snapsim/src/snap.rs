@@ -101,6 +101,13 @@ pub(crate) fn card_ref(card: &Value, board: bool, seats: [&Value; 2], v2: bool) 
             result["played_turn"] = turn.clone();
         }
     }
+    if v2
+        && card["turn_revealed"]
+            .as_u64()
+            .is_some_and(|turn| (1..=u8::MAX as u64).contains(&turn))
+    {
+        result["turn_revealed"] = card["turn_revealed"].clone();
+    }
     if has_extended_card_fields(card) {
         for name in [
             "entity_id",
@@ -338,15 +345,23 @@ impl LocationWatch {
     pub fn update(&mut self, observation: &Value) -> Vec<Value> {
         let game = &observation["game"];
         let turn = game["turn"].as_i64().unwrap_or(0);
+        self.update_lanes(turn, array(&game["locations"]).iter().map(Some))
+    }
+
+    pub(crate) fn update_lanes<'a>(
+        &mut self,
+        turn: i64,
+        locations: impl IntoIterator<Item = Option<&'a Value>>,
+    ) -> Vec<Value> {
         if self.turn.is_none_or(|t| turn < t) {
             self.lanes.clear();
         }
         self.turn = Some(turn);
-        array(&game["locations"])
-            .iter()
+        locations
+            .into_iter()
             .enumerate()
             .map(|(lane, location)| {
-                let id = revealed_id(location);
+                let id = location.map_or(Value::Null, revealed_id);
                 if id.is_null() {
                     self.lanes.insert(lane, (Value::Null, Value::Null));
                 } else if let Some((old, revealed)) = self.lanes.get_mut(&lane) {
@@ -563,6 +578,47 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     {
         return Err(invalid("SNAP observation is missing required game fields"));
     }
+    let raw_locations = array(&game["locations"]);
+    let unavailable = || {
+        invalid(
+            "SNAP observation does not contain three locations; destroyed lane layout is unavailable",
+        )
+    };
+    let ordered: Vec<Option<&Value>> = if let Some(layout) = options.get("lane_layout") {
+        let ids = layout["lanes"]
+            .as_array()
+            .filter(|ids| ids.len() == 3)
+            .filter(|_| layout["complete"] == true)
+            .ok_or_else(unavailable)?;
+        let mut seen = HashSet::new();
+        let mut ordered = Vec::with_capacity(3);
+        for id in ids {
+            if id.is_null() {
+                ordered.push(None);
+            } else {
+                let entity = id.as_i64().ok_or_else(unavailable)?;
+                if !seen.insert(entity) {
+                    return Err(unavailable());
+                }
+                let mut matching = raw_locations
+                    .iter()
+                    .filter(|location| location["entity_id"] == *id);
+                let location = matching.next().ok_or_else(unavailable)?;
+                if matching.next().is_some() {
+                    return Err(unavailable());
+                }
+                ordered.push(Some(location));
+            }
+        }
+        if seen.len() != raw_locations.len() {
+            return Err(unavailable());
+        }
+        ordered
+    } else if raw_locations.len() == 3 {
+        raw_locations.iter().map(Some).collect()
+    } else {
+        return Err(unavailable());
+    };
     let mut remaining_cards = listed(&zones["deck"]);
     let hand_cards = array(&zones["hand"]["cards"]);
     let mut hand = hand_cards.iter().collect::<Vec<_>>();
@@ -576,7 +632,13 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     let mut visible: Vec<&Value> = hand_cards.iter().collect();
     let mut seen = Vec::<Value>::new();
     let mut locations = Vec::new();
-    for (lane, location) in array(&game["locations"]).iter().enumerate() {
+    for (lane, location) in ordered.iter().enumerate() {
+        let Some(location) = location else {
+            locations.push(
+                json!({"id":null,"destroyed":true,"mine":[],"theirs":[],"theirs_face_down":0}),
+            );
+            continue;
+        };
         let id = revealed_id(location);
         if !id.is_null()
             && options["revealed_turns"]
@@ -609,11 +671,12 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
                             // An option the game marks invalid offers no move.
                             reference["move_targets"] = json!([]);
                         } else if let Some(targets) = legal["target_entity_ids"].as_array() {
-                            let lanes: Vec<_> = array(&game["locations"])
+                            let lanes: Vec<_> = ordered
                                 .iter()
                                 .enumerate()
                                 .filter_map(|(index, loc)| {
-                                    targets.contains(&loc["entity_id"]).then_some(index)
+                                    loc.filter(|loc| targets.contains(&loc["entity_id"]))
+                                        .map(|_| index)
                                 })
                                 .collect();
                             reference["move_targets"] = json!(lanes);
@@ -695,7 +758,50 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
     } else {
         options["mode"].clone()
     };
+    let deck_created = crate::cards::meta_nd::deck_origins(
+        remaining_cards.as_deref().unwrap_or_default(),
+        deck.map(Vec::as_slice),
+        options["deck_added"].as_array().map(Vec::as_slice),
+    );
     let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    // Cube state is opt-in so existing adapter consumers retain their JSON contract.
+    if options["include_stakes"] == true
+        && let (Some(current), Some(next)) = (
+            game["cube_value"].as_u64(),
+            game["cube_value_next_turn"].as_u64(),
+        )
+        && u32::try_from(current).is_ok()
+        && u32::try_from(next).is_ok()
+    {
+        position["stakes"] = json!({"current": current, "next": next});
+        for (source, target) in [
+            ("max", "maximum"),
+            ("next_player_multiplier", "player_multiplier"),
+            ("next_game_multiplier", "game_multiplier"),
+            ("end_game_multiplier", "end_game_multiplier"),
+        ] {
+            if let Some(value) = game["stakes"][source].as_u64()
+                && u32::try_from(value).is_ok()
+            {
+                position["stakes"][target] = json!(value);
+            }
+        }
+        let eligibility = [
+            local["snap"]["can_raise"].as_bool(),
+            opponent["snap"]["can_raise"].as_bool(),
+        ];
+        if eligibility.iter().any(Option::is_some) {
+            position["stakes"]["can_raise"] = json!(eligibility);
+        }
+        match game["stakes"]["last_raiser_seat"].as_str() {
+            Some("local") => position["stakes"]["last_raiser"] = json!(0),
+            Some("opponent") => position["stakes"]["last_raiser"] = json!(1),
+            _ => {}
+        }
+    }
+    if !crate::cards::reference_rules_enabled() && deck_created.iter().any(Option::is_some) {
+        position["deck_created"] = json!(deck_created);
+    }
     if let Some(maximum) = local.get("max_energy").and_then(Value::as_i64) {
         position["max_energy"] = json!(maximum);
     }
@@ -742,8 +848,14 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         }
     }
     if let (Some(mine), Some(theirs)) = (
-        local["snapped_turns"].as_array(),
-        opponent["snapped_turns"].as_array(),
+        (options["include_stakes"] == true)
+            .then_some(local["snap"]["requested_turns"].as_array())
+            .flatten()
+            .or_else(|| local["snapped_turns"].as_array()),
+        (options["include_stakes"] == true)
+            .then_some(opponent["snap"]["requested_turns"].as_array())
+            .flatten()
+            .or_else(|| opponent["snapped_turns"].as_array()),
     ) {
         position["snapped_this_turn"] = json!([
             mine.iter().any(|v| v.as_i64() == Some(turn)),
@@ -753,6 +865,12 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         position["snapped_this_turn"] = snapped.clone();
     }
     if version == Some(2)
+        // History slot validation uses the compact reader order, so discard it
+        // when that order no longer represents the original three lanes.
+        && ordered.iter().zip(raw_locations).all(|(ordered, raw)| {
+            ordered.is_some_and(|location| std::ptr::eq(location, raw))
+        })
+        && raw_locations.len() == 3
         && let Ok(history) =
             serde_json::from_value::<crate::position::ObservedHistory>(game["history"].clone())
         && let Ok(turn) = u8::try_from(turn)
@@ -789,7 +907,99 @@ mod tests {
         "locations":[{"location_id":"Ruins","cards":[
             {"card_id":"Hulk","owner_entity_id":20,"revealed":true},
             {"card_id":"AntMan","owner_entity_id":20,"revealed":false}
-        ]}]}})
+        ]},{"location_id":"Ruins","cards":[]},{"location_id":"Ruins","cards":[]}]}})
+    }
+
+    #[test]
+    fn missing_destroyed_lane_layout_is_rejected() {
+        let mut observation = prior_observation();
+        observation["schema_version"] = json!(2);
+        assert!(position_from_snap(&observation, &json!({})).is_ok());
+        for count in [2, 1] {
+            observation["game"]["locations"]
+                .as_array_mut()
+                .unwrap()
+                .truncate(count);
+            let error = position_from_snap(&observation, &json!({})).unwrap_err();
+            assert!(
+                matches!(error, SnapError::Invalid(message) if message.contains("destroyed lane layout is unavailable"))
+            );
+        }
+    }
+
+    #[test]
+    fn destroyed_lane_layout_restores_original_indices() {
+        let mut observation = prior_observation();
+        observation["schema_version"] = json!(2);
+        let lanes = observation["game"]["locations"].as_array_mut().unwrap();
+        lanes[0]["entity_id"] = json!(101);
+        lanes[1]["entity_id"] = json!(102);
+        lanes[2]["entity_id"] = json!(103);
+        lanes[2]["location_id"] = json!("Wakanda");
+        lanes.remove(1);
+        lanes.reverse();
+        let position = position_from_snap(
+            &observation,
+            &json!({
+                "lane_layout":{"complete":true,"lanes":[101,null,103]}
+            }),
+        )
+        .unwrap();
+        assert_eq!(position["locations"][0]["id"], "Ruins");
+        assert_eq!(position["locations"][1]["destroyed"], true);
+        assert_eq!(position["locations"][2]["id"], "Wakanda");
+        for layout in [
+            json!({"complete":false,"lanes":[101,null,103]}),
+            json!({"complete":true,"lanes":[101,101,null]}),
+            json!({"complete":true,"lanes":[101,null,999]}),
+        ] {
+            assert!(position_from_snap(&observation, &json!({"lane_layout":layout})).is_err());
+        }
+    }
+
+    #[test]
+    fn cube_state_is_opt_in_and_does_not_infer_ownership() {
+        let mut observation = prior_observation();
+        observation["game"]["cube_value"] = json!(2);
+        observation["game"]["cube_value_next_turn"] = json!(4);
+        assert!(
+            position_from_snap(&observation, &json!({}))
+                .unwrap()
+                .get("stakes")
+                .is_none()
+        );
+        let position = position_from_snap(&observation, &json!({"include_stakes": true})).unwrap();
+        assert_eq!(position["stakes"], json!({"current": 2, "next": 4}));
+        assert!(position.get("snapped_this_turn").is_none());
+        observation["game"]["players"][0]["snap"] =
+            json!({"requested_turns": [2], "can_raise": false});
+        observation["game"]["players"][1]["snap"] =
+            json!({"requested_turns": [], "can_raise": true});
+        assert!(
+            position_from_snap(&observation, &json!({}))
+                .unwrap()
+                .get("snapped_this_turn")
+                .is_none()
+        );
+        let observed = position_from_snap(&observation, &json!({"include_stakes": true})).unwrap();
+        assert_eq!(observed["snapped_this_turn"], json!([true, false]));
+        observation["game"]["cube_value"] = json!(-1);
+        assert!(
+            position_from_snap(&observation, &json!({"include_stakes": true}))
+                .unwrap()
+                .get("stakes")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn adapter_preserves_deck_tracker_origins() {
+        let mut observation = prior_observation();
+        observation["game"]["players"][0]["zones"]["deck"]["count"] = json!(3);
+        let options = json!({"deck":["Wasp","Hulk"],"deck_added":["Rock"]});
+        let position = position_from_snap(&observation, &options).unwrap();
+        assert_eq!(position["deck"], json!(["Wasp", "Hulk", "Rock"]));
+        assert_eq!(position["deck_created"], json!([false, false, true]));
     }
 
     #[test]
@@ -1049,5 +1259,22 @@ mod tests {
         assert!(reference.get("latest_resolution_order").is_none());
         assert_eq!(reference["stat_updates"][0]["source"], 0);
         assert!(reference["stat_updates"][1].get("source").is_none());
+    }
+
+    #[test]
+    fn v2_reveal_turn_survives_card_reference_hydration() {
+        let local = json!(10);
+        let opponent = json!(20);
+        let card = json!({"card_id":"Hulk","revealed":true,"turn_revealed":3});
+        let projected = card_ref(&card, true, [&local, &opponent], true);
+        let reference: crate::position::CardRef = serde_json::from_value(projected).unwrap();
+        let mut restored = crate::position::make_card("Hulk", 0).unwrap();
+        crate::position::apply_card_reference(&mut restored, &reference, 4);
+        assert_eq!(restored.turn_revealed, Some(3));
+        assert!(
+            card_ref(&card, true, [&local, &opponent], false)
+                .get("turn_revealed")
+                .is_none()
+        );
     }
 }

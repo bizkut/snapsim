@@ -51,7 +51,10 @@ fn astral_projection(game: &mut Game<'_>, card: usize) {
         .filter(|&id| {
             game.cards[id].def.id != "AstralProjection"
                 && !game.cards[id].abilities_removed
-                && game.cards[id].ability_def().reveal.is_some()
+                && game.cards[id].abilities().any(|a| {
+                    a.supports(crate::engine_ext::abilities::AbilityKind::Reveal)
+                        && a.def.reveal.is_some()
+                })
         })
         .collect();
     if !candidates.is_empty() {
@@ -234,6 +237,7 @@ fn web_sling(game: &mut Game<'_>, card: usize) {
         end_turn: turn,
         remaining: 1,
         unlimited: false,
+        condition: None,
         on_move: Some(web_sling_moved),
     });
 }
@@ -274,7 +278,10 @@ mod tests {
         game.add_hand(0, another, false);
         game.add_hand(0, target, false);
         astral_projection(&mut game, astral);
-        assert_eq!(game.cards[astral].ability_def().id, "Ironheart");
+        assert_eq!(
+            game.cards[astral].abilities().next().unwrap().def.id,
+            "Ironheart"
+        );
         assert_eq!(game.cards[astral].def.id, "AstralProjection");
     }
 
@@ -312,10 +319,13 @@ mod tests {
         let enemy = game.lanes[0].cards[2];
         techno_organic_virus(&mut game, virus);
         assert_eq!(
-            game.cards[ally].ability_def().id,
+            game.cards[ally].abilities().next().unwrap().def.id,
             "TechnoOrganicVirusInfection"
         );
-        assert_eq!(game.cards[enemy].ability_def().id, "Hawkeye");
+        assert_eq!(
+            game.cards[enemy].abilities().next().unwrap().def.id,
+            "Hawkeye"
+        );
         assert_eq!(
             game.cards[game.players[0].hand[0]].def.id,
             "TechnoOrganicVirus"
@@ -395,6 +405,8 @@ mod tests {
         );
         let mut rng = PythonRandom::seed(7);
         let mut game = build_game(&p, &mut rng).unwrap();
+        // Resolve the effect outside the staging-only updater (0x7c94474).
+        game.is_wait_for_staging = false;
         let skill = game.lanes[0].cards[0];
         let ally = game.lanes[0].cards[1];
         let enemy = game.lanes[0].cards[2];

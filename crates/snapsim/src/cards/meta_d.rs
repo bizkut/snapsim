@@ -73,7 +73,7 @@ fn board<'a>(game: &'a Game<'_>, seat: usize) -> impl Iterator<Item = usize> + '
 fn update(game: &mut Game<'_>, card: usize) {
     let seat = game.cards[card].owner;
     // The client clamps progress, but freezes it after CompleteObjective (0x7c9f714).
-    let (progress, goal) = match game.cards[card].ability_def().id {
+    let (progress, goal) = match game.cards[card].abilities().next().unwrap().def.id {
         "PolarisHorseman" => {
             // GetValidCount 0x7f166d8: sum all negative additive Power ledger entries.
             let sum: i32 = game
@@ -139,8 +139,7 @@ fn update(game: &mut Game<'_>, card: usize) {
         _ => return,
     };
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Objective>()
@@ -153,8 +152,7 @@ fn update(game: &mut Game<'_>, card: usize) {
 
 fn freeze(game: &mut Game<'_>, card: usize) {
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Objective>()
@@ -169,8 +167,7 @@ fn complete(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Objective>()
@@ -181,7 +178,8 @@ fn complete(game: &mut Game<'_>, card: usize, event: Event) {
     // CompleteObjective 0x7e0d9ac marks completed before running the action.
     state.completed = true;
     let seat = game.cards[card].owner;
-    match game.cards[card].ability_def().id {
+    let ability_id = game.cards[card].abilities().next().unwrap().def.id;
+    match ability_id {
         "PolarisHorseman" => {
             let Some(lane) = game.cards[card].lane else {
                 return;
@@ -284,17 +282,23 @@ fn apocalypse(game: &mut Game<'_>, card: usize) {
     if !game.take_from_board(target) {
         return;
     }
-    game.players[seat].deck.retain(|&id| id != replacement);
-    game.players[seat].deck.push(target);
+    while let Some(slot) = game.players[seat]
+        .deck
+        .iter()
+        .position(|&id| id == replacement)
+    {
+        game.take_deck(seat, slot);
+    }
+    game.push_deck(seat, target);
     if !game.add_card(replacement, lane, seat, true) {
-        game.players[seat].deck.push(replacement);
+        game.push_deck(seat, replacement);
     }
     for i in 0..game.players[seat].deck.len().saturating_sub(1) {
         let j = i + game
             .rng
             .borrow_mut()
             .randbelow(game.players[seat].deck.len() - i);
-        game.players[seat].deck.swap(i, j);
+        game.swap_deck(seat, i, j);
     }
 }
 

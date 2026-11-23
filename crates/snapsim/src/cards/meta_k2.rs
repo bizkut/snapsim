@@ -116,9 +116,9 @@ pub(crate) static CARDS: &[CardDef] = &[
 pub(crate) static TOKENS: &[&str] = &["TheVoid", "WidowsBite"];
 
 // ExecuteOngoingAction 0x7e0e6f4; WithIncreasedPower 0x7d29874.
-fn jack_flag(game: &mut Game<'_>, card: usize) {
+fn jack_flag(game: &mut Game<'_>, card: usize) -> bool {
     let Some(lane) = game.cards[card].lane else {
-        return;
+        return false;
     };
     let owner = game.cards[card].owner;
     for index in 0..game.lanes[lane].cards.len() {
@@ -130,6 +130,7 @@ fn jack_flag(game: &mut Game<'_>, card: usize) {
             game.add_ongoing_power(target, 2, owner);
         }
     }
+    true
 }
 
 // RonanBehavior::GetPowerChange 0x7f2ba24 counts the opponent's hand.
@@ -818,8 +819,11 @@ mod tests {
         let mut rng = PythonRandom::seed(1);
         let mut g = setup(&mut rng);
         let source = place(&mut g, "Goose", 0, 0);
-        assert!(g.cards[source].has_ongoing());
-        assert!(g.cards[source].ability_def().blocks_expensive_plays);
+        assert!(g.cards[source].has_ongoing(false));
+        assert!(g.cards[source].abilities().any(|a| {
+            a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing)
+                && a.def.blocks_expensive_plays
+        }));
     }
     #[test]
     fn human_torch_doubles_on_move() {

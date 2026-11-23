@@ -79,7 +79,7 @@ fn shanna(game: &mut Game<'_>, card: usize) {
 // hand slot before creating them. The random pool contains implemented cards.
 fn helicarrier(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
-    game.players[owner].discard.push(card);
+    game.push_discard(owner, card);
     let count = 7usize.saturating_sub(game.players[owner].hand.len());
     let mut selected = [None; 7];
     for index in 0..count {
@@ -120,8 +120,8 @@ fn doctor_octopus_fractured(game: &mut Game<'_>, card: usize) {
     if game.players[owner].hand.is_empty() {
         return;
     }
-    let target = game.players[owner].hand.remove(0);
-    game.players[owner].deck.insert(0, target);
+    let target = game.take_hand(owner, 0);
+    game.put_deck(owner, 0, target);
     let created = game
         .random_card(|row| row.card_type == "Character")
         .map(|id| {
@@ -238,7 +238,7 @@ fn sub_mariner(game: &mut Game<'_>, card: usize, event: Event) {
 // location and schedules one energy for the next turn, even if none exists.
 fn x23_discard(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
-    game.players[owner].discard.push(card);
+    game.push_discard(owner, card);
     x23_destroy(game, card);
 }
 

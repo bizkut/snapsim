@@ -11,6 +11,22 @@ fn position(locations: serde_json::Value) -> Position {
 }
 
 #[test]
+fn post_galactus_position_builds_destroyed_lanes() {
+    let p = position(json!([
+        {"id":null, "destroyed":true, "mine":[], "theirs":[]},
+        {"id":"Ruins", "mine":[{"id":"Galactus"}], "theirs":[]},
+        {"id":null, "destroyed":true, "mine":[], "theirs":[]}
+    ]));
+    let mut rng = PythonRandom::seed(1);
+    let game = build_game(&p, &mut rng).unwrap();
+    assert!(game.lanes[0].destroyed);
+    assert!(!game.lanes[1].destroyed);
+    assert!(game.lanes[2].destroyed);
+    assert!(!game.lanes[0].revealed);
+    assert!(game.lanes[0].cards.is_empty());
+}
+
+#[test]
 fn opponent_known_is_forced_hidden_without_resampling_seen() {
     let mut p = position(json!([
         {"id":"Xandar", "mine":[], "theirs":[]},
@@ -97,7 +113,7 @@ fn restores_lemuria_face_down_and_lab_flags() {
     assert!(
         game.delayed_reveals[1]
             .iter()
-            .all(|&c| game.cards[c].turn_played == 2)
+            .all(|entry| game.cards[entry.card].turn_played == 2)
     );
     assert_eq!(
         game.lanes[1]

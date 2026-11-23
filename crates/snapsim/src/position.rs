@@ -112,12 +112,17 @@ pub struct CardRef {
     pub id: String,
     #[serde(default)]
     pub cost: Option<i32>,
+    /// Exact pre-ongoing cost when projected from an existing simulation.
+    #[serde(skip)]
+    pub cost_basis: Option<i32>,
     #[serde(default)]
     pub power: Option<i32>,
     #[serde(default = "yes")]
     pub revealed: bool,
     #[serde(default)]
     pub played_turn: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_revealed: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,6 +425,8 @@ pub struct ObservedHistory {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LocationRef {
     pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub destroyed: bool,
     pub mine: Vec<CardRef>,
     pub theirs: Vec<CardRef>,
     #[serde(default)]
@@ -466,6 +473,25 @@ pub struct PreviousTurnLocations {
     pub ids: [Vec<String>; 3],
 }
 
+/// Visible cube values; no per-player snap eligibility is inferred from them.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ObservedStakes {
+    pub current: u32,
+    pub next: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_multiplier: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_multiplier: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_game_multiplier: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_raise: Option<[Option<bool>; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_raiser: Option<usize>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Position {
     pub turn: u8,
@@ -479,6 +505,9 @@ pub struct Position {
     pub default_energy: Option<i32>,
     pub hand: Vec<CardRef>,
     pub deck: Vec<String>,
+    /// Whether each corresponding deck entry was created; None means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deck_created: Option<Vec<Option<bool>>>,
     pub locations: [LocationRef; 3],
     pub opponent: Opponent,
     #[serde(default)]
@@ -492,6 +521,8 @@ pub struct Position {
     /// Per-seat snap state for the current turn, when observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapped_this_turn: Option<[bool; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stakes: Option<ObservedStakes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graveyard: Option<Vec<CardRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -766,9 +797,9 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         owner,
         cost: row.cost,
         ongoing_cost: 0,
-        temporary_hand_cost: None,
-        next_turn_cost_delta: None,
-        player_cost_set_until: None,
+        dynamic_assigned_cost: None,
+        cost_effects: Vec::new(),
+        next_cost_effect_sequence: 0,
         created: false,
         created_in_hand: None,
         created_hand_seat: None,
@@ -781,10 +812,14 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         permanent: row.power,
         base_power_override: None,
         stat_updates: Vec::new(),
+        power_modifiers: Vec::new(),
+        power_modifiers_complete: false,
         ongoing: 0,
         location_power: 0,
         last_lane: None,
         lane: None,
+        zone: None,
+        previous_zone: None,
         revealed: false,
         abilities_removed: false,
         latest_resolution_order: 0,
@@ -801,7 +836,14 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
         merged_to: None,
         drawn_turn: None,
         turn_played: 0,
+        turn_revealed: None,
         attached_abilities: crate::game::initial_attachments(def),
+        composed_abilities: Vec::new(),
+        copied_ongoing_guards: Vec::new(),
+        virtual_ongoing_ids: Vec::new(),
+        ability_frames: Vec::new(),
+        default_ability_generation: 0,
+        external_moves: Vec::new(),
         state: def.initial_state.map(|init| init()),
         borrowed_original_state: None,
     })
@@ -809,6 +851,29 @@ pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
 
 pub(crate) fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u8) {
     if !cards::reference_rules_enabled() {
+        if let Some(modifiers) = &reference.power_modifiers {
+            let parsed: Option<Vec<_>> = modifiers
+                .items
+                .iter()
+                .map(|item| {
+                    let operation = match item.operation.as_str() {
+                        "Add" => StatOperation::Add,
+                        "Multiply" => StatOperation::Multiply,
+                        "Set" => StatOperation::Set,
+                        _ => return None,
+                    };
+                    Some(crate::game::CardPowerModifier {
+                        operation,
+                        value: item.amount,
+                        source: None,
+                    })
+                })
+                .collect();
+            if let Some(parsed) = parsed {
+                card.power_modifiers = parsed;
+                card.power_modifiers_complete = modifiers.complete;
+            }
+        }
         if let Some(base) = reference.verified_base_power() {
             card.base_power_override = Some(base);
         }
@@ -845,6 +910,7 @@ pub(crate) fn apply_card_reference(card: &mut Card, reference: &CardRef, turn: u
         }
     }
     card.activated = reference.activated.unwrap_or(false);
+    card.turn_revealed = reference.turn_revealed;
     card.created = reference.created.unwrap_or(false);
     card.latest_resolution_order = reference.latest_resolution_order.unwrap_or(0);
     card.created_by_card_id
@@ -911,6 +977,7 @@ fn observed_update(update: &ObservedStatUpdate) -> Option<CardStatUpdate> {
         // Unknown sources must not be mistaken for either player's effects.
         source: update.source.filter(|&seat| seat < 2).unwrap_or(usize::MAX),
         ongoing: false,
+        ongoing_source: None,
     })
 }
 pub fn recruit_weights() -> HashMap<String, f64> {
@@ -939,15 +1006,108 @@ pub fn recruit_weights() -> HashMap<String, f64> {
         .collect()
 }
 
+/// Recover Monstro's pre-ongoing cost only from an authoritative simulated
+/// value or an available, unambiguously attributable client stat ledger.
+pub(crate) fn monstro_cost_basis(position: &Position, card: &CardRef) -> Result<i32, String> {
+    if let Some(basis) = card.cost_basis {
+        return Ok(basis);
+    }
+    let updates = card
+        .stat_updates
+        .as_ref()
+        .ok_or("MonstroOctopus stat_updates cost history not exported")?;
+    let mut basis = CARD_DATA[&card.id].cost;
+    for update in updates.iter().filter(|update| update.stat == "Cost") {
+        let card_source = update.updater_card_id.as_deref();
+        let location_source = update.updater_location_id.as_deref();
+        let sources = usize::from(card_source.is_some())
+            + usize::from(location_source.is_some())
+            + usize::from(update.updater_faction_id.is_some())
+            + usize::from(update.updater_augment_id.is_some())
+            + usize::from(update.updater_league_id.is_some());
+        if sources != 1
+            || update.updater_faction_id.is_some()
+            || update.updater_augment_id.is_some()
+            || update.updater_league_id.is_some()
+        {
+            return Err("MonstroOctopus stat_updates cost updater attribution incomplete".into());
+        }
+        if card_source == Some("MonstroOctopus") {
+            continue;
+        }
+        if let Some(id) = location_source {
+            let def =
+                locations::get(id).ok_or("MonstroOctopus stat_updates location updater unknown")?;
+            if def.modify_cost.is_some() {
+                let active = position
+                    .locations
+                    .iter()
+                    .any(|lane| !lane.destroyed && lane.id.as_deref() == Some(id));
+                if active
+                    && def.on_reveal.is_none()
+                    && def.on_turn_start.is_none()
+                    && def.on_turn_end.is_none()
+                    && def.on_event.is_none()
+                {
+                    continue;
+                }
+                return Err(
+                    "MonstroOctopus stat_updates location cost attribution ambiguous".into(),
+                );
+            }
+        }
+        if let Some(id) = card_source {
+            let def = cards::get(id).ok_or("MonstroOctopus stat_updates card updater unknown")?;
+            if def.ongoing.is_some()
+                || def.in_hand_ongoing.is_some()
+                || def.late_ongoing.is_some()
+                || def.late_in_hand_ongoing.is_some()
+                || def.conditional_in_hand_ongoing.is_some()
+            {
+                return Err("MonstroOctopus stat_updates card cost attribution ambiguous".into());
+            }
+        }
+        basis = match update.update.as_str() {
+            "Add" => basis.checked_add(update.value),
+            "Multiply" => basis.checked_mul(update.value),
+            "Set" => Some(update.value),
+            _ => None,
+        }
+        .ok_or("MonstroOctopus stat_updates cost operation invalid")?;
+    }
+    Ok(basis)
+}
+
 pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<Game<'a>, String> {
     if position.turn == 0 || position.turn > position.total_turns || position.hand.len() > 7 {
         return Err("invalid turn or hand size".into());
     }
-    let mut deck_ids = position.deck.clone();
+    let mut deck_ids: Vec<_> = position
+        .deck
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id.clone(),
+                position
+                    .deck_created
+                    .as_ref()
+                    .and_then(|v| v.get(index))
+                    .copied()
+                    .flatten(),
+            )
+        })
+        .collect();
     let missing = position
         .deck_count
         .unwrap_or(deck_ids.len())
         .saturating_sub(deck_ids.len());
+    if !cards::reference_rules_enabled()
+        && missing > 0
+        && position.hand.iter().any(|card| card.id == "MonstroOctopus")
+    {
+        return Err("MonstroOctopus own deck card identities incomplete".into());
+    }
     if missing > 0 {
         let known: HashSet<_> = position
             .hand
@@ -970,7 +1130,11 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             all_cards()
         };
         let candidates: Vec<_> = pool.into_iter().filter(|id| !known.contains(id)).collect();
-        deck_ids.extend(sample(rng, &candidates, missing)?);
+        deck_ids.extend(
+            sample(rng, &candidates, missing)?
+                .into_iter()
+                .map(|id| (id, None)),
+        );
     }
     deck_ids.sort();
     rng.shuffle(&mut deck_ids);
@@ -1084,23 +1248,37 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 && (cards::reference_rules_enabled() || *id != "SacredTimeline")
         })
         .collect();
-    let hidden_locations = sample(rng, &possible, 3 - known_locations.len())?;
+    let hidden_count = position
+        .locations
+        .iter()
+        .filter(|lane| lane.id.is_none() && !lane.destroyed)
+        .count();
+    let hidden_locations = sample(rng, &possible, hidden_count)?;
     let mut selected = hidden_locations.into_iter();
     let lanes: [Lane; 3] = std::array::from_fn(|i| {
         let src = &position.locations[i];
-        let id = src.id.clone().unwrap_or_else(|| selected.next().unwrap());
+        let id = src.id.clone().unwrap_or_else(|| {
+            if src.destroyed {
+                String::new()
+            } else {
+                selected.next().unwrap()
+            }
+        });
         let def = location_def(&id).unwrap_or(&UNKNOWN_LOCATION);
         Lane {
             def,
-            observed_id: (def.id != id).then_some(id),
+            observed_id: (!src.destroyed && def.id != id).then_some(id),
             revealed: src.id.is_some(),
-            destroyed: false,
+            destroyed: src.destroyed,
+            ability_flags: crate::game::LocationAbilityFlags::default(),
+            copied_reveal_turn: None,
             revealed_turn: src.id.as_ref().map(|_| {
                 src.revealed_turn
                     .unwrap_or(((i + 1) as u8).min(position.turn))
             }),
             cards: Vec::new(),
             bonus: [0; 2],
+            contributions: Vec::new(),
             multiplier: [1; 2],
             state: src
                 .ottos_lab_spent
@@ -1138,6 +1316,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     };
     let mut game = Game {
         cards: Vec::new(),
+        ability_call_depth: 0,
         players: [Player::default(), Player::default()],
         human_seat: Some(0),
         lanes,
@@ -1162,8 +1341,11 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         post_resolve_plays: Vec::new(),
         end_turn_lane_order: None,
         current_location: 0,
+        current_ongoing_source: None,
         location_reveal_order: [0, 1, 2],
         destroyed: None,
+        score_overrides: [None; 2],
+        merge_batches: Vec::new(),
         rng: RefCell::new(rng),
     };
     if let Some(list) = &position.opponent.deck_list {
@@ -1185,10 +1367,11 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     game.current_location = order.len();
     order.extend((0..3).filter(|&lane| !game.lanes[lane].revealed));
     game.location_reveal_order = [order[0], order[1], order[2]];
-    game.delays_reveals = game
-        .lanes
-        .iter()
-        .any(|l| l.revealed && l.def.delays_reveals && l.revealed_turn == Some(position.turn));
+    game.delays_reveals = (0..game.lanes.len()).any(|lane| {
+        game.location_abilities_active(lane)
+            && game.lanes[lane].def.delays_reveals
+            && game.lanes[lane].revealed_turn == Some(position.turn)
+    });
     game.players[0].energy = position.energy;
     for (seat, default, maximum) in [
         (0, position.default_energy, position.max_energy),
@@ -1206,6 +1389,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     let mut powers = Vec::new();
     for r in &position.hand {
         let mut c = make_card(&r.id, 0)?;
+        c.zone = Some(crate::zones::CardZone::Hand(0));
         apply_card_reference(&mut c, r, position.turn);
         if let Some(cost) = r.cost {
             c.cost = cost;
@@ -1219,20 +1403,30 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         if needs_observed_reference(r) {
             observed_refs.push((game.cards.len(), r));
         }
-        game.players[0].hand.push(game.cards.len());
+        let id = game.cards.len();
         game.cards.push(c);
+        game.push_hand(0, id);
     }
-    for id in &deck_ids {
-        game.players[0].deck.push(game.cards.len());
-        game.cards.push(make_card(id, 0)?);
+    for (id, created) in &deck_ids {
+        let index = game.cards.len();
+        let mut card = make_card(id, 0)?;
+        card.created = created.unwrap_or(false);
+        card.zone = Some(crate::zones::CardZone::Deck(0));
+        game.cards.push(card);
+        game.push_deck(0, index);
     }
     for (i, id) in hidden.iter().take(opp.hand + opp.deck).enumerate() {
         let index = game.cards.len();
         game.cards.push(make_card(id, 1)?);
-        if i < opp.hand {
-            game.players[1].hand.push(index);
+        game.cards[index].zone = Some(if i < opp.hand {
+            crate::zones::CardZone::Hand(1)
         } else {
-            game.players[1].deck.push(index);
+            crate::zones::CardZone::Deck(1)
+        });
+        if i < opp.hand {
+            game.push_hand(1, index);
+        } else {
+            game.push_deck(1, index);
         }
     }
     let delayed = position.turn.checked_sub(1).filter(|&t| {
@@ -1250,6 +1444,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 let mut c = make_card(&r.id, owner)?;
                 c.cost = r.cost.unwrap_or(c.cost);
                 c.lane = Some(lane);
+                c.zone = Some(crate::zones::CardZone::Location(lane));
                 c.turn_played = r.played_turn.unwrap_or(0);
                 c.revealed = r.revealed;
                 apply_card_reference(&mut c, r, position.turn);
@@ -1265,13 +1460,17 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                     observed_refs.push((id, r));
                 }
                 game.cards.push(c);
-                game.lanes[lane].cards.push(id);
+                game.push_location(lane, id);
                 if r.revealed {
                     revealed.push(id);
                 } else if r.played_turn == Some(position.turn) {
                     game.played[owner].push((id, lane));
                 } else if delayed.is_some() && r.played_turn == delayed {
-                    game.delayed_reveals[owner].push(id);
+                    game.delayed_reveals[owner].push(crate::game::QueuedReveal {
+                        card: id,
+                        staging: None,
+                        persistent: false,
+                    });
                 }
                 if let Some(power) = r.power {
                     powers.push((id, power));
@@ -1281,13 +1480,18 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         for _ in 0..src.theirs_face_down {
             let mut c = make_card(hidden_board.next().unwrap(), 1)?;
             c.lane = Some(lane);
+            c.zone = Some(crate::zones::CardZone::Location(lane));
             let id = game.cards.len();
             if let Some(t) = delayed {
                 c.turn_played = t;
-                game.delayed_reveals[1].push(id);
+                game.delayed_reveals[1].push(crate::game::QueuedReveal {
+                    card: id,
+                    staging: None,
+                    persistent: false,
+                });
             }
             game.cards.push(c);
-            game.lanes[lane].cards.push(id);
+            game.push_location(lane, id);
         }
     }
     // The reader exposes these public zones without the lane of destruction.
@@ -1303,6 +1507,11 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         for (is_graveyard, refs) in [(true, graveyard), (false, banished)] {
             for r in refs.unwrap_or_default() {
                 let mut card = make_card(&r.id, owner)?;
+                card.zone = Some(if is_graveyard {
+                    crate::zones::CardZone::Graveyard(owner)
+                } else {
+                    crate::zones::CardZone::Banished(owner)
+                });
                 apply_card_reference(&mut card, r, position.turn);
                 card.cost = r.cost.unwrap_or(card.cost);
                 card.permanent = r.power.unwrap_or(card.permanent);
@@ -1314,13 +1523,16 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 }
                 game.cards.push(card);
                 if is_graveyard {
-                    game.players[owner].graveyard.push((id, None));
+                    game.push_graveyard(owner, id, None);
                     game.players[owner].graveyard_order.push(id);
                 } else {
-                    game.players[owner].banished.push(id);
+                    game.push_banished(owner, id);
                 }
             }
         }
+    }
+    if !cards::reference_rules_enabled() {
+        game.refresh_location_ability_flags();
     }
     let entities: HashMap<i64, usize> = observed_refs
         .iter()
@@ -1369,8 +1581,22 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             }
             if let Some(actions) = position.complete_past_actions(seat) {
                 for action in actions.into_iter().filter(|action| action.kind == "play") {
+                    game.players[seat]
+                        .staged_lane_history
+                        .push((action.turn, action.location_slot));
                     if let Some(&card) = entities.get(&action.card_entity_id) {
                         game.players[seat].play_history.push((action.turn, card));
+                        game.players[seat].resolved_play_history.push(
+                            crate::game::ResolvedPlayEvent {
+                                turn: action.turn,
+                                card,
+                                def_id: game.cards[card].def.id,
+                                printed_cost: game.printed_cost(card),
+                                lane: Some(action.location_slot),
+                                staged_lane: Some(action.location_slot),
+                                power: None,
+                            },
+                        );
                     }
                 }
             }
@@ -1431,21 +1657,27 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         {
             let lane = game.cards[id].lane.unwrap();
             let before = game.cards[id].turn_played;
-            let active =
-                game.lanes[lane].revealed && game.lanes[lane].revealed_turn.unwrap_or(0) <= before;
+            let active = game.location_abilities_active(lane)
+                && game.lanes[lane].revealed_turn.unwrap_or(0) <= before;
+            // Reconstruction heuristic, not a client predicate: excluding hidden
+            // abilities is provisional; restored cards have no hidden instances.
             let sources: Vec<_> = game.lanes[lane]
                 .cards
                 .iter()
                 .copied()
                 .filter(|&s| {
                     game.cards[s].revealed
-                        && game.cards[s].has_ongoing()
+                        && game.cards[s].has_ongoing(false)
                         && game.cards[s].turn_played < before
                 })
                 .collect();
-            if sources
-                .iter()
-                .any(|&s| game.cards[s].ability_def().blocks_reveal)
+            if !game.lanes[lane].ability_flags.on_reveal
+                || sources.iter().any(|&s| {
+                    game.cards[s].ongoing_guard_abilities().any(|a| {
+                        a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing)
+                            && a.def.blocks_reveal
+                    })
+                })
             {
                 continue;
             }
@@ -1460,13 +1692,25 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 1
             };
             for &source in &sources {
-                if let Some(repetitions) = game.cards[source].ability_def().reveal_repetitions {
+                for repetitions in game.cards[source]
+                    .ongoing_guard_abilities()
+                    .filter(|a| a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing))
+                    .filter_map(|a| a.def.reveal_repetitions)
+                {
                     let extra: usize = sources
                         .iter()
                         .filter(|&&other| {
                             other != source && game.cards[other].owner == game.cards[source].owner
                         })
-                        .map(|&other| game.cards[other].ability_def().extra_ongoing_runs as usize)
+                        .map(|&other| {
+                            game.cards[other]
+                                .ongoing_guard_abilities()
+                                .filter(|a| {
+                                    a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing)
+                                })
+                                .map(|a| a.def.extra_ongoing_runs as usize)
+                                .sum::<usize>()
+                        })
                         .sum();
                     runs += repetitions(&game, source, id) as usize * base * (1 + extra);
                 }
@@ -1502,6 +1746,68 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
     for player in &mut game.players {
         player.draws.sort_by_key(|&(turn, _)| turn);
     }
+    for id in 0..game.cards.len() {
+        if game.cards[id].def.id == "ThanosFracturedFrontier"
+            && (game.cards[id].lane.is_some()
+                || game.players[game.cards[id].owner].hand.contains(&id)
+                || game.players[game.cards[id].owner].deck.contains(&id))
+        {
+            crate::engine_ext::quickdraw::install(&mut game, id);
+        }
+    }
+    // Reconstruct the full ongoing ledger before entering the staging window.
+    game.is_wait_for_staging = false;
+    // MonstroOctopusBehavior::ReduceCost (0x7efec0c) reads the literal
+    // deck top. A live cost observation conditions the hidden order: the
+    // first qualifying entry in an already-uniform shuffle is uniform.
+    let mut monstro = Vec::new();
+    if !cards::reference_rules_enabled() {
+        for (index, card) in position.hand.iter().enumerate() {
+            if card.id == "MonstroOctopus" {
+                let observed = card
+                    .cost
+                    .ok_or("MonstroOctopus current cost not exported")?;
+                let basis = monstro_cost_basis(position, card)?;
+                monstro.push((game.players[0].hand[index], observed, basis));
+            }
+        }
+    }
+    if !cards::reference_rules_enabled() && !monstro.is_empty() {
+        let mut trial_rng = game.fork_rng();
+        let mut trial = game.fork(trial_rng.as_mut());
+        let deck_len = trial.players[0].deck.len();
+        let mut chosen = None;
+        for index in 0..deck_len.max(1) {
+            if deck_len != 0 {
+                trial.swap_deck(0, 0, index);
+            }
+            for &(card, _, basis) in &monstro {
+                trial.cards[card].cost = basis;
+            }
+            trial.ongoing();
+            let matches = monstro
+                .iter()
+                .all(|&(card, observed, _)| trial.card_cost(card) == observed);
+            if deck_len != 0 {
+                trial.swap_deck(0, 0, index);
+            }
+            if matches {
+                chosen = Some(index);
+                break;
+            }
+        }
+        let Some(index) = chosen else {
+            return Err(
+                "MonstroOctopus observed cost is inconsistent with every possible deck top".into(),
+            );
+        };
+        if deck_len != 0 {
+            game.swap_deck(0, 0, index);
+        }
+        for &(card, _, basis) in &monstro {
+            game.cards[card].cost = basis;
+        }
+    }
     game.ongoing();
     // The reader does not label ongoing rows. An observed row is removed only
     // when its named active updater and an identical recomputed contribution
@@ -1512,13 +1818,15 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             .as_ref()
             .is_some_and(|updates| !updates.is_empty())
     }) {
+        // This metadata heuristic has no direct client predicate. Excluding
+        // hidden abilities is provisional; restored cards have no hidden instances.
         let mut active_cards: HashSet<_> = game
             .lanes
             .iter()
             .flat_map(|lane| &lane.cards)
             .filter_map(|&id| {
                 let card = &game.cards[id];
-                (card.revealed && card.has_ongoing()).then_some(card.def.id)
+                (card.revealed && card.has_ongoing(false)).then_some(card.def.id)
             })
             .collect();
         active_cards.extend(
@@ -1528,8 +1836,12 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 .filter_map(|&id| {
                     let card = &game.cards[id];
                     (!card.abilities_removed
-                        && (card.ability_def().in_hand_ongoing.is_some()
-                            || card.ability_def().late_in_hand_ongoing.is_some()))
+                        && card.abilities().any(|a| {
+                            a.supports(crate::engine_ext::abilities::AbilityKind::Ongoing)
+                                && (a.def.in_hand_ongoing.is_some()
+                                    || a.def.late_in_hand_ongoing.is_some()
+                                    || a.def.conditional_in_hand_ongoing.is_some())
+                        }))
                     .then_some(card.def.id)
                 }),
         );
@@ -1597,6 +1909,9 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         game.cards[id].permanent = power - game.cards[id].ongoing - game.cards[id].location_power;
     }
     for (index, r) in position.hand.iter().enumerate() {
+        if !cards::reference_rules_enabled() && r.id == "MonstroOctopus" && r.cost.is_some() {
+            continue;
+        }
         if let Some(observed) = r.cost {
             let id = game.players[0].hand[index];
             let printed = CARD_DATA[&r.id].cost;
@@ -1615,6 +1930,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
             }
         }
     }
+    game.is_wait_for_staging = true;
     game.players[1].energy = opp.energy.unwrap_or_else(|| {
         opp.max_energy
             .or(opp.default_energy)
@@ -1623,7 +1939,7 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
                 .lanes
                 .iter()
                 .enumerate()
-                .filter(|(_, l)| l.revealed)
+                .filter(|(i, _)| game.location_abilities_active(*i))
                 .map(|(i, l)| {
                     (if l.revealed_turn == Some(position.turn) {
                         l.def.reveal_energy
@@ -1645,7 +1961,7 @@ pub fn state_json(game: &Game<'_>) -> Value {
     json!({ "turn": game.turn, "total_turns": game.total_turns, "priority": game.reveal_priority,
         "players": game.players.iter().map(|p| json!({"energy": p.energy, "pending_power": p.next_play_power, "hand": p.hand.iter().map(|&id| card(id)).collect::<Vec<_>>(), "deck": p.deck.iter().map(|&id| game.cards[id].def.id).collect::<Vec<_>>() })).collect::<Vec<_>>(),
         "locations": game.lanes.iter().map(|l| json!({"id": l.observed_id.as_deref().unwrap_or(l.def.id), "revealed": l.revealed, "revealed_turn": l.revealed_turn, "spent": l.state.as_deref().and_then(|s| s.as_any().downcast_ref::<[bool;2]>()), "cards": l.cards.iter().map(|&id| card(id)).collect::<Vec<_>>() })).collect::<Vec<_>>(),
-        "pending_reveals": game.delayed_reveals.iter().map(|p| p.iter().map(|&id| json!([game.cards[id].def.id, game.cards[id].lane])).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        "pending_reveals": game.delayed_reveals.iter().map(|p| p.iter().map(|entry| json!([game.cards[entry.card].def.id, game.cards[entry.card].lane])).collect::<Vec<_>>()).collect::<Vec<_>>(),
         "played": game.played.iter().map(|p| p.iter().map(|&(id, lane)| json!([game.cards[id].def.id, lane])).collect::<Vec<_>>()).collect::<Vec<_>>() })
 }
 
@@ -1665,6 +1981,99 @@ mod observed_history_tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn monstro_samples_only_deck_tops_matching_observed_cost() {
+        let mut position = base();
+        position.locations[0].id = Some("Ruins".into());
+        position.locations[1].id = Some("Xandar".into());
+        position.locations[2].id = Some("KamarTaj".into());
+        position.hand.push(CardRef {
+            id: "MonstroOctopus".into(),
+            cost: Some(2),
+            stat_updates: Some(vec![]),
+            ..Default::default()
+        });
+        position.deck = vec!["Shocker".into(), "Hulk".into(), "Wasp".into()];
+        for seed in 0..20 {
+            let mut rng = PythonRandom::seed(seed);
+            let mut game = build_game(&position, &mut rng).unwrap();
+            assert_eq!(game.cards[game.top_card(0).unwrap()].def.id, "Hulk");
+            assert_eq!(game.card_cost(game.players[0].hand[0]), 2);
+            let card = game.players[0].hand[0];
+            game.stage_action(0, crate::game::Action::Play { card, lane: 0 })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn monstro_inconsistent_observed_cost_fails_closed() {
+        let mut position = base();
+        position.hand.push(CardRef {
+            id: "MonstroOctopus".into(),
+            cost: Some(2),
+            stat_updates: Some(vec![]),
+            ..Default::default()
+        });
+        position.deck = vec!["Shocker".into(), "Wasp".into()];
+        let mut rng = PythonRandom::seed(1);
+        let error = match build_game(&position, &mut rng) {
+            Ok(_) => panic!("no deck top can explain Monstro's observed cost"),
+            Err(error) => error,
+        };
+        assert!(error.contains("MonstroOctopus observed cost"));
+    }
+
+    #[test]
+    fn monstro_projection_preserves_known_cost_basis() {
+        let mut position = base();
+        position.hand.push(CardRef {
+            id: "MonstroOctopus".into(),
+            cost: Some(4),
+            cost_basis: Some(10),
+            ..Default::default()
+        });
+        position.deck = vec!["Hulk".into(), "Shocker".into()];
+        let mut rng = PythonRandom::seed(3);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert_eq!(game.cards[game.top_card(0).unwrap()].def.id, "Hulk");
+        assert_eq!(game.card_cost(game.players[0].hand[0]), 4);
+    }
+
+    #[test]
+    fn monstro_uses_complete_permanent_cost_history() {
+        let mut position = base();
+        position.hand.push(serde_json::from_value(json!({
+            "id":"MonstroOctopus", "cost":1,
+            "stat_updates":[{"stat":"Cost", "update":"Add", "value":-1, "updater_card_id":"Beast"}]
+        })).unwrap());
+        position.deck = vec!["Hulk".into(), "Shocker".into()];
+        let mut rng = PythonRandom::seed(3);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert_eq!(game.cards[game.top_card(0).unwrap()].def.id, "Hulk");
+        assert_eq!(game.card_cost(game.players[0].hand[0]), 1);
+    }
+
+    #[test]
+    fn monstro_missing_history_or_deck_identity_is_named() {
+        let mut position = base();
+        position.hand.push(CardRef {
+            id: "MonstroOctopus".into(),
+            cost: Some(2),
+            ..Default::default()
+        });
+        position.deck = vec!["Hulk".into()];
+        let mut rng = PythonRandom::seed(1);
+        assert!(
+            matches!(build_game(&position, &mut rng), Err(error) if error.contains("stat_updates"))
+        );
+        position.hand[0].stat_updates = Some(vec![]);
+        position.deck_count = Some(2);
+        let mut rng = PythonRandom::seed(1);
+        assert!(
+            matches!(build_game(&position, &mut rng), Err(error) if error.contains("deck card identities incomplete"))
+        );
+    }
+
     #[test]
     fn hidden_location_sampling_excludes_unrestorable_sacred_timeline() {
         let mut position = base();

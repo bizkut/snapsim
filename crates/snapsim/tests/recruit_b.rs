@@ -71,6 +71,15 @@ fn yondu_removes_only_lowest_cost_and_prediction_counts_staged_play() {
         .find(|c| !g.players[1].deck.contains(c))
         .unwrap();
     assert_eq!(g.cards[*removed].cost, lowest);
+    assert_eq!(g.players[1].banished, vec![*removed]);
+    assert_eq!(
+        g.cards[*removed].zone,
+        Some(snapsim::zones::CardZone::Banished(1))
+    );
+    assert_eq!(
+        g.cards[*removed].previous_zone,
+        Some(snapsim::zones::CardZone::Deck(1))
+    );
     let staged = g.create_card("Wasp", 1);
     g.cards[staged].turn_played = g.turn;
     g.played[1].push((staged, 1));

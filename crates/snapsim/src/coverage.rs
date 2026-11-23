@@ -153,7 +153,7 @@ fn installed_effect_possible(position: &Position, id: &str) -> bool {
         let Some(turn) = action.turn_resolved else {
             return true;
         };
-        if matches!(id, "Wave" | "Psylocke") {
+        if matches!(id, "Wave" | "Psylocke" | "Sandman") {
             return turn.saturating_add(1) >= position.turn;
         }
         let seat = if action.owner == "local" { 0 } else { 1 };
@@ -343,6 +343,24 @@ pub fn coverage(position: &Position) -> Value {
         .iter()
         .map(|c| c.id.as_str())
         .chain(position.deck.iter().map(String::as_str))
+        .chain(position.graveyard.iter().flatten().map(|c| c.id.as_str()))
+        .chain(position.banished.iter().flatten().map(|c| c.id.as_str()))
+        .chain(
+            position
+                .opponent
+                .graveyard
+                .iter()
+                .flatten()
+                .map(|c| c.id.as_str()),
+        )
+        .chain(
+            position
+                .opponent
+                .banished
+                .iter()
+                .flatten()
+                .map(|c| c.id.as_str()),
+        )
         .chain(
             position
                 .locations
@@ -365,6 +383,144 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    // CyclopsXMen GetPowerChange 0x7e868b4 reads the player lifetime peak.
+    if !cards::reference_rules_enabled() && card_ids.contains("CyclopsXMen") {
+        extra_state.insert(
+            "Cyclops X-Men Player.HighestEnergyHadByPlayerThisGame not exported".to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled() && resolved_source_possible(position, "JeanGreyXMen") {
+        extra_state
+            .insert("Jean Grey X-Men OneTime TriggerAbility presence not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled() && resolved_source_possible(position, "HawkeyeAvengers") {
+        extra_state.insert("Hawkeye Avengers player RepeatAddBuffAbilityDef contexts SourceCardEntityId, TurnToCheck and TargetLocation not exported".to_owned());
+    }
+    // GetPlayerChampionCard 0x7ca2b30 checks SpecialDeckDef and StartedInDeck;
+    // restored observations do not carry either complete client context.
+    if !cards::reference_rules_enabled()
+        && card_ids.iter().any(|id| {
+            let champion = id.strip_prefix("Skill01").unwrap_or(id);
+            cards::meta_variants_c::skill_for_champion(champion).is_some()
+        })
+    {
+        extra_state.insert(
+            "Champion SpecialDeckDef and Card.StartedInDeck provenance not restored".to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled()
+        && position.turn.is_multiple_of(2)
+        && (position.hand.iter().any(|card| card.id == "AgathaHarkness")
+            || position
+                .locations
+                .iter()
+                .flat_map(|lane| &lane.mine)
+                .any(|card| !card.revealed && card.id == "AgathaHarkness"))
+    {
+        extra_state.insert("Agatha PostCreateStagingOptions trigger completion and staged-action undo state not exported".to_owned());
+    }
+    // LoadShotsForThanos 0x7cd751c retains both used/loaded bitsets and
+    // card-def-keyed token entity IDs on the player-owned trigger.
+    if !cards::reference_rules_enabled()
+        && card_ids.contains("ThanosFracturedFrontier")
+        && (position.turn > 1
+            || position.locations.iter().any(|lane| {
+                lane.mine
+                    .iter()
+                    .chain(&lane.theirs)
+                    .any(|card| card.revealed)
+            })
+            || position
+                .history
+                .as_ref()
+                .and_then(|history| history.actions.as_ref())
+                .is_some_and(|actions| actions.iter().any(|action| action.resolved))
+            || position.graveyard.iter().flatten().next().is_some()
+            || position
+                .opponent
+                .graveyard
+                .iter()
+                .flatten()
+                .next()
+                .is_some())
+    {
+        extra_state.insert(
+            "Thanos Fractured Frontier ShotsUsed, ShotsLoaded and shot entity IDs not exported"
+                .to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled() && resolved_source_possible(position, "Firehair") {
+        // Firehair 0x7ea980c may have copied any destroyed ally's resolve;
+        // the source trigger and its hidden side effects are not exported.
+        extra_state
+            .insert("Firehair prior destroyed-card resolve identities not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled() && resolved_source_possible(position, "RamaTut") {
+        extra_state
+            .insert("Rama-Tut prior randomly activated resolve identities not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && (card_ids.contains("Kang") || card_ids.contains("Hulkling"))
+    {
+        extra_state.insert(
+            "Kang/Hulkling OverrideAbilityCardDefId and copied ability instance state not exported"
+                .to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled()
+        && card_ids.contains("HighEvolutionary")
+        && [
+            "Abomination",
+            "Cyclops",
+            "Hulk",
+            "MistyKnight",
+            "Shocker",
+            "TheThing",
+            "Wasp",
+        ]
+        .iter()
+        .any(|id| card_ids.contains(id))
+    {
+        extra_state
+            .insert("High Evolutionary copied evolved ability identity not exported".to_owned());
+    }
+    // Pixie can enter through an implemented random-character creator.
+    if !cards::reference_rules_enabled() {
+        let possible = card_ids.contains("Pixie")
+            || card_ids
+                .iter()
+                .any(|id| cards::meta_nd::RANDOM_CHARACTER_CREATORS.contains(id))
+            || position
+                .locations
+                .iter()
+                .filter_map(|lane| lane.id.as_deref())
+                .any(|id| cards::meta_nd::RANDOM_CHARACTER_CREATORS.contains(&id));
+        let deck_count = position.deck_count.unwrap_or(position.deck.len());
+        let unknown_deck = deck_count > position.deck.len()
+            || position.deck_created.as_ref().is_none_or(|origins| {
+                origins.len() < position.deck.len() || origins.iter().any(Option::is_none)
+            });
+        let unknown_returnable = position
+            .hand
+            .iter()
+            .chain(position.locations.iter().flat_map(|lane| &lane.mine))
+            .any(|card| card.created.is_none());
+        if possible && ((deck_count > 0 && unknown_deck) || unknown_returnable) {
+            extra_state.insert("original-deck provenance unknown (Pixie possible)".to_owned());
+        }
+        if resolved_source_possible(position, "Pixie") {
+            extra_state.insert("Pixie shuffled hidden deck costs not exported".to_owned());
+        }
+    }
+    if !cards::reference_rules_enabled()
+        && (card_ids.contains("ShangChiMasterOfTheRings")
+            || card_ids.contains("TenRings")
+            || card_ids.contains("TenRingsUpgrade"))
+    {
+        // The token can be hidden in the deck and a previously resolved Shang-Chi
+        // may already have upgraded it. Neither hidden identity nor that morph is exported.
+        extra_state.insert("Ten Rings hidden identity and upgrade state not exported".to_owned());
+    }
     // MoiraXBehavior::CopyStartingHand 0x7efd5ac needs the original hand,
     // which restored positions do not carry.
     if !cards::reference_rules_enabled() && card_ids.contains("MoiraX") {
@@ -383,6 +539,17 @@ pub fn coverage(position: &Position) -> Value {
     {
         extra_state.insert("Copycat copied ability identity not exported".to_owned());
     }
+    // Nightmare can replace text on any card in hand; the copied text may
+    // persist even after Nightmare itself leaves the board.
+    if !cards::reference_rules_enabled() && resolved_source_possible(position, "Nightmare") {
+        extra_state.insert("Nightmare copied hand ability identities not exported".to_owned());
+    }
+    // The generated Ongoing ability IDs live in the ability context and
+    // are not exported in restored observations.
+    if !cards::reference_rules_enabled() && resolved_source_possible(position, "RedOnslaught") {
+        extra_state
+            .insert("Red Onslaught generated ongoing ability identities not exported".to_owned());
+    }
     // Previously resolved text-copy effects persist as per-card overrides,
     // but restored observations do not identify those copied abilities.
     let copies_text = |id: &str| {
@@ -390,11 +557,13 @@ pub fn coverage(position: &Position) -> Value {
             id,
             "AbsorbingMan"
                 | "Mystique"
+                | "MystiqueBrotherhoodOfMutants"
                 | "Prodigy"
                 | "Rogue"
                 | "RogueScionOfDivision"
                 | "SuperAdaptoid"
                 | "SilverSurferFirstSteps"
+                | "Chameleon"
         )
     };
     if !cards::reference_rules_enabled()
@@ -573,9 +742,16 @@ pub fn coverage(position: &Position) -> Value {
     {
         extra_state.insert("The Grand Design created-card play history not exported".to_owned());
     }
+    // GetPowerBuffAmount 0x7d0ffe4 counts all prior created non-Sentinel plays.
     if !cards::reference_rules_enabled()
         && position.turn > 1
-        && ["GhostRider", "Firelord", "FenrisWolf"]
+        && (card_ids.contains("Skill01SentinelChampion") || card_ids.contains("SentinelChampion"))
+    {
+        extra_state.insert("Sentinel Champion created-card play history not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.turn > 1
+        && ["GhostRider", "Firelord", "FenrisWolf", "ThePhoenixForce"]
             .iter()
             .any(|id| card_ids.contains(id))
     {
@@ -614,9 +790,34 @@ pub fn coverage(position: &Position) -> Value {
                 extra_state.insert(format!("{id} prior permanent energy update not exported"));
             }
         }
+        for id in [
+            "Skill01DrDoomChampion",
+            "Skill01InvisibleWomanChampion",
+            "Skill01HerbieChampion",
+        ] {
+            if position.turn > 1 && resolved_source_possible(position, id) {
+                extra_state.insert(format!(
+                    "{id} pending player cost or energy effect not exported"
+                ));
+            }
+        }
+        if resolved_source_possible(position, "Skill01GhostRiderChampion") {
+            extra_state.insert("Champion Ghost Rider skill movement grant not exported".to_owned());
+        }
+        if position.turn <= 3 && card_ids.contains("Arishem") {
+            extra_state.insert(
+                "Arishem pending turn-three energy trigger and starting random deck not restored"
+                    .to_owned(),
+            );
+        }
         if position.turn > 1 && card_ids.contains("HydraStomper") {
             extra_state
                 .insert("Hydra Stomper player movement count history not exported".to_owned());
+        }
+        if position.turn > 1 && card_ids.contains("SpiderMan2099WebSlingers") {
+            extra_state.insert(
+                "Spider-Man 2099 Web-Slingers PlayerMoveStats.NumberOfPlayerCardsMovedThisGame not exported".to_owned(),
+            );
         }
         if position.turn > 1 && card_ids.contains("Stryfe") {
             extra_state.insert("Stryfe play-time On Reveal history not exported".to_owned());
@@ -646,9 +847,29 @@ pub fn coverage(position: &Position) -> Value {
         if resolved_source_possible(position, "Redwing") {
             extra_state.insert("Redwing consumed movement trigger not exported".to_owned());
         }
-        if resolved_source_possible(position, "Sparky") {
+        if card_ids.contains("Sparky") || resolved_source_possible(position, "Sparky") {
             extra_state
                 .insert("Sparky last moved entity and previous zone not exported".to_owned());
+        }
+        if position.turn > 1 && card_ids.contains("VampireDeaconFrost") {
+            extra_state.insert("Vampire Deacon Frost Player.StealsPerCardEntityId prior recipient identities not exported".to_owned());
+        }
+        if position
+            .hand
+            .iter()
+            .any(|card| card.id == "PunisherWarMachine")
+            || position
+                .locations
+                .iter()
+                .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+                .any(|card| card.id == "PunisherWarMachine")
+            || position
+                .opponent
+                .known
+                .iter()
+                .any(|id| id == "PunisherWarMachine")
+        {
+            extra_state.insert("Punisher War Machine draw-time LocationEntityId and SourceCardEntityId ability contexts not exported".to_owned());
         }
         if card_ids.contains("ArchangelHorseman") && position.turn > 1 {
             extra_state.insert("Archangel Horseman objective state not restored".to_owned());
@@ -694,6 +915,43 @@ pub fn coverage(position: &Position) -> Value {
         }
         if resolved_source_possible(position, "BlackSwan") && position.turn > 1 {
             extra_state.insert("Black Swan player-owned hand cost effect not exported".to_owned());
+        }
+        if position.turn > 1
+            && resolved_source_possible(position, "BaronMordo")
+            && resolved_source_possible(position, "BlackSwan")
+        {
+            extra_state.insert("player cost-effect attachment order not exported".to_owned());
+        }
+        if position.turn > 1
+            && !position.hand.is_empty()
+            && resolved_source_possible(position, "Beast")
+            && resolved_source_possible(position, "ScarletWitchQueenOfChaos")
+        {
+            extra_state.insert("card cost-effect attachment order not exported".to_owned());
+        }
+        let active_staging_stat = position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .filter(|card| card.revealed)
+            .chain(position.hand.iter())
+            .any(|card| {
+                cards::get(&card.id).is_some_and(|def| {
+                    (def.ongoing.is_some()
+                        || def.late_ongoing.is_some()
+                        || def.in_hand_ongoing.is_some()
+                        || def.late_in_hand_ongoing.is_some()
+                        || def.conditional_in_hand_ongoing.is_some())
+                        && cards::ongoing_priorities::ONGOING_PRIORITIES
+                            .iter()
+                            .any(|row| row.0 == def.id && row.2 == "Ongoing" && row.4)
+                })
+            });
+        if active_staging_stat {
+            extra_state.insert(
+                "stat_updates.updater_card_id lacks ability-instance and ongoing attribution"
+                    .to_owned(),
+            );
         }
         if position.turn > 1 && resolved_source_possible(position, "Malekith") {
             extra_state.insert(
@@ -795,6 +1053,14 @@ pub fn coverage(position: &Position) -> Value {
             }
         }
     }
+    if !cards::reference_rules_enabled()
+        && position
+            .locations
+            .iter()
+            .any(|lane| lane.id.as_deref() == Some("SanctumInfinitum"))
+    {
+        extra_state.insert("Sanctum Infinitum Player1TargetCardKey/Player2TargetCardKey and discarded/destroyed classification not exported".to_owned());
+    }
     if !cards::reference_rules_enabled() && position.turn > 1 && location_change_evidence(position)
     {
         extra_state.insert(
@@ -804,8 +1070,15 @@ pub fn coverage(position: &Position) -> Value {
     if !cards::reference_rules_enabled() && position.turn > 1 {
         let previous = position.previous_turn_locations.as_ref();
         let grant_location = |id: &str| matches!(id, "Feast" | "AltarOfDeath");
-        let previously_present = previous
-            .is_some_and(|history| history.ids.iter().flatten().any(|id| grant_location(id)));
+        // Game::DestroyLocation (0x7daeaf4) removes the location and its
+        // pending effects; only surviving lanes can retain these grants.
+        let previously_present = previous.is_some_and(|history| {
+            history
+                .ids
+                .iter()
+                .zip(&position.locations)
+                .any(|(ids, lane)| !lane.destroyed && ids.iter().any(|id| grant_location(id)))
+        });
         let visible = position
             .locations
             .iter()
@@ -823,7 +1096,10 @@ pub fn coverage(position: &Position) -> Value {
     // Morbius 0x7f01d3c, Colonel America 0x7e82934,
     // Archangel Horseman 0x7e697a0, Death 0x7e89764,
     // and Fantomex::AfflictFrontRowCards 0x7ea7ee4.
-    if !cards::reference_rules_enabled() && position.turn > 1 {
+    if !cards::reference_rules_enabled()
+        && (position.turn > 1
+            || (0..2).any(|seat| position.current_action_present(seat) != Some(false)))
+    {
         let relevant = |id: &str| {
             card_ids.contains(id)
                 || position.locations.iter().any(|lane| {
@@ -833,17 +1109,287 @@ pub fn coverage(position: &Position) -> Value {
                         .any(|card| card.id == id)
                 })
         };
-        if ["Morbius", "ColonelAmerica", "WildChild", "Fantomex"]
-            .iter()
-            .any(|id| relevant(id))
+        if relevant("Skill01GhostSpiderChampion") {
+            extra_state
+                .insert("Champion skill complete movement event history not exported".to_owned());
+        }
+        if [
+            "Morbius",
+            "ColonelAmerica",
+            "WildChild",
+            "Fantomex",
+            "Stature",
+            "Hela",
+        ]
+        .iter()
+        .any(|id| relevant(id))
         {
             extra_state.insert("complete discard event history not exported".to_owned());
         }
-        if ["ArchangelHorseman", "Death", "WildChild", "Fantomex"]
-            .iter()
-            .any(|id| relevant(id))
+        if [
+            "ArchangelHorseman",
+            "Death",
+            "WildChild",
+            "Fantomex",
+            "Knull",
+            "Muse",
+            "Elixir",
+            "DeathFracturedFrontier",
+        ]
+        .iter()
+        .any(|id| relevant(id))
         {
             extra_state.insert("complete destruction event history not exported".to_owned());
+        }
+        if [
+            "Wiccan",
+            "Speed",
+            "StarlordMasterOfTheSun",
+            "SheHulk",
+            "StormHorseman",
+        ]
+        .iter()
+        .any(|id| relevant(id))
+        {
+            extra_state.insert("per-turn energy expenditure history not exported".to_owned());
+        }
+        if position.turn > 1 && relevant("Triton") {
+            extra_state
+                .insert("Triton previous-turn staged character order not restored".to_owned());
+        }
+    }
+    // CyclopsXMenBehavior::BuffSelf 0x7e8679c reads the lifetime peak
+    // from PlayerEnergyComponent, which schema v2 does not export.
+    if !cards::reference_rules_enabled() && card_ids.contains("CyclopsXMen") {
+        extra_state.insert("Cyclops X-Men lifetime peak energy not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && card_ids.contains("Ajax")
+        && position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.revealed && !card.has_complete_power_modifier_history())
+    {
+        extra_state.insert("Ajax target power modifier history incomplete".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && position.locations.iter().any(|lane| {
+            lane.id.as_deref() == Some("Hospice")
+                && !lane.destroyed
+                && (lane.theirs_face_down > 0
+                    || lane.mine.iter().chain(&lane.theirs).any(|card| {
+                        !card.has_complete_power_modifier_history()
+                            || (card.effective_base_power.is_none()
+                                && card.verified_base_power().is_none())
+                    }))
+        })
+    {
+        extra_state.insert(
+            "Hospice power_modifiers, stat_updates or effective_base_power incomplete".to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled()
+        && (position
+            .deck
+            .iter()
+            .any(|id| matches!(id.as_str(), "ScarletSpider" | "ScarletSpiderWebSlingers"))
+            || position
+                .opponent
+                .known
+                .iter()
+                .chain(&position.opponent.seen)
+                .chain(position.opponent.deck_list.iter().flatten())
+                .chain(position.opponent.pool.iter().flatten())
+                .any(|id| matches!(id.as_str(), "ScarletSpider" | "ScarletSpiderWebSlingers"))
+            || position
+                .hand
+                .iter()
+                .chain(
+                    position
+                        .locations
+                        .iter()
+                        .flat_map(|lane| lane.mine.iter().chain(&lane.theirs)),
+                )
+                .any(|card| {
+                    matches!(
+                        card.id.as_str(),
+                        "ScarletSpider" | "ScarletSpiderWebSlingers"
+                    ) && (card.effective_base_power.is_none()
+                        || !card
+                            .power_modifiers
+                            .as_ref()
+                            .is_some_and(|mods| mods.complete))
+                }))
+    {
+        extra_state.insert(
+            "Scarlet Spider modifier history or effective base power unavailable".to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled() {
+        if position.turn > 1
+            && position
+                .locations
+                .iter()
+                .any(|lane| lane.id.as_deref() == Some("BrooklynBridge"))
+            && (0..2).any(|seat| position.complete_past_actions(seat).is_none())
+        {
+            extra_state.insert(
+                "Brooklyn Bridge previous-turn staged lane history not restored".to_owned(),
+            );
+        }
+        if resolved_source_possible(position, "ThePhoenixForce")
+            || resolved_source_possible(position, "SPdr")
+        {
+            extra_state
+                .insert("Phoenix Force or SP//dr attached movable ability not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "PeniParker") {
+            extra_state.insert("Peni Parker pending merge energy not exported".to_owned());
+        }
+        if card_ids.contains("SinisterSix") || resolved_source_possible(position, "SinisterSix") {
+            extra_state
+                .insert("Sinister Six marked and played entity context not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "Rescue") {
+            extra_state.insert("Rescue pending proximity watch not exported".to_owned());
+        }
+        if position.turn > 1 && resolved_source_possible(position, "Supergiant") {
+            extra_state
+                .insert("Supergiant pending player concealment turns not exported".to_owned());
+        }
+        if position.turn > 1
+            && (card_ids.contains("SnowguardHawk")
+                || resolved_source_possible(position, "Snowguard"))
+        {
+            extra_state
+                .insert("Snowguard Hawk pending location-silence lifetime not exported".to_owned());
+        }
+        if resolved_source_possible(position, "Legion")
+            && position
+                .locations
+                .iter()
+                .any(|lane| lane.id.is_none() && !lane.destroyed)
+        {
+            extra_state.insert(
+                "Legion copied hidden-location identity and countdown not exported".to_owned(),
+            );
+        }
+        let invisible_woman = position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.revealed && card.id == "InvisibleWoman");
+        let face_down = position.locations.iter().any(|lane| {
+            lane.theirs_face_down > 0
+                || lane
+                    .mine
+                    .iter()
+                    .chain(&lane.theirs)
+                    .any(|card| !card.revealed)
+        });
+        if invisible_woman && face_down {
+            extra_state
+                .insert("Invisible Woman concealed-card staging order not exported".to_owned());
+        }
+        if position.turn > 1 && card_ids.contains("InvisibleWomanFirstSteps") {
+            extra_state.insert(
+                "Invisible Woman First Steps activation multiplier not exported".to_owned(),
+            );
+        }
+        let jean_grey = position
+            .locations
+            .iter()
+            .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+            .any(|card| card.revealed && card.id == "JeanGrey");
+        if jean_grey && (0..2).any(|seat| position.current_action_present(seat) != Some(false)) {
+            extra_state
+                .insert("Jean Grey current-turn staged-play history not restored".to_owned());
+        }
+        for seat in 0..2 {
+            let board = position
+                .locations
+                .iter()
+                .flat_map(|lane| if seat == 0 { &lane.mine } else { &lane.theirs });
+            if board
+                .clone()
+                .any(|card| card.id == "Electro" && card.revealed)
+                && position.current_action_present(seat) != Some(false)
+            {
+                extra_state
+                    .insert("Electro current-turn staged-play history not restored".to_owned());
+            }
+            if board.clone().any(|card| {
+                card.id == "Askanison" && card.played_turn.is_none_or(|turn| turn < position.turn)
+            }) && position.turn > 1
+            {
+                extra_state
+                    .insert("Askanison dynamic cost increment history not exported".to_owned());
+            }
+            if board.clone().any(|card| {
+                card.id == "Herbie"
+                    && card.revealed
+                    && card.played_turn.is_none_or(|turn| turn < position.turn)
+            }) {
+                extra_state.insert(
+                    "Herbie current program and ProgramsUsed ability context not exported"
+                        .to_owned(),
+                );
+            }
+            let possible = if seat == 0 {
+                position.hand.iter().any(|card| {
+                    matches!(
+                        card.id.as_str(),
+                        "Lockheed" | "Doom2099" | "Galacta" | "Chameleon"
+                    )
+                }) || position.deck.iter().any(|id| {
+                    matches!(
+                        id.as_str(),
+                        "Lockheed" | "Doom2099" | "Galacta" | "Chameleon"
+                    )
+                })
+            } else {
+                position
+                    .opponent
+                    .known
+                    .iter()
+                    .chain(&position.opponent.seen)
+                    .chain(position.opponent.deck_list.iter().flatten())
+                    .chain(position.opponent.pool.iter().flatten())
+                    .any(|id| {
+                        matches!(
+                            id.as_str(),
+                            "Lockheed" | "Doom2099" | "Galacta" | "Chameleon"
+                        )
+                    })
+            };
+            if (possible
+                || board.clone().any(|card| {
+                    matches!(
+                        card.id.as_str(),
+                        "Lockheed" | "Doom2099" | "Galacta" | "Chameleon"
+                    )
+                }))
+                && position.current_action_present(seat) != Some(false)
+            {
+                extra_state.insert(format!("seat {seat} current-turn play history for Lockheed/Doom2099/Galacta/Chameleon unknown"));
+            }
+        }
+        if card_ids.contains("Leader")
+            && (0..2).any(|seat| position.current_action_present(seat) != Some(false))
+        {
+            extra_state.insert(
+                "Leader current-turn staged entities and previous zones not restored".to_owned(),
+            );
+        }
+        if card_ids.contains("Chameleon")
+            && position
+                .locations
+                .iter()
+                .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+                .any(|card| card.revealed && card.turn_revealed.is_none())
+        {
+            extra_state.insert("Chameleon candidate reveal turns not exported".to_owned());
         }
     }
     // AgentVenomBehavior::SetPowerOfDeck 0x7e61d30 changes individual
@@ -907,6 +1453,61 @@ pub fn coverage(position: &Position) -> Value {
                 }))
     {
         extra_state.insert("Cassandra Nova deck card power modifications not exported".to_owned());
+    }
+    // VampireAmericaChavezBehavior::StealFromTopOfDeck 0x7ce9048 changes
+    // a hidden deck card's power, which is not carried by restored positions.
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "VampireAmericaChavez")
+    {
+        extra_state
+            .insert("Vampire America Chavez modified deck card power not exported".to_owned());
+    }
+    // SeleneBrotherhoodOfMutantsBehavior::StealPowerFromHand 0x7f34190
+    // modifies an unknown opposing hand card.
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "SeleneBrotherhoodOfMutants")
+    {
+        extra_state
+            .insert("Selene Brotherhood modified opponent hand card power not exported".to_owned());
+    }
+    // AntiVenomWebSlingersBehavior::BuffTopCard 0x7e67728 modifies
+    // deck card power and the affected hidden entity is not restored.
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "AntiVenomWebSlingers")
+    {
+        extra_state
+            .insert("Anti-Venom Web-Slingers modified deck card power not exported".to_owned());
+    }
+    // ValentinaThunderboltsBehavior::CreateCard 0x7ce7f98 adds a
+    // randomly selected faction card with a cost modifier to hand.
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "ValentinaThunderbolts")
+    {
+        extra_state.insert(
+            "Valentina Thunderbolts generated hand card identity and cost not exported".to_owned(),
+        );
+    }
+    // ScarletWitchBrotherhoodOfMutantsBehavior 0x7f30290 can create a
+    // random Brotherhood card with a power modifier in hand.
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "ScarletWitchBrotherhoodOfMutants")
+    {
+        extra_state.insert(
+            "Scarlet Witch Brotherhood generated hand card identity and power not exported"
+                .to_owned(),
+        );
+    }
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "WhiteQueenBrotherhoodOfMutants")
+    {
+        extra_state.insert("White Queen Brotherhood generated card and LocationEntityIdKey/PlayerEntityIdKey cost context not exported".to_owned());
+    }
+    if !cards::reference_rules_enabled()
+        && resolved_source_possible(position, "ToxieDoxieThunderbolts")
+    {
+        extra_state.insert(
+            "Toxie Doxie Thunderbolts CardTarget next-turn player ability not exported".to_owned(),
+        );
     }
     // PhastosBehavior::ReduceCostOrAddPower 0x7f14da0 randomly modifies
     // individual deck cards; restored deck IDs do not include the results.
@@ -1029,13 +1630,37 @@ pub fn coverage(position: &Position) -> Value {
     {
         extra_state.insert("Monstro Octopus deck top identity and cost not exported".to_owned());
     }
+    if !cards::reference_rules_enabled() {
+        for card in position
+            .hand
+            .iter()
+            .filter(|card| card.id == "MonstroOctopus")
+        {
+            if card.cost.is_none() {
+                extra_state.insert("MonstroOctopus current cost not exported".to_owned());
+            }
+            if position
+                .deck_count
+                .is_some_and(|count| count > position.deck.len())
+            {
+                extra_state.insert("MonstroOctopus own deck card identities incomplete".to_owned());
+            }
+            if let Err(reason) = crate::position::monstro_cost_basis(position, card) {
+                extra_state.insert(reason);
+            }
+        }
+    }
     // LastCardPlayed-dependent copy effects need the original card entity
     // and its current text/power, not just the action's historical ID:
     // AbsorbingMan 0x7e5ee44, Mystique 0x7f085a0, Frigga 0x7ead294,
     // Taskmaster 0x7cd352c. A left-zone entity cannot be reconstructed.
     if !cards::reference_rules_enabled() && position.turn > 1 {
-        let needs_last_play =
-            |id: &str| matches!(id, "AbsorbingMan" | "Mystique" | "Frigga" | "Taskmaster");
+        let needs_last_play = |id: &str| {
+            matches!(
+                id,
+                "AbsorbingMan" | "Mystique" | "Frigga" | "Taskmaster" | "ManSpider"
+            )
+        };
         for (seat, relevant) in [
             (
                 0,
@@ -1066,14 +1691,23 @@ pub fn coverage(position: &Position) -> Value {
             }
         }
     }
-    // GhostSpiderBehavior::MoveCard 0x7eb473c uses the player's last play,
-    // including one whose card has since left the board.
+    // GhostSpiderBehavior::MoveCard 0x7eb473c and ToadBehavior::MoveCard
+    // 0x7cdf2e8 use the player's last play, including one whose card left play.
     if !cards::reference_rules_enabled() && position.turn > 1 {
         for (seat, relevant) in [
             (
                 0,
-                position.hand.iter().any(|card| card.id == "GhostSpider")
-                    || position.deck.iter().any(|id| id == "GhostSpider"),
+                position.hand.iter().any(|card| {
+                    matches!(
+                        card.id.as_str(),
+                        "GhostSpider" | "GhostSpiderWebSlingers" | "Toad"
+                    )
+                }) || position.deck.iter().any(|id| {
+                    matches!(
+                        id.as_str(),
+                        "GhostSpider" | "GhostSpiderWebSlingers" | "Toad"
+                    )
+                }),
             ),
             (
                 1,
@@ -1084,7 +1718,12 @@ pub fn coverage(position: &Position) -> Value {
                     .chain(&position.opponent.seen)
                     .chain(position.opponent.deck_list.iter().flatten())
                     .chain(position.opponent.pool.iter().flatten())
-                    .any(|id| id == "GhostSpider"),
+                    .any(|id| {
+                        matches!(
+                            id.as_str(),
+                            "GhostSpider" | "GhostSpiderWebSlingers" | "Toad"
+                        )
+                    }),
             ),
         ] {
             if relevant
@@ -1092,7 +1731,7 @@ pub fn coverage(position: &Position) -> Value {
                     || position.current_action_present(seat) != Some(false))
             {
                 extra_state.insert(format!(
-                    "Ghost Spider seat {seat} last played card history unknown"
+                    "Ghost Spider or Toad seat {seat} last played card history unknown"
                 ));
             }
         }
@@ -1274,7 +1913,9 @@ pub fn coverage(position: &Position) -> Value {
             .iter()
             .any(|lane| lane.theirs.iter().any(|card| stone(&card.id)));
     if !cards::reference_rules_enabled()
-        && ((own_stone && position.deck_count != Some(position.deck.len())) || opposing_stone)
+        && (card_ids.contains("Thanos")
+            || (own_stone && position.deck_count != Some(position.deck.len()))
+            || opposing_stone)
     {
         extra_state
             .insert("Infinity Stone owner's post-shuffle deck composition unknown".to_owned());
@@ -1386,6 +2027,40 @@ pub fn coverage(position: &Position) -> Value {
         }
     }
     if !cards::reference_rules_enabled() {
+        for seat in 0..2 {
+            let strange = position.locations.iter().any(|lane| {
+                let cards = if seat == 0 { &lane.mine } else { &lane.theirs };
+                cards
+                    .iter()
+                    .any(|card| card.id == "StrangeSupreme" && card.revealed)
+            }) || if seat == 0 {
+                position.hand.iter().any(|card| card.id == "StrangeSupreme")
+                    || position.deck.iter().any(|id| id == "StrangeSupreme")
+            } else {
+                position
+                    .opponent
+                    .known
+                    .iter()
+                    .chain(&position.opponent.seen)
+                    .chain(position.opponent.deck_list.iter().flatten())
+                    .chain(position.opponent.pool.iter().flatten())
+                    .any(|id| id == "StrangeSupreme")
+            };
+            if strange
+                && position.locations.iter().any(|lane| {
+                    let cards = if seat == 0 { &lane.mine } else { &lane.theirs };
+                    cards
+                        .iter()
+                        .any(|card| card.revealed && card.created.is_none())
+                })
+            {
+                extra_state.insert(format!(
+                    "seat {seat} Strange Supreme created-card provenance unknown"
+                ));
+            }
+        }
+    }
+    if !cards::reference_rules_enabled() {
         let own = position.hand.iter().any(|card| card.id == "Diamondback")
             || position.deck.iter().any(|id| id == "Diamondback");
         let opponent = position
@@ -1441,6 +2116,14 @@ pub fn coverage(position: &Position) -> Value {
                 extra_state.insert(format!("{id} effect may be active"));
             }
         }
+    }
+    if !cards::reference_rules_enabled() && installed_effect_possible(position, "Sandman") {
+        // SandmanBehavior::AddCardCostIncreaseAbilityToPlayer 0x7f2dc44:
+        // the next-turn player ability survives removal of the source card.
+        extra_state.insert(
+            "Sandman player cost_effects source or history.actions.turn_resolved not restored"
+                .to_owned(),
+        );
     }
     if !cards::reference_rules_enabled() && position.turn > 1 {
         let own_infinaut = position.hand.iter().any(|card| card.id == "Infinaut")
@@ -1670,7 +2353,7 @@ pub fn coverage(position: &Position) -> Value {
         if let Some(id) = &lane.id {
             loc_ids.insert(id.as_str());
             if id == "Ego" && !cards::reference_rules_enabled() {
-                extra_state.insert("Ego autonomous staging not modeled".to_owned());
+                extra_state.insert("Ego PostCreateStagingOptions trigger completion and staged-action undo state not exported".to_owned());
             }
             if id == "MountVesuvius" && !cards::reference_rules_enabled() && position.turn >= 5 {
                 extra_state.insert("Mount Vesuvius retreat prohibition not modeled".to_owned());
@@ -1859,6 +2542,23 @@ mod location_change_tests {
     }
 
     #[test]
+    fn thanos_quickdraw_requires_prior_shot_context() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.hand.push(crate::position::CardRef {
+            id: "ThanosFracturedFrontier".into(),
+            ..Default::default()
+        });
+        let reason =
+            "Thanos Fractured Frontier ShotsUsed, ShotsLoaded and shot entity IDs not exported";
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.turn = 2;
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
     fn spider_man_2099_requires_move_consumption() {
         let mut position = Position {
             turn: 3,
@@ -1910,6 +2610,23 @@ mod location_change_tests {
     }
 
     #[test]
+    fn sentinel_champion_requires_created_play_history() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        position.hand.push(crate::position::CardRef {
+            id: "Skill01SentinelChampion".into(),
+            ..Default::default()
+        });
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Sentinel Champion created-card play history not exported")
+        );
+    }
+
+    #[test]
     fn spider_punk_requires_move_consumption() {
         let mut position = Position {
             turn: 3,
@@ -1943,6 +2660,23 @@ mod location_change_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn toad_requires_last_play_history() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        position.hand.push(crate::position::CardRef {
+            id: "Toad".into(),
+            ..Default::default()
+        });
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Ghost Spider or Toad seat 0 last played card history unknown")
+        );
     }
 
     #[test]
@@ -2087,6 +2821,25 @@ mod location_change_tests {
     }
 
     #[test]
+    fn sanctum_infinitum_unrestored_targets_are_gated() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        assert!(
+            !coverage(&position)["state"]
+                .to_string()
+                .contains("Sanctum Infinitum")
+        );
+        position.locations[0].id = Some("SanctumInfinitum".into());
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Player1TargetCardKey/Player2TargetCardKey")
+        );
+    }
+
+    #[test]
     fn prior_energy_updates_and_owner_restriction_fail_closed() {
         let mut position = Position {
             turn: 4,
@@ -2205,5 +2958,462 @@ mod location_change_tests {
                 .iter()
                 .any(|value| value == "card text overrides not exported")
         );
+    }
+    #[test]
+    fn turn_one_unobserved_actions_gate_historical_ledgers() {
+        for (id, reason) in [
+            ("Knull", "complete destruction event history not exported"),
+            ("Muse", "complete destruction event history not exported"),
+            ("Death", "complete destruction event history not exported"),
+            ("Morbius", "complete discard event history not exported"),
+            ("Stature", "complete discard event history not exported"),
+            ("Wiccan", "per-turn energy expenditure history not exported"),
+        ] {
+            let mut position = Position {
+                turn: 1,
+                ..Position::default()
+            };
+            position.hand.push(position::CardRef {
+                id: id.into(),
+                ..Default::default()
+            });
+            assert!(
+                coverage(&position)["state"].to_string().contains(reason),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn sinister_six_requires_unexported_player_context() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "SinisterSix".into(),
+            ..Default::default()
+        });
+        let reason = "Sinister Six marked and played entity context not exported";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.hand.clear();
+        position.turn = 3;
+        position.opponent.seen.push("SinisterSix".into());
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn askanison_prior_board_time_requires_dynamic_state() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        position.locations[0].mine.push(position::CardRef {
+            id: "Askanison".into(),
+            revealed: true,
+            played_turn: Some(2),
+            ..Default::default()
+        });
+        let reason = "Askanison dynamic cost increment history not exported";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].mine[0].played_turn = Some(3);
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn herbie_prior_board_time_requires_program_context() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        position.locations[0].mine.push(position::CardRef {
+            id: "Herbie".into(),
+            revealed: true,
+            played_turn: Some(2),
+            ..Default::default()
+        });
+        let reason = "Herbie current program and ProgramsUsed ability context not exported";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].mine[0].played_turn = Some(3);
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn electro_requires_current_turn_history_for_either_seat() {
+        for seat in 0..2 {
+            let mut position = Position {
+                turn: 2,
+                ..Position::default()
+            };
+            let electro = position::CardRef {
+                id: "Electro".into(),
+                revealed: true,
+                ..Default::default()
+            };
+            if seat == 0 {
+                position.locations[0].mine.push(electro);
+            } else {
+                position.locations[0].theirs.push(electro);
+            }
+            let reason = "Electro current-turn staged-play history not restored";
+            assert!(coverage(&position)["state"].to_string().contains(reason));
+            position.history = Some(
+                serde_json::from_value(serde_json::json!({
+                    "actions": [], "action_completeness": {
+                        "local": {"2": true}, "opponent": {"2": true}
+                    }, "own_draws": null
+                }))
+                .unwrap(),
+            );
+            assert!(!coverage(&position)["state"].to_string().contains(reason));
+        }
+    }
+    #[test]
+    fn pixie_requires_known_deck_and_returnable_card_origins() {
+        let reason = "original-deck provenance unknown (Pixie possible)";
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.deck.push("Agent13".into());
+        position.deck_created = Some(vec![Some(false)]);
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.deck_created = None;
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.deck[0] = "Wasp".into();
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.deck[0] = "Pixie".into();
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.deck_created = Some(vec![Some(false)]);
+        position.hand.push(position::CardRef {
+            id: "Wasp".into(),
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn rescue_seen_after_turn_one_requires_pending_watch() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.opponent.seen.push("Rescue".into());
+        let reason = "Rescue pending proximity watch not exported";
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.turn = 2;
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+    #[test]
+    fn ajax_requires_complete_target_power_history() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "Ajax".into(),
+            ..Default::default()
+        });
+        position.locations[0].theirs.push(position::CardRef {
+            id: "Cyclops".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        let reason = "Ajax target power modifier history incomplete";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].theirs[0].power_modifiers = Some(position::PowerModifiers {
+            complete: true,
+            items: Vec::new(),
+        });
+        position.locations[0].theirs[0].stat_updates = Some(Vec::new());
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn hospice_requires_complete_power_ledgers_and_base() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        let reason = "Hospice power_modifiers, stat_updates or effective_base_power incomplete";
+        position.locations[0].id = Some("Hospice".into());
+        position.locations[0].mine.push(position::CardRef {
+            id: "Hulk".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        let card = &mut position.locations[0].mine[0];
+        card.power_modifiers = Some(position::PowerModifiers {
+            complete: true,
+            items: Vec::new(),
+        });
+        card.stat_updates = Some(Vec::new());
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].mine[0].effective_base_power = Some(14);
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].theirs_face_down = 1;
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].destroyed = true;
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn sandman_gates_unknown_or_active_player_effect_until_expired() {
+        let mut position = Position {
+            turn: 4,
+            ..Position::default()
+        };
+        let reason =
+            "Sandman player cost_effects source or history.actions.turn_resolved not restored";
+        position.hand.push(position::CardRef {
+            id: "Sandman".into(),
+            ..Default::default()
+        });
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.hand.clear();
+        position.locations[0].mine.push(position::CardRef {
+            id: "Sandman".into(),
+            revealed: true,
+            entity_id: Some(10),
+            latest_resolution_order: Some(1),
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.history = Some(
+            serde_json::from_value(serde_json::json!({
+                "actions": [{"owner":"local", "turn":3, "kind":"play", "location_slot":0,
+                    "card_entity_id":10, "card_id":"Sandman", "resolved":true,
+                    "turn_resolved":3, "resolution_order":1}]
+            }))
+            .unwrap(),
+        );
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.turn = 5;
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].mine[0].latest_resolution_order = Some(2);
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+    #[test]
+    fn scarlet_spider_requires_complete_modifiers_and_base() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "ScarletSpider".into(),
+            ..Default::default()
+        });
+        let reason = "Scarlet Spider modifier history or effective base power unavailable";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.hand[0].effective_base_power = Some(5);
+        position.hand[0].power_modifiers = Some(position::PowerModifiers {
+            complete: true,
+            items: Vec::new(),
+        });
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+    #[test]
+    fn champion_and_skill_require_special_deck_provenance() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        let reason = "Champion SpecialDeckDef and Card.StartedInDeck provenance not restored";
+        position.hand.push(position::CardRef {
+            id: "Skill01HulkChampion".into(),
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.hand.clear();
+        position.deck.push("HulkChampion".into());
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+    #[test]
+    fn arishem_in_starting_hand_or_deck_needs_startup_state() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        let reason =
+            "Arishem pending turn-three energy trigger and starting random deck not restored";
+        position.hand.push(position::CardRef {
+            id: "Arishem".into(),
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.hand.clear();
+        position.deck.push("Arishem".into());
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+    #[test]
+    fn concealment_state_requires_observed_history() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        let supergiant = "Supergiant pending player concealment turns not exported";
+        position.opponent.seen.push("Supergiant".into());
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains(supergiant)
+        );
+        position.opponent.seen.clear();
+        position.locations[0].mine.push(position::CardRef {
+            id: "InvisibleWoman".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        let invisible = "Invisible Woman concealed-card staging order not exported";
+        assert!(!coverage(&position)["state"].to_string().contains(invisible));
+        position.locations[0].theirs_face_down = 1;
+        assert!(coverage(&position)["state"].to_string().contains(invisible));
+    }
+
+    #[test]
+    fn legion_hidden_copy_correlation_is_not_guessed() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.locations[0].mine.push(position::CardRef {
+            id: "Legion".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        let reason = "Legion copied hidden-location identity and countdown not exported";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        for lane in &mut position.locations {
+            lane.id = Some("Ruins".into());
+        }
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn snowguard_hawk_restoration_requires_player_silence_lifetime() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "SnowguardHawk".into(),
+            ..Default::default()
+        });
+        let reason = "Snowguard Hawk pending location-silence lifetime not exported";
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.turn = 2;
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.hand.clear();
+        position.opponent.seen.push("Snowguard".into());
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn jean_requires_both_seats_current_action_completeness() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.locations[0].mine.push(position::CardRef {
+            id: "JeanGrey".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        let reason = "Jean Grey current-turn staged-play history not restored";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.history = serde_json::from_value(serde_json::json!({
+            "actions": [],
+            "action_completeness": {"local":{"2":true},"opponent":{"2":true}}
+        }))
+        .unwrap();
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn first_steps_requires_restored_player_multiplier() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "InvisibleWomanFirstSteps".into(),
+            ..Default::default()
+        });
+        let reason = "Invisible Woman First Steps activation multiplier not exported";
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+        position.turn = 2;
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+    #[test]
+    fn chameleon_requires_visible_candidate_reveal_turn() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "Chameleon".into(),
+            ..Default::default()
+        });
+        position.locations[0].mine.push(position::CardRef {
+            id: "Cyclops".into(),
+            revealed: true,
+            ..Default::default()
+        });
+        let reason = "Chameleon candidate reveal turns not exported";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.locations[0].mine[0].turn_revealed = Some(1);
+        assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn peni_prior_merge_may_leave_pending_energy() {
+        let mut position = Position {
+            turn: 2,
+            ..Position::default()
+        };
+        position.opponent.seen.push("PeniParker".into());
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Peni Parker pending merge energy not exported")
+        );
+    }
+    #[test]
+    fn objective_restore_gates_distinguish_unstarted_state() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.deck.push("VampireDeaconFrost".into());
+        position.deck.push("PunisherWarMachine".into());
+        let vampire = "Vampire Deacon Frost Player.StealsPerCardEntityId";
+        let punisher = "Punisher War Machine draw-time LocationEntityId";
+        assert!(!coverage(&position)["state"].to_string().contains(vampire));
+        assert!(!coverage(&position)["state"].to_string().contains(punisher));
+        position.turn = 2;
+        assert!(coverage(&position)["state"].to_string().contains(vampire));
+        assert!(!coverage(&position)["state"].to_string().contains(punisher));
+        position.hand.push(position::CardRef {
+            id: "PunisherWarMachine".into(),
+            ..Default::default()
+        });
+        assert!(coverage(&position)["state"].to_string().contains(punisher));
+    }
+    #[test]
+    fn cyclops_xmen_requires_unexported_peak_energy() {
+        let mut position = Position {
+            turn: 1,
+            ..Position::default()
+        };
+        position.hand.push(position::CardRef {
+            id: "CyclopsXMen".into(),
+            ..Default::default()
+        });
+        let reason = "Cyclops X-Men lifetime peak energy not exported";
+        assert!(coverage(&position)["state"].to_string().contains(reason));
+        position.hand.clear();
+        position.opponent.pool = Some(vec!["CyclopsXMen".into()]);
+        assert!(coverage(&position)["state"].to_string().contains(reason));
     }
 }

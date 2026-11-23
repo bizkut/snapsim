@@ -108,7 +108,7 @@ fn dragon_of_the_moon(game: &mut Game<'_>, card: usize) {
 
 // MoleManBehavior::BanishAndCreateCards 0x7efe1d8 snapshots DefCost,
 // banishes the top card, then sets each created Rock's base Power.
-fn mole_man(game: &mut Game<'_>, card: usize) {
+pub(crate) fn mole_man(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let Some(top) = game.top_card(owner) else {
         return;
@@ -257,8 +257,7 @@ fn selene_state() -> Box<dyn CardState> {
 
 pub(crate) fn restore_selene(card: &mut Card, progress: usize, completed: bool) {
     if let Some(state) = card
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<SeleneObjective>())
     {
         state.progress = progress;
@@ -287,8 +286,7 @@ fn selene_update(game: &mut Game<'_>, card: usize) {
         .count()
         .min(3);
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<SeleneObjective>()
@@ -300,8 +298,7 @@ fn selene_update(game: &mut Game<'_>, card: usize) {
 
 fn selene_freeze(game: &mut Game<'_>, card: usize) {
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<SeleneObjective>()
@@ -317,8 +314,7 @@ fn selene_complete(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<SeleneObjective>()

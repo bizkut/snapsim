@@ -99,9 +99,9 @@ fn ultron(g: &mut Game, id: usize) {
         }
     }
 }
-fn iron_man(g: &mut Game, id: usize) {
+pub(crate) fn iron_man(g: &mut Game, id: usize) {
     let c = &g.cards[id];
-    g.lanes[c.lane.unwrap()].multiplier[c.owner] *= 2;
+    g.multiply_lane_power(c.lane.unwrap(), c.owner, 2);
 }
 fn kazar(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
@@ -119,18 +119,18 @@ fn klaw(g: &mut Game, id: usize) {
     let c = &g.cards[id];
     let lane = c.lane.unwrap();
     if lane < 2 {
-        g.lanes[lane + 1].bonus[c.owner] += 6;
+        g.add_lane_bonus(lane + 1, c.owner, 6);
     }
 }
-fn fantastic(g: &mut Game, id: usize) {
+pub(crate) fn fantastic(g: &mut Game, id: usize) {
     let c = &g.cards[id];
     let lane = c.lane.unwrap();
     let owner = c.owner;
     if lane > 0 {
-        g.lanes[lane - 1].bonus[owner] += 3;
+        g.add_lane_bonus(lane - 1, owner, 3);
     }
     if lane < 2 {
-        g.lanes[lane + 1].bonus[owner] += 3;
+        g.add_lane_bonus(lane + 1, owner, 3);
     }
 }
 fn blue_marvel(g: &mut Game, id: usize) {

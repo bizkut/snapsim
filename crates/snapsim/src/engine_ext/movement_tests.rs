@@ -18,6 +18,7 @@ fn destination_grant_limits_direct_and_staged_moves() {
         end_turn: 1,
         remaining: 1,
         unlimited: false,
+        condition: None,
         on_move: None,
     });
     game.turn = 1;
@@ -45,6 +46,7 @@ fn unlimited_destination_grant_covers_new_cards_and_follows_location() {
         end_turn: 1,
         remaining: 0,
         unlimited: true,
+        condition: None,
         on_move: None,
     });
     let first = game.create_card("Hulk", 0);

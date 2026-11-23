@@ -5,7 +5,7 @@ fn enchantress(game: &mut Game<'_>, card: usize) {
         return;
     };
     for &other in &game.lanes[lane].cards {
-        if game.cards[other].revealed && game.cards[other].has_ongoing() {
+        if game.cards[other].revealed && game.cards[other].has_ongoing(false) {
             game.cards[other].abilities_removed = true;
         }
     }
@@ -111,7 +111,7 @@ fn hulkbuster(game: &mut Game<'_>, card: usize) {
         game.cards[card].permanent,
         game.cards[card].owner,
     );
-    game.lanes[lane].cards.retain(|&id| id != card);
+    game.detach_location(lane, card);
     game.cards[card].merged_to = Some(allies[choice]);
     game.cards[card].last_lane = Some(lane);
     game.cards[card].lane = None;
@@ -136,8 +136,24 @@ fn morph(game: &mut Game<'_>, card: usize) {
     copy.lane = lane;
     copy.turn_played = turn_played;
     copy.revealed = revealed;
+    // The client mutates the same Card in MorphIntoCopy (0x7cbb5cc).
+    // Active ability invocations retain their old contexts until they return.
+    copy.ability_frames = std::mem::take(&mut game.cards[card].ability_frames);
+    copy.default_ability_generation = game.cards[card].default_ability_generation + 1;
+    for ability in &mut copy.composed_abilities {
+        if let Some((0, generation)) = &mut ability.parent {
+            *generation = copy.default_ability_generation;
+        }
+    }
+    for entry in &mut copy.virtual_ongoing_ids {
+        entry.3 = copy.default_ability_generation;
+    }
     game.cards[card] = copy;
-    game.trigger_on_reveal(card);
+    if crate::cards::reference_rules_enabled() {
+        game.trigger_on_reveal(card);
+    } else {
+        game.trigger_text_reveal(card);
+    }
 }
 
 fn scarlet_witch(game: &mut Game<'_>, card: usize) {

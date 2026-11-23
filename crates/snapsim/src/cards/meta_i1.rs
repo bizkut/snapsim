@@ -180,7 +180,12 @@ fn stick_buff(game: &mut Game<'_>, effect: &mut PendingEffect, target: Option<us
 // cards cost at most four through the end of the next turn.
 fn wave(game: &mut Game<'_>, _card: usize) {
     for player in &mut game.players {
-        player.wave_until = Some(game.turn.saturating_add(1));
+        player.attach_cost_effect(crate::game::PlayerCostEffectKind::Wave {
+            until: game.turn.saturating_add(1),
+        });
+    }
+    if !crate::cards::reference_rules_enabled() {
+        game.ongoing();
     }
 }
 
@@ -234,12 +239,15 @@ mod tests {
         game.players[0].hand.extend([own, cheap]);
         game.players[1].hand.push(opposing);
         wave(&mut game, source);
+        game.ongoing();
         assert_eq!(game.card_cost(own), 4);
         assert_eq!(game.card_cost(opposing), 4);
         assert_eq!(game.card_cost(cheap), 0);
         game.turn += 1;
+        game.ongoing();
         assert_eq!(game.card_cost(own), 4);
         game.turn += 1;
+        game.ongoing();
         assert_eq!(game.card_cost(own), 6);
     }
 

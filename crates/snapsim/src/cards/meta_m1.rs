@@ -211,7 +211,7 @@ fn sauron(game: &mut Game<'_>, card: usize) {
         .deck
         .iter()
         .copied()
-        .filter(|&id| game.cards[id].has_ongoing())
+        .filter(|&id| game.cards[id].has_ongoing(false))
         .collect();
     for target in targets {
         game.remove_text(target);
@@ -228,7 +228,9 @@ fn rogue(game: &mut Game<'_>, card: usize) {
     let mut targets = [0; 4];
     let mut count = 0;
     for &id in &game.lanes[lane].cards {
-        if game.cards[id].owner != owner && game.cards[id].revealed && game.cards[id].has_ongoing()
+        if game.cards[id].owner != owner
+            && game.cards[id].revealed
+            && game.cards[id].has_ongoing(false)
         {
             targets[count] = id;
             count += 1;
@@ -240,7 +242,7 @@ fn rogue(game: &mut Game<'_>, card: usize) {
     let target = targets[game.rng.borrow_mut().randbelow(count)];
     game.copy_text(card, target, false);
     game.remove_text(target);
-    game.trigger_on_reveal(card);
+    game.trigger_text_reveal(card);
 }
 
 // StealText 0x7ccb790 rolls one revealed enemy Activate card here,
@@ -256,7 +258,10 @@ fn super_adaptoid(game: &mut Game<'_>, card: usize) {
         if game.cards[id].owner != owner
             && game.cards[id].revealed
             && !game.cards[id].abilities_removed
-            && game.cards[id].ability_def().on_activate.is_some()
+            && game.cards[id].abilities().any(|a| {
+                a.supports(crate::engine_ext::abilities::AbilityKind::Activate)
+                    && a.def.on_activate.is_some()
+            })
         {
             targets[count] = id;
             count += 1;
@@ -324,7 +329,7 @@ fn absorbing_man(game: &mut Game<'_>, card: usize) {
 // CopyAbilitiesAndPlayRequirements 0x7f085a0 tests the previous Ongoing.
 fn mystique(game: &mut Game<'_>, card: usize) {
     if let Some(target) = last_play_in_play(game, card)
-        && game.cards[target].has_ongoing()
+        && game.cards[target].has_ongoing(false)
     {
         game.copy_text(card, target, true);
     }
@@ -485,7 +490,7 @@ fn rogue_scion(game: &mut Game<'_>, card: usize) {
     let target = targets[game.rng.borrow_mut().randbelow(count)];
     game.copy_text(card, target, false);
     game.remove_text(target);
-    game.trigger_on_reveal(card);
+    game.trigger_text_reveal(card);
 }
 
 // ThisCardDrawTrigger 0x7e838dc calls ExecuteCopy 0x7e83850, copying
@@ -505,13 +510,13 @@ fn copycat(game: &mut Game<'_>, card: usize, event: Event) {
     }
 }
 
-fn weapon_x_state() -> Box<dyn CardState> {
+pub(crate) fn weapon_x_state() -> Box<dyn CardState> {
     Box::new(0_u32)
 }
 
 // Rage 0x7cefc30 stores per-ability destruction count and damage;
 // each third allied destruction raises the amount for subsequent triggers.
-fn weapon_x(game: &mut Game<'_>, source: usize, event: Event) {
+pub(crate) fn weapon_x(game: &mut Game<'_>, source: usize, event: Event) {
     let Event::CardDestroyed { card, .. } = event else {
         return;
     };
@@ -522,8 +527,7 @@ fn weapon_x(game: &mut Game<'_>, source: usize, event: Event) {
         return;
     }
     let count = game.cards[source]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<u32>()
@@ -603,8 +607,7 @@ fn scream(game: &mut Game<'_>, source: usize, event: Event) {
         return;
     }
     let state = game.cards[source]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<Option<u8>>()
@@ -614,8 +617,7 @@ fn scream(game: &mut Game<'_>, source: usize, event: Event) {
     }
     game.steal_power(card, source, 2, game.cards[source].owner);
     if let Some(state) = game.cards[source]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<Option<u8>>())
     {
         *state = Some(game.turn);
@@ -719,7 +721,10 @@ mod tests {
             game.lanes[0].cards.push(id);
         }
         prodigy(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "IronMan");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "IronMan"
+        );
     }
     #[test]
     fn alioth_removes_only_unrevealed_enemy_text() {
@@ -877,7 +882,10 @@ mod tests {
             game.lanes[0].cards.push(id);
         }
         rogue(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "IronMan");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "IronMan"
+        );
         assert!(game.cards[target].abilities_removed);
     }
     #[test]
@@ -908,7 +916,10 @@ mod tests {
             game.lanes[0].cards.push(id);
         }
         super_adaptoid(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "Arana");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "Arana"
+        );
         assert!(game.cards[target].abilities_removed);
     }
     #[test]
@@ -1000,7 +1011,10 @@ mod tests {
         }
         game.players[0].play_history.push((1, target));
         absorbing_man(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "Medusa");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "Medusa"
+        );
     }
     #[test]
     fn mystique_copies_last_ongoing() {
@@ -1031,7 +1045,10 @@ mod tests {
         }
         game.players[0].play_history.push((1, target));
         mystique(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "IronMan");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "IronMan"
+        );
     }
     #[test]
     fn frigga_copies_last_played_card() {
@@ -1238,7 +1255,10 @@ mod tests {
         let other = game.create_card("Medusa", 1);
         game.players[1].hand = vec![other, target];
         rogue_scion(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "IronMan");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "IronMan"
+        );
         assert!(game.cards[target].abilities_removed);
     }
     #[test]
@@ -1272,7 +1292,10 @@ mod tests {
                 seat: 0,
             },
         );
-        assert_eq!(game.cards[source].ability_def().id, "IronMan");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "IronMan"
+        );
     }
     #[test]
     fn weapon_x_increases_buff_after_every_third_destroy() {
@@ -1364,6 +1387,9 @@ mod tests {
             game.lanes[0].cards.push(id);
         }
         silver_surfer_first_steps(&mut game, source);
-        assert_eq!(game.cards[source].ability_def().id, "Medusa");
+        assert_eq!(
+            game.cards[source].abilities().next().unwrap().def.id,
+            "Medusa"
+        );
     }
 }

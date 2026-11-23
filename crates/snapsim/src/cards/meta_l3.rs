@@ -219,8 +219,7 @@ fn colonel_discard(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     if let Some(state) = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<ColonelContext>())
     {
         state.discarded_turn = Some(game.turn);
@@ -245,8 +244,7 @@ fn colonel_america(game: &mut Game<'_>, card: usize) {
         return;
     }
     let flagged = game.cards[card]
-        .state
-        .as_deref()
+        .ability_state()
         .and_then(|s| s.as_any().downcast_ref::<ColonelContext>())
         .is_some_and(|s| s.discarded_turn == Some(game.turn));
     if flagged
@@ -275,8 +273,7 @@ fn archangel_state() -> Box<dyn CardState> {
 
 pub(crate) fn restore_archangel(card: &mut Card, progress: usize, completed: bool) {
     if let Some(state) = card
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<ArchangelObjective>())
     {
         state.progress = progress;
@@ -291,8 +288,7 @@ fn archangel_update(game: &mut Game<'_>, card: usize) {
         .destruction_history
         .len();
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<ArchangelObjective>()
@@ -304,8 +300,7 @@ fn archangel_update(game: &mut Game<'_>, card: usize) {
 
 fn archangel_freeze(game: &mut Game<'_>, card: usize) {
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<ArchangelObjective>()
@@ -322,8 +317,7 @@ fn archangel_complete(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     let state = game.cards[card]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<ArchangelObjective>()
@@ -357,7 +351,7 @@ fn morgan(game: &mut Game<'_>, card: usize) {
 }
 
 // PlayCard 0x7eb3e70 selects from the owner's discarded zone.
-fn ghost_rider(game: &mut Game<'_>, card: usize) {
+pub(crate) fn ghost_rider(game: &mut Game<'_>, card: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
     };
@@ -410,7 +404,7 @@ fn fenris_wolf(game: &mut Game<'_>, card: usize) {
 }
 // GiveOrDestroyLowPowerCards 0x7e6522c snapshots revealed allies with
 // Power below zero (predicate 0x7e65bac), switches sides or destroys.
-fn annihilus(game: &mut Game<'_>, card: usize) {
+pub(crate) fn annihilus(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let targets: Vec<_> = game
         .lanes
@@ -480,9 +474,9 @@ fn replace_from_zones(game: &mut Game<'_>, card: usize, cost: i32, buff: i32) {
         game.add_power(target, buff, owner);
     }
     if let Some(index) = game.players[owner].deck.iter().position(|&id| id == target) {
-        game.players[owner].deck.remove(index);
+        game.take_deck(owner, index);
     } else if let Some(index) = game.players[owner].hand.iter().position(|&id| id == target) {
-        game.players[owner].hand.remove(index);
+        game.take_hand(owner, index);
     } else {
         return;
     }
@@ -512,7 +506,7 @@ fn gladiator(game: &mut Game<'_>, card: usize) {
     if !game.can_add(target, lane, opponent) {
         return;
     }
-    game.players[opponent].deck.remove(index);
+    game.take_deck(opponent, index);
     if game.add_card(target, lane, opponent, true)
         && game.cards[target].revealed
         && game.cards[target].lane.is_some()
@@ -560,8 +554,7 @@ fn black_knight(game: &mut Game<'_>, source: usize, event: Event) {
         return;
     }
     let consumed = game.cards[source]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<bool>()
@@ -679,8 +672,7 @@ fn negasonic_state() -> Box<dyn CardState> {
 
 pub(crate) fn restore_negasonic(card: &mut Card, consumed: bool) {
     if let Some(state) = card
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .and_then(|state| state.as_any_mut().downcast_mut::<bool>())
     {
         *state = consumed;
@@ -702,8 +694,7 @@ fn negasonic(game: &mut Game<'_>, source: usize, event: Event) {
         return;
     }
     let consumed = game.cards[source]
-        .state
-        .as_deref_mut()
+        .ability_state_mut()
         .unwrap()
         .as_any_mut()
         .downcast_mut::<bool>()

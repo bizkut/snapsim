@@ -231,7 +231,14 @@ fn polymorph(game: &mut Game<'_>, card: usize) {
     let cost = game.printed_cost(target) + 1;
     // TransformCard (0x7d05c8c) uses the full collectible pool in the client;
     // random_card approximates it with implemented cards. An empty pool does nothing.
-    if let Some(id) = game.random_card(|row| row.card_type == "Character" && row.cost == cost) {
+    if let Some(random) = game.random_card(|row| row.card_type == "Character" && row.cost == cost) {
+        // A replay can provide a uniquely observed morph, without changing the
+        // random draw or the outcome when a different ally was selected.
+        let id = game.cards[card]
+            .ability_state()
+            .and_then(|state| state.as_any().downcast_ref::<(usize, &'static str)>())
+            .filter(|(observed_target, _)| *observed_target == target)
+            .map_or(random, |(_, id)| *id);
         game.transform_card_without_modifiers(target, id);
     }
 }
@@ -242,7 +249,7 @@ fn tao(game: &mut Game<'_>, card: usize) {
     let candidates: Vec<_> = allies
         .iter()
         .copied()
-        .filter(|&id| id != card && game.cards[id].has_ongoing())
+        .filter(|&id| id != card && game.cards[id].has_ongoing(false))
         .collect();
     let Some(source) = pick_random(game, &candidates) else {
         return;
@@ -325,7 +332,7 @@ fn captain_skill(game: &mut Game<'_>, card: usize) {
             .deck
             .iter()
             .copied()
-            .filter(|&id| game.cards[id].has_ongoing())
+            .filter(|&id| game.cards[id].has_ongoing(false))
             .collect()
     } else {
         Vec::new()
@@ -337,11 +344,11 @@ fn captain_skill(game: &mut Game<'_>, card: usize) {
             game.add_power(target, 3, owner);
         }
         let copy = game.copy_card(card, owner);
-        game.players[owner].deck.push(copy);
+        game.push_deck(owner, copy);
         game.shuffle_deck(owner);
     } else {
         let copy = game.create_card("Skill01CaptainAmericaChampion", owner);
-        game.players[owner].deck.push(copy);
+        game.push_deck(owner, copy);
     }
 }
 
@@ -387,8 +394,7 @@ fn queen(game: &mut Game<'_>, card: usize) {
         return;
     }
     let previous = game.cards[card]
-        .state
-        .as_ref()
+        .ability_state()
         .and_then(|s| s.as_any().downcast_ref::<Option<usize>>())
         .copied()
         .flatten()
@@ -412,7 +418,7 @@ fn queen(game: &mut Game<'_>, card: usize) {
     let skill = game.create_card(choices[index], owner);
     if game.add_hand(owner, skill, false) {
         game.set_temporary_hand_cost(skill, game.turn, 0);
-        game.cards[card].state = Some(Box::new(Some(skill)));
+        game.cards[card].set_ability_state(Some(Box::new(Some(skill))));
     }
 }
 
@@ -491,6 +497,25 @@ mod tests {
     }
 
     #[test]
+    fn polymorph_observed_choice_preserves_random_stream() {
+        let p = position(json!([{"id":"Polymorph"}, {"id":"AntMan"}]), json!([]));
+        let mut observed_rng = PythonRandom::seed(4);
+        let mut ordinary_rng = PythonRandom::seed(4);
+        let mut observed = build_game(&p, &mut observed_rng).unwrap();
+        let mut ordinary = build_game(&p, &mut ordinary_rng).unwrap();
+        let ids = observed.lanes[0].cards.clone();
+        let ordinary_ids = ordinary.lanes[0].cards.clone();
+        observed.cards[ids[0]].state = Some(Box::new((ids[1], "Medusa")));
+        polymorph(&mut observed, ids[0]);
+        polymorph(&mut ordinary, ordinary_ids[0]);
+        assert_eq!(observed.cards[ids[1]].def.id, "Medusa");
+        assert_eq!(
+            observed.rng.borrow_mut().randbelow(10000),
+            ordinary.rng.borrow_mut().randbelow(10000)
+        );
+    }
+
+    #[test]
     fn energy_and_highest_buff_require_targets_as_in_client() {
         let mut p = position(
             json!([{"id":"VibroShockGauntlets"}, {"id":"Hulk"}]),
@@ -530,7 +555,7 @@ mod tests {
         let mut game = build_game(&p, &mut rng).unwrap();
         let ids = game.lanes[0].cards.clone();
         tao(&mut game, ids[0]);
-        assert!(game.cards[ids[2]].has_ongoing());
+        assert!(game.cards[ids[2]].has_ongoing(false));
     }
 
     #[test]
@@ -611,12 +636,16 @@ mod tests {
         }
         let mut rng = PythonRandom::seed(12);
         let mut game = build_game(&p, &mut rng).unwrap();
+        // Start-of-turn triggers run before WaitForStaging (0x7e4a2dc).
+        game.is_wait_for_staging = false;
         let source = game.lanes[0].cards[0];
         queen(&mut game, source);
+        game.ongoing();
         let first = game.players[0].hand[0];
         assert_eq!(game.card_cost(first), 0);
         game.turn += 1;
         queen(&mut game, source);
+        game.ongoing();
         let second = game.players[0].hand[1];
         assert_ne!(game.cards[first].def.id, game.cards[second].def.id);
         assert_eq!(game.card_cost(second), 0);

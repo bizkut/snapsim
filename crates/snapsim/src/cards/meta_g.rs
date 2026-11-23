@@ -31,7 +31,7 @@ fn draw_selected(game: &mut Game<'_>, owner: usize, card: usize) {
         return;
     }
     if let Some(slot) = game.players[owner].deck.iter().position(|&id| id == card) {
-        game.players[owner].deck.remove(slot);
+        game.take_deck(owner, slot);
         game.add_hand(owner, card, true);
     }
 }

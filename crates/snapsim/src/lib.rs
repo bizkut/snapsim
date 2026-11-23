@@ -9,6 +9,7 @@ pub mod deckbuild;
 pub mod deckcodes;
 mod engine_ext;
 pub mod game;
+mod lane_contributions;
 pub mod locations;
 pub mod policy;
 pub mod position;

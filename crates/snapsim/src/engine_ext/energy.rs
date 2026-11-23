@@ -114,4 +114,45 @@ mod tests {
         game.start_turn();
         assert_eq!(game.players[0].next_play_power, 2);
     }
+    #[test]
+    fn peak_energy_survives_spending_turn_refresh_and_fork() {
+        let mut rng = PythonRandom::seed(21);
+        let mut game = super::super::test_game(&mut rng);
+        game.set_energy(0, 4);
+        game.set_energy(0, 9);
+        game.set_energy(0, 2);
+        game.set_energy(1, 3);
+        assert_eq!(game.players[0].highest_energy_this_game, 9);
+        assert_eq!(game.players[1].highest_energy_this_game, 3);
+        game.turn = 4;
+        game.start_turn();
+        assert_eq!(game.players[0].highest_energy_this_game, 9);
+        let mut fork_rng = PythonRandom::seed(22);
+        let mut fork = game.fork(&mut fork_rng);
+        fork.set_energy(0, 12);
+        assert_eq!(fork.players[0].highest_energy_this_game, 12);
+        assert_eq!(game.players[0].highest_energy_this_game, 9);
+    }
+
+    #[test]
+    fn energy_observers_see_peak_before_notification() {
+        fn observe(game: &mut crate::game::Game<'_>, card: usize, event: crate::game::Event) {
+            if let crate::game::Event::EnergyChanged { seat, .. } = event
+                && game.cards[card].owner == seat
+            {
+                game.players[seat].next_play_power = game.players[seat].highest_energy_this_game;
+            }
+        }
+        static CARD: crate::cards::CardDef = crate::cards::CardDef {
+            on_event: Some(observe),
+            ..crate::cards::CardDef::vanilla("EnergyPeakTest")
+        };
+        let mut rng = PythonRandom::seed(23);
+        let mut game = super::super::test_game(&mut rng);
+        let card = game.create_card("Wasp", 0);
+        game.cards[card].override_ability = Some(&CARD);
+        game.add_card(card, 0, 0, true);
+        game.set_energy(0, 7);
+        assert_eq!(game.players[0].next_play_power, 7);
+    }
 }

@@ -9,21 +9,25 @@ impl Game<'_> {
         // WidowsBiteBehavior::StopCardDraw (0x7cf2bd8).
         if self.players[seat].hand.iter().any(|&card| {
             !self.cards[card].abilities_removed
-                && self.cards[card].ability_def().blocks_draw_in_hand
+                && self.cards[card].ongoing_guard_abilities().any(|a| {
+                    a.supports(super::abilities::AbilityKind::Ongoing) && a.def.blocks_draw_in_hand
+                })
         }) {
             return;
         }
         for lane in 0..3 {
-            if self.lanes[lane].revealed
+            if self.location_abilities_active(lane)
                 && let Some(hook) = self.lanes[lane].def.before_draw
-                && let Some(card) = hook(self, lane, seat)
+                && let Some(card) = self
+                    .counted_trigger(|game| hook(game, lane, seat))
+                    .flatten()
             {
                 self.add_hand(seat, card, true);
                 return;
             }
         }
         if let Some(slot) = self.next_draw_slot(deck_seat) {
-            let card = self.players[deck_seat].deck.remove(slot);
+            let card = self.take_deck(deck_seat, slot);
             self.add_hand(seat, card, true);
         }
     }
@@ -37,21 +41,26 @@ impl Game<'_> {
         if self.players[seat].hand.len() >= 7
             || self.players[seat].hand.iter().any(|&id| {
                 !self.cards[id].abilities_removed
-                    && self.cards[id].ability_def().blocks_draw_in_hand
+                    && self.cards[id].ongoing_guard_abilities().any(|a| {
+                        a.supports(super::abilities::AbilityKind::Ongoing)
+                            && a.def.blocks_draw_in_hand
+                    })
             })
         {
             return;
         }
         for lane in 0..3 {
-            if self.lanes[lane].revealed
+            if self.location_abilities_active(lane)
                 && let Some(hook) = self.lanes[lane].def.before_draw
-                && let Some(replacement) = hook(self, lane, seat)
+                && let Some(replacement) = self
+                    .counted_trigger(|game| hook(game, lane, seat))
+                    .flatten()
             {
                 self.add_hand(seat, replacement, true);
                 return;
             }
         }
-        self.players[seat].deck.remove(slot);
+        self.take_deck(seat, slot);
         self.add_hand(seat, card, true);
     }
 }

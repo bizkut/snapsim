@@ -59,8 +59,7 @@ fn mockingbird(game: &mut Game<'_>, card: usize) {
 // NebulaBehavior::EnableAbility (0x7f0abd0) installs a pre-end trigger.
 fn nebula_enable(game: &mut Game<'_>, card: usize) {
     if let Some(state) = game.cards[card]
-        .state
-        .as_mut()
+        .ability_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<Option<u8>>())
     {
         *state = Some(game.turn);
@@ -74,8 +73,7 @@ fn nebula(game: &mut Game<'_>, card: usize) {
     };
     let owner = game.cards[card].owner;
     let enabled = game.cards[card]
-        .state
-        .as_ref()
+        .ability_state()
         .and_then(|s| s.as_any().downcast_ref::<Option<u8>>())
         .copied()
         .flatten();
@@ -86,7 +84,7 @@ fn nebula(game: &mut Game<'_>, card: usize) {
 
 // TheThingFirstStepsBehavior::GainPowerAndCheckDestroyCard (0x7cdb8ac):
 // the once-only flag is consumed even if no enemy qualifies.
-fn thing(game: &mut Game<'_>, card: usize) {
+pub(crate) fn thing(game: &mut Game<'_>, card: usize) {
     if game.cards[card].abilities_removed {
         return;
     }
@@ -99,8 +97,7 @@ fn thing(game: &mut Game<'_>, card: usize) {
         return;
     }
     let used = game.cards[card]
-        .state
-        .as_mut()
+        .ability_state_mut()
         .and_then(|s| s.as_any_mut().downcast_mut::<bool>())
         .unwrap();
     if *used {
@@ -216,7 +213,7 @@ mod tests {
         assert!(!game.can_player_move(second, 1, 0));
         game.turn += 1;
         assert!(game.can_player_move(second, 1, 0));
-        game.lanes[0].def = locations::get("IsleOfSilence").unwrap();
+        game.replace_location(0, "IsleOfSilence");
         assert!(!game.can_player_move(second, 1, 0));
     }
 

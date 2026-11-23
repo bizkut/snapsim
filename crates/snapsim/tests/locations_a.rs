@@ -156,10 +156,14 @@ fn dream_and_elysium_apply_in_location_order() {
     let card = game.create_card("Shocker", 0);
     assert!(game.add_hand(0, card, false));
     game.turn = 4;
+    // StartTurn::TriggerStartOfTurn refreshes ongoing stats (0x7e4a36c).
+    game.ongoing();
     assert_eq!(game.card_cost(card), 1);
     game.turn = 5;
+    game.ongoing();
     assert_eq!(game.card_cost(card), 2);
     game.turn = 6;
+    game.ongoing();
     assert_eq!(game.card_cost(card), 1);
 }
 

@@ -195,7 +195,7 @@ fn copied_text_keeps_identity_and_can_resolve() {
     let source = g.create_card("Medusa", 0);
     assert!(g.copy_text(target, source, true));
     assert_eq!(g.cards[target].def.id, "MistyKnight");
-    assert_eq!(g.cards[target].ability_def().id, "Medusa");
+    assert_eq!(g.cards[target].abilities().next().unwrap().def.id, "Medusa");
     assert_eq!(g.cards[target].permanent, 9); // copied resolve repeats at Kamar-Taj
     assert!(!g.copy_text(target, source, true));
 }
@@ -393,6 +393,7 @@ fn lane_move_grant_is_turn_scoped_and_shared() {
         end_turn: 2,
         remaining: 1,
         unlimited: false,
+        condition: None,
         on_move: Some(buff),
     });
     assert!(!game.can_player_move(ally, 1, 0));

@@ -86,7 +86,7 @@ fn marrow(game: &mut Game<'_>, card: usize) {
 }
 
 fn marrow_discard(game: &mut Game<'_>, card: usize) {
-    game.players[game.cards[card].owner].discard.push(card);
+    game.push_discard(game.cards[card].owner, card);
     marrow(game, card);
 }
 
