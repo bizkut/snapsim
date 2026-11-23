@@ -558,6 +558,21 @@ pub fn coverage(position: &Position) -> Value {
                 .to_owned(),
         );
     }
+    if !cards::reference_rules_enabled()
+        && let Some(ledger) = position.provenance.as_ref().and_then(|p| p.ledger.as_ref())
+    {
+        for item in &ledger.items {
+            if item.kind == "move_grant"
+                && item.attribution == "exact"
+                && position.intrinsic_move_state(item).is_none()
+            {
+                extra_state.insert(format!(
+                    "move_source_spent_state_unknown: {}",
+                    item.effect_key
+                ));
+            }
+        }
+    }
     // CyclopsXMen GetPowerChange 0x7e868b4 reads the player lifetime peak.
     if !cards::reference_rules_enabled() && card_ids.contains("CyclopsXMen") {
         extra_state.insert(
@@ -1088,7 +1103,10 @@ pub fn coverage(position: &Position) -> Value {
             // ToxieDoxieBehavior::BuffCardsAndLockOut 0x7ce066c.
             extra_state.insert("Toxie Doxie locked hand card identities not exported".to_owned());
         }
-        if resolved_source_possible(position, "BlackSwan") && position.turn > 1 {
+        if resolved_source_possible(position, "BlackSwan")
+            && position.turn > 1
+            && !position.black_swan_known()
+        {
             extra_state.insert("Black Swan player-owned hand cost effect not exported".to_owned());
         }
         if position.turn > 1

@@ -26,6 +26,8 @@ def _matches(rows):
     prior_turn = None
     terminal = False
     for row in rows:
+        if "heartbeat" in row:
+            continue
         envelope = row.get("envelope")
         if not isinstance(envelope, dict) or not isinstance(envelope.get("observation"), dict):
             if current:
@@ -299,7 +301,44 @@ def remask(paths, output_dir):
                             else:
                                 for reason in set(r for r in reasons if isinstance(r, str)):
                                     reason_codes[f"provenance_{name}_{reason}"] += 1
-            gate_reasons = sim.snapshot_hidden_mask_gate(active, recruit_pool if use_recruit else pool, visible_ids)
+                ledger = provenance.get("ledger")
+                if ledger is not None:
+                    if not isinstance(ledger, dict) or not isinstance(ledger.get("items"), list):
+                        reason_codes["provenance_ledger_invalid"] += 1
+                    else:
+                        if ledger.get("complete") is not True:
+                            reasons = ledger.get("reasons")
+                            if not isinstance(reasons, list) or not reasons:
+                                reason_codes["provenance_ledger_incomplete"] += 1
+                            else:
+                                for reason in set(r for r in reasons if isinstance(r, str)):
+                                    reason_codes[f"provenance_ledger_{reason}"] += 1
+                        if ledger.get("complete_for_legality") is not True:
+                            reasons = ledger.get("legality_reasons")
+                            if not isinstance(reasons, list) or not reasons:
+                                reason_codes["provenance_legality_incomplete"] += 1
+                            else:
+                                for reason in set(r for r in reasons if isinstance(r, str)):
+                                    reason_codes[f"provenance_legality_{reason}"] += 1
+                        for item in ledger["items"]:
+                            if not isinstance(item, dict):
+                                reason_codes["provenance_ledger_item_invalid"] += 1
+                                continue
+                            if item.get("attribution") != "exact":
+                                reason_codes["provenance_ledger_attribution_ambiguous"] += 1
+                            reasons = item.get("reasons")
+                            if isinstance(reasons, list):
+                                for reason in set(r for r in reasons if isinstance(r, str)):
+                                    reason_codes[f"provenance_ledger_item_{reason}"] += 1
+            gate_args = (active, recruit_pool if use_recruit else pool, visible_ids)
+            restored_position = None
+            if provenance is not None:
+                try:
+                    restored_position = sim.position_from_snap(json.dumps(observation), "{}")
+                except (ValueError, KeyError, TypeError):
+                    pass
+                gate_args += (json.dumps(provenance), restored_position)
+            gate_reasons = sim.snapshot_hidden_mask_gate(*gate_args)
             categories = set()
             for reason in gate_reasons:
                 reason_codes[reason] += 1

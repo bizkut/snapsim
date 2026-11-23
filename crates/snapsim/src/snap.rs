@@ -768,6 +768,16 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         && let Some(provenance) = game.get("provenance")
     {
         position["provenance"] = provenance.clone();
+        if version == Some(2)
+            && game["provenance"]["schema_version"] == 2
+            && let (Some(local_id), Some(opponent_id)) =
+                (local["entity_id"].as_i64(), opponent["entity_id"].as_i64())
+            && local_id >= 0
+            && opponent_id >= 0
+            && local_id != opponent_id
+        {
+            position["player_entity_ids"] = json!([local_id, opponent_id]);
+        }
     }
     // Cube state is opt-in so existing adapter consumers retain their JSON contract.
     if options["include_stakes"] == true
@@ -1123,6 +1133,43 @@ mod tests {
             parsed.entities[0].movable_components.items[0].created_ticks,
             "638000000000000000"
         );
+    }
+
+    #[test]
+    fn provenance_schema_two_parses_ability_and_ledger() {
+        let mut observation = prior_observation();
+        observation["schema_version"] = json!(2);
+        observation["game"]["provenance"] = json!({
+            "schema_version": 2,
+            "entities": [{
+                "kind": "player", "entity_id": 10, "card_id": null, "lane_index": null,
+                "abilities": {"complete": true, "reasons": [], "items": [{
+                    "ability_def_id": "ExampleGrantedAbility", "owner_def_type": "Card",
+                    "owner_def_id": "ExampleCard", "index": 4,
+                    "origin_entity_id": 42, "created_turn": 3, "lifetime": 2, "active": true
+                }]},
+                "movable_components": {"complete": true, "reasons": [], "items": []}
+            }],
+            "ledger": {"complete": false, "match_start_seen": false,
+                "reasons": ["missing_match_start"], "items": [{
+                    "effect_key": "effect-1", "kind": "ability", "target_entity_id": 10,
+                    "creator_entity_id": 42, "creator_def_id": "ExampleCard",
+                    "created_turn": 3, "expiry_turn": 5, "attribution": "exact",
+                    "reasons": [], "active": true, "ability_index": 4
+                }]}
+        });
+        let value = position_from_snap(&observation, &json!({})).unwrap();
+        let provenance: crate::position::Provenance =
+            serde_json::from_value(value["provenance"].clone()).unwrap();
+        assert_eq!(provenance.schema_version, 2);
+        assert_eq!(
+            provenance.entities[0].abilities.items[0].created_turn,
+            Some(3)
+        );
+        let ledger = provenance.ledger.unwrap();
+        assert!(!ledger.complete);
+        assert_eq!(ledger.items[0].expiry_turn, Some(5));
+        assert_eq!(ledger.items[0].active, Some(true));
     }
 
     #[test]

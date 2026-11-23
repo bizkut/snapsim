@@ -498,6 +498,55 @@ pub struct ObservedStakes {
 pub struct Provenance {
     pub schema_version: u32,
     pub entities: Vec<ProvenanceEntity>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub entities_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<ProvenanceLedger>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceLedger {
+    pub complete: bool,
+    #[serde(default)]
+    pub complete_for_legality: bool,
+    #[serde(default)]
+    pub legality_reasons: Vec<String>,
+    pub reasons: Vec<String>,
+    pub match_start_seen: bool,
+    pub items: Vec<ProvenanceLedgerItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceLedgerItem {
+    pub effect_key: String,
+    pub kind: String,
+    pub target_entity_id: i64,
+    pub creator_entity_id: Option<i64>,
+    pub creator_def_id: String,
+    pub created_turn: Option<u32>,
+    pub expiry_turn: Option<u32>,
+    pub attribution: String,
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub legality_relevant: Option<bool>,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub amount: Option<i32>,
+    #[serde(default)]
+    pub destination_entity_id: Option<i64>,
+    #[serde(default)]
+    pub stacks: Option<u32>,
+    #[serde(default)]
+    pub consumed: Option<bool>,
+    #[serde(default)]
+    pub ability_def_id: Option<String>,
+    #[serde(default)]
+    pub ability_index: Option<u32>,
+    #[serde(default)]
+    pub remaining: Option<u32>,
+    #[serde(default)]
+    pub active: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -546,7 +595,16 @@ pub struct ProvenanceAbility {
     pub owner_def_type: String,
     pub owner_def_id: String,
     pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_created: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_entity_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -600,6 +658,374 @@ pub struct Position {
     pub previous_turn_locations: Option<PreviousTurnLocations>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_entity_ids: Option<[i64; 2]>,
+}
+
+impl Position {
+    /// BlackSwanBehavior::AddSetCostAbilityToPlayer 0x7e7386c and its
+    /// static constructor 0x7e74384 create BlackSwanOngoing, lifetime
+    /// NextTurn, with the source card and current turn. SetCardCost
+    /// 0x7e739f4 sets printed one-cost cards to zero.
+    pub fn black_swan_effect(&self, item: &ProvenanceLedgerItem) -> Option<(usize, u8)> {
+        if item.kind != "ability"
+            || item.attribution != "exact"
+            || item.active != Some(true)
+            || !item.reasons.is_empty()
+            || item.creator_def_id != "BlackSwan"
+            || item.ability_def_id.as_deref() != Some("BlackSwanOngoing")
+        {
+            return None;
+        }
+        let created = item.created_turn?;
+        let expiry = created.checked_add(2)?;
+        if created == 0
+            || item.expiry_turn.is_some_and(|turn| turn != expiry)
+            || u32::from(self.turn) < created
+            || u32::from(self.turn) >= expiry
+        {
+            return None;
+        }
+        let creator = item.creator_entity_id?;
+        let index = item.ability_index?;
+        let seat = self
+            .player_entity_ids?
+            .iter()
+            .position(|id| *id == item.target_entity_id)?;
+        let provenance = self.provenance.as_ref()?;
+        let mut matches = provenance
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == "player" && entity.entity_id == item.target_entity_id);
+        let entity = matches.next()?;
+        if matches.next().is_some() || !entity.abilities.complete {
+            return None;
+        }
+        let mut abilities = entity.abilities.items.iter().filter(|ability| {
+            ability.ability_def_id == "BlackSwanOngoing"
+                && ability.index == index
+                && ability.owner_def_id == "BlackSwan"
+                && ability.origin_entity_id == Some(creator)
+                && ability.created_turn == Some(created)
+                && ability
+                    .lifetime
+                    .as_ref()
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+                && ability.active == Some(true)
+        });
+        abilities.next()?;
+        if abilities.next().is_some() {
+            return None;
+        }
+        Some((seat, u8::try_from(expiry - 1).ok()?))
+    }
+
+    fn black_swan_inventory_known(&self, legality: bool) -> bool {
+        let Some(provenance) = &self.provenance else {
+            return false;
+        };
+        let Some(ledger) = &provenance.ledger else {
+            return false;
+        };
+        if provenance.schema_version != 2
+            || !provenance.entities_complete
+            || if legality {
+                !ledger.complete_for_legality
+            } else {
+                !ledger.complete
+            }
+            || !ledger.match_start_seen
+            || self.player_entity_ids.is_none()
+        {
+            return false;
+        }
+        let local_id = self.player_entity_ids.unwrap()[0];
+        if provenance
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == "player" && entity.entity_id == local_id)
+            .count()
+            != 1
+        {
+            return false;
+        }
+        for entity in provenance
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == "player")
+        {
+            if !entity.abilities.complete {
+                return false;
+            }
+            for ability in entity
+                .abilities
+                .items
+                .iter()
+                .filter(|a| a.ability_def_id == "BlackSwanOngoing")
+            {
+                if ability.active == Some(false) {
+                    continue;
+                }
+                if ledger
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        item.target_entity_id == entity.entity_id
+                            && item.ability_index == Some(ability.index)
+                            && self.black_swan_effect(item).is_some()
+                    })
+                    .count()
+                    != 1
+                {
+                    return false;
+                }
+            }
+        }
+        ledger
+            .items
+            .iter()
+            .filter(|item| item.creator_def_id == "BlackSwan" && item.active != Some(false))
+            .all(|item| self.black_swan_effect(item).is_some())
+    }
+
+    pub(crate) fn black_swan_known(&self) -> bool {
+        self.black_swan_inventory_known(false)
+    }
+
+    /// Whether no unmodeled player-cost effects remain after hydration.
+    pub fn player_cost_provenance_known(&self) -> bool {
+        if !self.black_swan_inventory_known(true) {
+            return false;
+        }
+        let provenance = self.provenance.as_ref().unwrap();
+        let ledger = provenance.ledger.as_ref().unwrap();
+        provenance
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == "player")
+            .all(|entity| {
+                entity
+                    .abilities
+                    .items
+                    .iter()
+                    .all(|ability| ability.ability_def_id == "BlackSwanOngoing")
+            })
+            && ledger
+                .items
+                .iter()
+                .filter(|item| {
+                    item.active != Some(false) && matches!(item.kind.as_str(), "cost" | "ability")
+                })
+                .all(|item| self.black_swan_effect(item).is_some())
+    }
+
+    /// MovableOngoingAbilityDef::ExecuteOngoingAction 0x7e0e6f4 creates
+    /// these self-owned components. Only complete staged-move history with
+    /// no competing source proves which intrinsic stacks were consumed.
+    pub fn intrinsic_move_state(
+        &self,
+        item: &ProvenanceLedgerItem,
+    ) -> Option<(i64, u8, Option<u8>)> {
+        let (limit, ability_id) = match item.creator_def_id.as_str() {
+            "Nightcrawler" => (1, "NightcrawlerMovableOngoing"),
+            "SpiderManBrandNewDay" => (2, "SpiderManBrandNewDayMovableOngoing"),
+            "Vision" => (0, "VisionMovableOngoing"),
+            _ => return None,
+        };
+        if item.kind != "move_grant"
+            || item.attribution != "exact"
+            || !item.reasons.is_empty()
+            || item.creator_entity_id != Some(item.target_entity_id)
+            || item.destination_entity_id.is_some()
+            || item.expiry_turn.is_some()
+            || item.ability_def_id.as_deref() != Some(ability_id)
+        {
+            return None;
+        }
+        let provenance = self.provenance.as_ref()?;
+        let ledger = provenance.ledger.as_ref()?;
+        if provenance.schema_version != 2
+            || !provenance.entities_complete
+            || !ledger.complete_for_legality
+            || !ledger.match_start_seen
+            || ledger
+                .items
+                .iter()
+                .filter(|entry| {
+                    entry.kind == "move_grant" && entry.target_entity_id == item.target_entity_id
+                })
+                .count()
+                != 1
+        {
+            return None;
+        }
+        let mut cards = self
+            .locations
+            .iter()
+            .flat_map(|lane| {
+                lane.mine
+                    .iter()
+                    .map(|card| (0, card))
+                    .chain(lane.theirs.iter().map(|card| (1, card)))
+            })
+            .filter(|(_, card)| card.entity_id == Some(item.target_entity_id) && card.revealed);
+        let (seat, card) = cards.next()?;
+        if cards.next().is_some() || card.id != item.creator_def_id {
+            return None;
+        }
+        let mut entities = provenance.entities.iter().filter(|entity| {
+            entity.kind == "card"
+                && entity.entity_id == item.target_entity_id
+                && entity.card_id.as_deref() == Some(card.id.as_str())
+        });
+        let entity = entities.next()?;
+        if entities.next().is_some()
+            || !entity.abilities.complete
+            || !entity.movable_components.complete
+        {
+            return None;
+        }
+        let index = item.ability_index?;
+        if entity
+            .abilities
+            .items
+            .iter()
+            .filter(|ability| {
+                ability.index == index
+                    && ability.ability_def_id == item.ability_def_id.as_deref().unwrap_or("")
+                    && ability.owner_def_id == card.id
+            })
+            .count()
+            != 1
+        {
+            return None;
+        }
+        let components = entity
+            .movable_components
+            .items
+            .iter()
+            .filter(|component| {
+                component.source_entity_id == item.target_entity_id
+                    && component.owner_def_id == card.id
+                    && component.ability_index == index
+            })
+            .count();
+        if entity.movable_components.items.len() != components
+            || match item.active {
+                Some(true) => components != 1,
+                Some(false) => components != 0,
+                None => true,
+            }
+        {
+            return None;
+        }
+        let history = self.history.as_ref()?;
+        let completeness = history.action_completeness.as_ref()?;
+        let turns = if seat == 0 {
+            &completeness.local
+        } else {
+            &completeness.opponent
+        };
+        if (1..=self.turn).any(|turn| turns.get(&turn.to_string()) != Some(&true)) {
+            return None;
+        }
+        let created = u8::try_from(item.created_turn?).ok()?;
+        if created == 0 || created > self.turn {
+            return None;
+        }
+        let owner = if seat == 0 { "local" } else { "opponent" };
+        let mut moves = 0u8;
+        let mut current = None;
+        let mut plays = 0;
+        let mut orders = HashSet::new();
+        for action in history
+            .actions
+            .as_ref()?
+            .iter()
+            .filter(|action| action.owner == owner)
+        {
+            if action.turn == 0
+                || action.turn > self.turn
+                || !action.resolved
+                || action.turn_resolved != Some(action.turn)
+                || action.location_slot >= 3
+                || !orders.insert((action.turn, action.resolution_order?))
+            {
+                return None;
+            }
+            if action.card_entity_id != item.target_entity_id {
+                continue;
+            }
+            if action.card_id != card.id {
+                return None;
+            }
+            if action.kind == "play" && action.turn == created {
+                plays += 1;
+            }
+            if action.kind == "move" && action.turn >= created {
+                moves = moves.checked_add(1)?;
+                if action.turn == self.turn {
+                    if current.is_some() && limit == 0 {
+                        return None;
+                    }
+                    current = Some(action.turn);
+                }
+            }
+        }
+        if plays != 1
+            || (limit > 0 && moves > limit)
+            || (item.active == Some(false)
+                && if limit == 0 {
+                    current.is_none()
+                } else {
+                    moves < limit
+                })
+        {
+            return None;
+        }
+        Some((item.target_entity_id, moves, current))
+    }
+
+    pub fn move_source_provenance_known(&self) -> bool {
+        let Some(provenance) = &self.provenance else {
+            return false;
+        };
+        let Some(ledger) = &provenance.ledger else {
+            return false;
+        };
+        if provenance.schema_version != 2
+            || !provenance.entities_complete
+            || !ledger.complete_for_legality
+            || !ledger.match_start_seen
+        {
+            return false;
+        }
+        if !provenance
+            .entities
+            .iter()
+            .all(|entity| entity.movable_components.complete)
+        {
+            return false;
+        }
+        let items = ledger.items.iter().filter(|item| item.kind == "move_grant");
+        if !items
+            .clone()
+            .all(|item| self.intrinsic_move_state(item).is_some())
+        {
+            return false;
+        }
+        provenance.entities.iter().all(|entity| {
+            entity.movable_components.items.iter().all(|component| {
+                items.clone().any(|item| {
+                    item.target_entity_id == entity.entity_id
+                        && item.creator_entity_id == Some(component.source_entity_id)
+                        && item.ability_index == Some(component.ability_index)
+                        && item.active == Some(true)
+                })
+            })
+        })
+    }
 }
 
 impl Position {
@@ -1618,6 +2044,19 @@ pub(crate) fn build_game_with_generated<'a>(
             && game.lanes[lane].def.delays_reveals
             && game.lanes[lane].revealed_turn == Some(position.turn)
     });
+    if let Some(ledger) = position.provenance.as_ref().and_then(|p| p.ledger.as_ref()) {
+        for item in &ledger.items {
+            if let Some((seat, until)) = position.black_swan_effect(item) {
+                game.players[seat].attach_cost_effect(
+                    crate::game::PlayerCostEffectKind::BlackSwan {
+                        until,
+                        printed_cost: 1,
+                        value: 0,
+                    },
+                );
+            }
+        }
+    }
     game.players[0].energy = position.energy;
     for (seat, default, maximum) in [
         (0, position.default_energy, position.max_energy),
@@ -1784,6 +2223,18 @@ pub(crate) fn build_game_with_generated<'a>(
         .iter()
         .filter_map(|&(id, r)| r.entity_id.map(|entity| (entity, id)))
         .collect();
+    if !cards::reference_rules_enabled()
+        && let Some(ledger) = position.provenance.as_ref().and_then(|p| p.ledger.as_ref())
+    {
+        for item in &ledger.items {
+            if let Some((entity, moves, current)) = position.intrinsic_move_state(item)
+                && let Some(&card) = entities.get(&entity)
+            {
+                game.cards[card].player_moves_used = moves;
+                game.cards[card].player_move_turn = current;
+            }
+        }
+    }
     for &(id, r) in &observed_refs {
         game.cards[id].merged_to = r
             .merged_to_entity_id
@@ -2229,6 +2680,150 @@ mod observed_history_tests {
             ]
         }))
         .unwrap()
+    }
+    fn intrinsic_fixture(id: &str, moves: &[u8], active: bool) -> Position {
+        let mut position = base();
+        position.locations[0].mine.push(CardRef {
+            id: id.into(),
+            entity_id: Some(42),
+            revealed: true,
+            ..Default::default()
+        });
+        let ability = format!("{id}MovableOngoing");
+        let components = if active {
+            json!([{"source_entity_id":42,"owner_def_type":"Card",
+            "owner_def_id":id,"ability_index":4,"created_ticks":"123","destination_entity_id":0}])
+        } else {
+            json!([])
+        };
+        position.provenance = Some(serde_json::from_value(json!({
+            "schema_version":2, "entities_complete":true,
+            "entities":[{"kind":"card","entity_id":42,"card_id":id,"lane_index":0,
+                "abilities":{"complete":true,"reasons":[],"items":[{
+                    "ability_def_id":ability,"owner_def_type":"Card","owner_def_id":id,"index":4}]},
+                "movable_components":{"complete":true,"reasons":[],"items":components}}],
+            "ledger":{"complete":true,"complete_for_legality":true,"match_start_seen":true,
+                "reasons":[],"items":[{"effect_key":"move","kind":"move_grant",
+                    "target_entity_id":42,"creator_entity_id":42,"creator_def_id":id,
+                    "created_turn":1,"expiry_turn":null,"attribution":"exact","reasons":[],
+                    "active":active,"ability_def_id":ability,"ability_index":4}]}
+        })).unwrap());
+        let mut actions = vec![
+            json!({"owner":"local","turn":1,"kind":"play","location_slot":0,
+            "card_entity_id":42,"card_id":id,"resolved":true,"turn_resolved":1,"resolution_order":1}),
+        ];
+        for (index, turn) in moves.iter().enumerate() {
+            actions.push(
+                json!({"owner":"local","turn":turn,"kind":"move","location_slot":1,
+                "card_entity_id":42,"card_id":id,"resolved":true,"turn_resolved":turn,
+                "resolution_order":index + 2}),
+            );
+        }
+        position.history = Some(
+            serde_json::from_value(json!({"actions":actions,
+            "action_completeness":{"local":{"1":true,"2":true,"3":true},"opponent":{}},
+            "own_draws":null}))
+            .unwrap(),
+        );
+        position
+    }
+
+    #[test]
+    fn intrinsic_move_sources_require_proven_consumption() {
+        for (id, moves, active, expected) in [
+            ("Nightcrawler", vec![], true, (0, None)),
+            ("Nightcrawler", vec![2], false, (1, None)),
+            ("SpiderManBrandNewDay", vec![2], true, (1, None)),
+            ("SpiderManBrandNewDay", vec![2, 3], false, (2, Some(3))),
+            ("Vision", vec![], true, (0, None)),
+            ("Vision", vec![3], false, (1, Some(3))),
+        ] {
+            let mut position = intrinsic_fixture(id, &moves, active);
+            let item = &position
+                .provenance
+                .as_ref()
+                .unwrap()
+                .ledger
+                .as_ref()
+                .unwrap()
+                .items[0];
+            assert_eq!(
+                position.intrinsic_move_state(item),
+                Some((42, expected.0, expected.1))
+            );
+            assert!(position.move_source_provenance_known());
+            let mut rng = PythonRandom::seed(1);
+            let game = build_game(&position, &mut rng).unwrap();
+            let card = game.lanes[0].cards[0];
+            assert_eq!(
+                (
+                    game.cards[card].player_moves_used,
+                    game.cards[card].player_move_turn
+                ),
+                expected
+            );
+            position
+                .history
+                .as_mut()
+                .unwrap()
+                .action_completeness
+                .as_mut()
+                .unwrap()
+                .local
+                .remove("2");
+            let item = &position
+                .provenance
+                .as_ref()
+                .unwrap()
+                .ledger
+                .as_ref()
+                .unwrap()
+                .items[0];
+            assert_eq!(position.intrinsic_move_state(item), None);
+            assert!(!position.move_source_provenance_known());
+        }
+    }
+    #[test]
+    fn black_swan_hydrates_only_an_exact_active_player_grant() {
+        let mut position = base();
+        position.player_entity_ids = Some([10, 20]);
+        position.hand.push(CardRef {
+            id: "AntMan".into(),
+            cost: Some(0),
+            ..Default::default()
+        });
+        position.provenance = Some(serde_json::from_value(json!({
+            "schema_version": 2, "entities_complete": true,
+            "entities": [{"kind": "player", "entity_id": 10, "card_id": null, "lane_index": null,
+                "abilities": {"complete": true, "reasons": [], "items": [{
+                    "ability_def_id": "BlackSwanOngoing", "owner_def_type": "Card",
+                    "owner_def_id": "BlackSwan", "index": 4, "origin_entity_id": 42,
+                    "created_turn": 2, "lifetime": 2, "active": true}]},
+                "movable_components": {"complete": true, "reasons": [], "items": []}}],
+            "ledger": {"complete": true, "match_start_seen": true, "reasons": [], "items": [{
+                "effect_key": "swan", "kind": "ability", "target_entity_id": 10,
+                "creator_entity_id": 42, "creator_def_id": "BlackSwan", "created_turn": 2,
+                "expiry_turn": null, "attribution": "exact", "reasons": [], "active": true,
+                "ability_def_id": "BlackSwanOngoing", "ability_index": 4}]}
+        })).unwrap());
+        assert!(position.black_swan_known());
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert_eq!(game.card_cost(game.players[0].hand[0]), 0);
+        assert_eq!(game.players[0].cost_effects.len(), 1);
+        position
+            .provenance
+            .as_mut()
+            .unwrap()
+            .ledger
+            .as_mut()
+            .unwrap()
+            .items[0]
+            .attribution = "ambiguous".into();
+        assert!(!position.black_swan_known());
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        assert!(game.players[0].cost_effects.is_empty());
     }
     #[test]
     fn monstro_samples_only_deck_tops_matching_observed_cost() {

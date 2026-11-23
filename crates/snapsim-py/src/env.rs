@@ -99,16 +99,29 @@ fn sample_position_masks(
 /// Check a SNAP snapshot for hidden-state mask admission. SNAP does not export
 /// complete copied abilities, attachments, or persistent effects, so those
 /// inputs remain unknown even when the visible lanes and card pool are known.
-#[pyfunction]
+#[pyfunction(signature = (locations, hidden_cards, visible_cards, provenance=None, position=None))]
 fn snapshot_hidden_mask_gate(
     locations: Vec<String>,
     hidden_cards: Vec<String>,
     visible_cards: Vec<String>,
+    provenance: Option<&str>,
+    position: Option<&str>,
 ) -> Vec<String> {
     use snapsim::hidden_legality::{Inputs, Known, Result, check_hidden_pool};
     let locations: Vec<&str> = locations.iter().map(String::as_str).collect();
     let hidden_cards: Vec<&str> = hidden_cards.iter().map(String::as_str).collect();
     let visible_cards: Vec<&str> = visible_cards.iter().map(String::as_str).collect();
+    let position = position.and_then(|value| {
+        let raw: serde_json::Value = serde_json::from_str(value).ok()?;
+        let expected: serde_json::Value = serde_json::from_str(provenance?).ok()?;
+        if raw.get("provenance")? != &expected {
+            return None;
+        }
+        serde_json::from_value::<snapsim::position::Position>(raw).ok()
+    });
+    let player_cost_known = position
+        .as_ref()
+        .is_some_and(|position| position.player_cost_provenance_known());
     let inputs = Inputs {
         active_locations: Known::Known(&locations),
         hidden_cards: Known::Known(&hidden_cards),
@@ -116,14 +129,53 @@ fn snapshot_hidden_mask_gate(
         copied_abilities: Known::Unknown,
         attached_abilities: Known::Unknown,
         card_cost_effects: Known::Unknown,
-        player_cost_effects: Known::Unknown,
+        player_cost_effects: if player_cost_known {
+            Known::Known(&[])
+        } else {
+            Known::Unknown
+        },
         state_effects: Known::Unknown,
-        move_source_provenance: Known::Unknown,
+        move_source_provenance: if position
+            .as_ref()
+            .is_some_and(|p| p.move_source_provenance_known())
+        {
+            Known::Known(&[])
+        } else {
+            Known::Unknown
+        },
     };
-    match check_hidden_pool(&inputs) {
+    let mut reasons = match check_hidden_pool(&inputs) {
         Result::Valid => Vec::new(),
         Result::Invalid { reasons } => reasons,
+    };
+    if let Some(encoded) = provenance {
+        match serde_json::from_str::<snapsim::position::Provenance>(encoded) {
+            Ok(provenance) => {
+                let mut details = snapsim::hidden_legality::provenance_reasons(&provenance);
+                if let Some(position) = &position
+                    && let Some(ledger) =
+                        position.provenance.as_ref().and_then(|p| p.ledger.as_ref())
+                {
+                    for item in &ledger.items {
+                        if position.black_swan_effect(item).is_some()
+                            || position.intrinsic_move_state(item).is_some()
+                        {
+                            details.retain(|reason| {
+                                reason
+                                    != &format!(
+                                        "provenance {}: effect mapping unverified",
+                                        item.effect_key
+                                    )
+                            });
+                        }
+                    }
+                }
+                reasons.extend(details);
+            }
+            Err(_) => reasons.push("provenance invalid".into()),
+        }
     }
+    reasons
 }
 
 #[pyclass]

@@ -933,6 +933,53 @@ fn location_may_affect(id: &str) -> bool {
     crate::locations::get(id).is_none() || reviewed_may_affect(id, LOCATION_HOOKS)
 }
 
+/// Explain unresolved ledger entries without treating a sampled ledger as a
+/// complete inventory. In particular, a creator definition is not an effect
+/// implementation or proof that a historical effect is still active.
+pub fn provenance_reasons(provenance: &crate::position::Provenance) -> Vec<String> {
+    if provenance.schema_version != 2 {
+        return vec!["provenance schema is not version 2".into()];
+    }
+    let Some(ledger) = &provenance.ledger else {
+        return vec!["provenance ledger missing".into()];
+    };
+    let mut reasons = Vec::new();
+    if !ledger.complete_for_legality {
+        if ledger.legality_reasons.is_empty() {
+            reasons.push("provenance ledger incomplete".into());
+        } else {
+            reasons.extend(
+                ledger
+                    .legality_reasons
+                    .iter()
+                    .map(|reason| format!("provenance ledger: {reason}")),
+            );
+        }
+    }
+    for item in &ledger.items {
+        if item.active == Some(false) || item.legality_relevant == Some(false) {
+            continue;
+        }
+        if item.attribution != "exact" {
+            reasons.push(format!(
+                "provenance {}: attribution ambiguous",
+                item.effect_key
+            ));
+        } else {
+            reasons.push(format!(
+                "provenance {}: effect mapping unverified",
+                item.effect_key
+            ));
+        }
+        reasons.extend(
+            item.reasons
+                .iter()
+                .map(|reason| format!("provenance {}: {reason}", item.effect_key)),
+        );
+    }
+    reasons
+}
+
 /// Return invalid for unknown, unreviewed, or potentially affecting hidden sources.
 pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
     let mut reasons = Vec::new();
@@ -1043,6 +1090,47 @@ pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provenance_items_remain_fail_closed_without_a_reviewed_mapping() {
+        let provenance: crate::position::Provenance = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "entities": [],
+            "ledger": {"complete": false, "match_start_seen": false,
+                "reasons": ["sampled_effects_unobservable"], "legality_reasons": ["sampled_effects_unobservable"], "items": [
+                    {"effect_key": "a", "kind": "power", "target_entity_id": 1,
+                     "creator_entity_id": 2, "creator_def_id": "Scorpion",
+                     "created_turn": 2, "expiry_turn": null, "attribution": "exact",
+                     "reasons": [], "active": true},
+                    {"effect_key": "b", "kind": "cost", "target_entity_id": 1,
+                     "creator_entity_id": null, "creator_def_id": "Beast",
+                     "created_turn": null, "expiry_turn": null, "attribution": "ambiguous",
+                     "reasons": ["multiple_sources"], "active": null},
+                    {"effect_key": "c", "kind": "move_grant", "target_entity_id": 1,
+                     "creator_entity_id": null, "creator_def_id": "Example",
+                     "created_turn": null, "expiry_turn": null, "attribution": "ambiguous",
+                     "reasons": [], "active": false}
+                ]}
+        }))
+        .unwrap();
+        let reasons = super::provenance_reasons(&provenance);
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("sampled_effects_unobservable"))
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("a: effect mapping unverified"))
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("b: attribution ambiguous"))
+        );
+        assert!(reasons.iter().any(|r| r.contains("b: multiple_sources")));
+        assert!(!reasons.iter().any(|r| r.contains("c:")));
+    }
+
     use super::*;
     #[test]
     fn reviewed_visible_hook_inventory_does_not_drift() {

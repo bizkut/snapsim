@@ -140,6 +140,9 @@ fn check_file_impl(
         }
         let row: Value =
             serde_json::from_str(line).map_err(|e| super::json_error::decode_error(line, &e))?;
+        if row.get("heartbeat").is_some() {
+            continue;
+        }
         let observation = if row.get("envelope").is_some() {
             row["envelope"]["observation"].clone()
         } else {
