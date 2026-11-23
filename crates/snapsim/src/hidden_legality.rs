@@ -679,14 +679,14 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     // power, cost, move and composed-ability inputs.
     ("Agony", MayAffect),
     ("Angela", Safe), // on_play runs only after a card resolves
-    ("Armor", Safe), // visible destruction protection
+    ("Armor", Safe),  // visible destruction protection
     ("Attuma", Safe), // end_turn only
     // Ongoing power uses the visible board and active abilities.
     ("BlueMarvel", Safe),
     ("CaptainAmerica", Safe),
     ("CaptainCarter", MayAffect),
     ("Colossus", Safe), // visible protection flag
-    ("Cosmo", Safe), // visible reveal suppression
+    ("Cosmo", Safe),    // visible reveal suppression
     ("Dagger", MayAffect),
     ("Daredevil", MayAffect),
     ("DevilDinosaur", MayAffect),
@@ -698,7 +698,7 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     ("HighEvolutionary", MayAffect),
     ("HumanTorchFirstSteps", MayAffect),
     ("IronMan", Safe),
-    ("Isca", Safe), // end_turn only
+    ("Isca", Safe),          // end_turn only
     ("JJonahJameson", Safe), // cosmetic ongoing
     ("JoaquinTorres", MayAffect),
     ("JubileeSilverSurfer", MayAffect),
@@ -726,12 +726,12 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     // suppressing Sera may expose it during this decision.
     ("Sera", MayAffect),
     ("ShangChiMasterOfTheRings", MayAffect),
-    ("SoulStone", Safe), // active visible stone controls protection
+    ("SoulStone", Safe),  // active visible stone controls protection
     ("SpaceStone", Safe), // active visible stone controls Thanos permission
     ("Stardust", Safe),
     ("SuperiorSpiderMan", Safe), // start_turn only
-    ("Surge", Safe), // reveal and on_play run at resolution
-    ("TenRings", Safe), // starting hand and reveal
+    ("Surge", Safe),             // reveal and on_play run at resolution
+    ("TenRings", Safe),          // starting hand and reveal
     ("TenRingsUpgrade", MayAffect),
     ("Thanos", MayAffect),
     ("ThanosFracturedFrontier", Safe), // game start and reveal
@@ -1151,16 +1151,40 @@ mod tests {
             assert_eq!(
                 (d.reveal.is_some(), d.ongoing.is_some(), d.on_play.is_some()),
                 match id {
-                    "AntMan" | "KaZar" | "Klaw" | "BlueMarvel" | "CaptainAmerica"
-                    | "Goliath" | "IronMan" | "Lizard" | "MrFantastic" | "Namor"
-                    | "ProfessorX" | "Punisher" => (false, true, false),
-                    "Squirrel" | "Broodling" | "Cyclops" | "Demon" | "Drone" | "Hulk"
-                    | "MistyKnight" | "Monster" | "NicoMinoru" | "Raptor" | "Rock" | "Shocker"
-                    | "SinisterClone" | "Symbiote" | "TheThing" | "TigerSpirit" | "ZombieHorde"
-                    | "Quicksilver" | "Stardust" | "Attuma" | "DraxAvatarOfLife" | "Isca"
-                    | "MrFantasticFirstSteps" | "VampireKillmonger"
-                    | "ScarletWitchQueenOfChaos" | "SuperiorSpiderMan" | "Armor"
-                    | "Colossus" | "Cosmo" | "JJonahJameson" | "Onslaught" => (false, false, false),
+                    "AntMan" | "KaZar" | "Klaw" | "BlueMarvel" | "CaptainAmerica" | "Goliath"
+                    | "IronMan" | "Lizard" | "MrFantastic" | "Namor" | "ProfessorX"
+                    | "Punisher" => (false, true, false),
+                    "Squirrel"
+                    | "Broodling"
+                    | "Cyclops"
+                    | "Demon"
+                    | "Drone"
+                    | "Hulk"
+                    | "MistyKnight"
+                    | "Monster"
+                    | "NicoMinoru"
+                    | "Raptor"
+                    | "Rock"
+                    | "Shocker"
+                    | "SinisterClone"
+                    | "Symbiote"
+                    | "TheThing"
+                    | "TigerSpirit"
+                    | "ZombieHorde"
+                    | "Quicksilver"
+                    | "Stardust"
+                    | "Attuma"
+                    | "DraxAvatarOfLife"
+                    | "Isca"
+                    | "MrFantasticFirstSteps"
+                    | "VampireKillmonger"
+                    | "ScarletWitchQueenOfChaos"
+                    | "SuperiorSpiderMan"
+                    | "Armor"
+                    | "Colossus"
+                    | "Cosmo"
+                    | "JJonahJameson"
+                    | "Onslaught" => (false, false, false),
                     "Bishop" | "Angela" | "NicholasScratch" => (false, false, true),
                     "Surge" => (true, false, true),
                     _ => (true, false, false),
@@ -1193,15 +1217,30 @@ mod tests {
                         && d.objective_update.is_none()
                         && d.objective_freeze.is_none()
                         && d.late_ongoing.is_none()
-                        && d.ongoing_ability == matches!(id, "Colossus" | "JJonahJameson" | "Onslaught" | "SoulStone" | "SpaceStone")
+                        && d.ongoing_ability
+                            == matches!(
+                                id,
+                                "Colossus"
+                                    | "JJonahJameson"
+                                    | "Onslaught"
+                                    | "SoulStone"
+                                    | "SpaceStone"
+                            )
                         && d.extra_ongoing_runs == u8::from(id == "Onslaught")
                         && d.reveal_repetitions.is_none()
                         && d.can_activate.is_none()
                         && d.activate_cost == 0
                         && !d.move_each_turn
                         && d.pre_end_turn.is_none()
-                        && d.end_turn.is_some() == matches!(id, "Attuma" | "DraxAvatarOfLife"
-                            | "Isca" | "MrFantasticFirstSteps" | "VampireKillmonger")
+                        && d.end_turn.is_some()
+                            == matches!(
+                                id,
+                                "Attuma"
+                                    | "DraxAvatarOfLife"
+                                    | "Isca"
+                                    | "MrFantasticFirstSteps"
+                                    | "VampireKillmonger"
+                            )
                         && !d.end_turn_in_hand
                         && d.end_turn_trigger == d.end_turn.is_some()
                         && !d.end_turn_trigger_hidden
@@ -1210,12 +1249,14 @@ mod tests {
                         && d.on_destroy.is_none()
                         && d.on_discard.is_none()
                         && d.on_hand_added.is_none()
-                        && d.start_turn.is_some() == matches!(id, "ScarletWitchQueenOfChaos" | "SuperiorSpiderMan")
+                        && d.start_turn.is_some()
+                            == matches!(id, "ScarletWitchQueenOfChaos" | "SuperiorSpiderMan")
                         && d.post_start_turn.is_none()
                         && d.on_event.is_none()
                         && !d.event_active_when_unrevealed
                         && d.on_added.is_none()
-                        && d.initial_state.is_some() == matches!(id, "ScarletWitchQueenOfChaos" | "Surge")
+                        && d.initial_state.is_some()
+                            == matches!(id, "ScarletWitchQueenOfChaos" | "Surge")
                         && d.clear_reveal_state.is_none()
                         && d.blocks_reveal == (id == "Cosmo")
                         && !d.conceals_owner_cards
@@ -1372,8 +1413,12 @@ mod tests {
         // Power Stone uses unexported play history, Sera can conceal permanent
         // cost under its floor, and movement/activation counters need provenance.
         for id in [
-            "PowerStone", "Sera", "Nightcrawler", "SpiderManBrandNewDay",
-            "JenniferKale", "KarimaShapandar",
+            "PowerStone",
+            "Sera",
+            "Nightcrawler",
+            "SpiderManBrandNewDay",
+            "JenniferKale",
+            "KarimaShapandar",
         ] {
             assert!(visible_card_may_affect(id), "{id}");
         }
