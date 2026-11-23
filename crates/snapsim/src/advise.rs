@@ -1,9 +1,11 @@
 //! Successive-halving search over sampled hidden-information games.
+#[cfg(test)]
+use crate::position::build_game;
 use crate::{
     coverage::{coverage, sampling_priors},
     game::{Action, Game},
     policy::Policy,
-    position::{Position, build_game},
+    position::{FrozenGeneratedAbilities, Position, build_game_with_generated},
     random::PythonRandom,
 };
 use rayon::prelude::*;
@@ -418,8 +420,53 @@ pub(crate) fn advise_with_game(
         "margin" => Policy::Margin,
         _ => return Err("unknown playout policy".into()),
     };
-    let unsupported = coverage(position);
+    let mut unsupported = coverage(position);
     let priors = sampling_priors(position);
+    let attached_red = authority.is_some_and(|(game, seat)| {
+        game.lanes.iter().flat_map(|lane| &lane.cards).any(|&id| {
+            let card = &game.cards[id];
+            (card.owner == seat || card.revealed)
+                && card
+                    .composed_abilities
+                    .iter()
+                    .any(|ability| ability.def.id == "RedOnslaught")
+        })
+    }) || position
+        .locations
+        .iter()
+        .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+        .any(|card| {
+            card.id != "RedOnslaught"
+                && card.ability_state.as_ref().is_some_and(|state| {
+                    state
+                        .abilities
+                        .iter()
+                        .any(|ability| ability.ability_def_id.starts_with("RedOnslaught"))
+                })
+        })
+        || position.provenance.as_ref().is_some_and(|provenance| {
+            provenance.entities.iter().any(|entity| {
+                entity.kind == "card"
+                    && entity.card_id.as_deref() != Some("RedOnslaught")
+                    && entity
+                        .abilities
+                        .items
+                        .iter()
+                        .any(|ability| ability.owner_def_id == "RedOnslaught")
+            })
+        });
+    if attached_red {
+        unsupported["state"]
+            .as_array_mut()
+            .expect("coverage state")
+            .push(json!(
+                "attached Red Onslaught generated abilities cannot be reconstructed"
+            ));
+        return Ok(
+            json!({"engine":"simulator-rollout", "status":"unsupported", "rollouts":0,
+            "plans":[], "unsupported":unsupported, "priors":priors}),
+        );
+    }
     let incomplete = unsupported
         .as_object()
         .expect("coverage is an object")
@@ -472,7 +519,11 @@ pub(crate) fn advise_with_game(
     let mut rng = PythonRandom::seed(options.seed);
     let mut sample_seed = rng.getrandbits(64) as u64;
     let mut first_rng = PythonRandom::seed(sample_seed as i128);
-    let mut first_game = build_game(position, &mut first_rng)?;
+    let authoritative_generated =
+        authority.map(|(game, seat)| FrozenGeneratedAbilities::capture(game, seat));
+    let mut first_game =
+        build_game_with_generated(position, &mut first_rng, authoritative_generated.as_ref())?;
+    let frozen_generated = std::sync::Mutex::new(FrozenGeneratedAbilities::capture(&first_game, 0));
     let retreat_available = first_game.can_retreat(false)
         && !(position.stakes.as_ref().and_then(|s| s.last_raiser) == Some(0)
             && position.snapped_this_turn.is_some_and(|snapped| snapped[0]));
@@ -559,7 +610,9 @@ pub(crate) fn advise_with_game(
                     return Ok(None);
                 }
                 let mut rng = PythonRandom::seed(seed as i128);
-                let mut game = build_game(position, &mut rng)?;
+                let frozen = frozen_generated.lock().map_err(|e| e.to_string())?;
+                let mut game = build_game_with_generated(position, &mut rng, Some(&frozen))?;
+                drop(frozen);
                 Ok(Some((
                     index,
                     play_out(
@@ -603,7 +656,11 @@ pub(crate) fn advise_with_game(
         while best.samples < min_plan_samples && !stopped() {
             let seed = rng.getrandbits(64) as u64;
             let mut sample_rng = PythonRandom::seed(seed as i128);
-            let mut game = build_game(position, &mut sample_rng)?;
+            let mut game = build_game_with_generated(
+                position,
+                &mut sample_rng,
+                Some(&*frozen_generated.lock().map_err(|e| e.to_string())?),
+            )?;
             let winner = play_out(&mut game, position, &best.plays, policy, options.plays_only)?;
             best.record(winner);
             extra_samples += 1;
@@ -633,7 +690,11 @@ pub(crate) fn advise_with_game(
             }
             let seed = position_rng.getrandbits(64) as u64;
             let mut rng = PythonRandom::seed(seed as i128);
-            let mut game = build_game(position, &mut rng)?;
+            let mut game = build_game_with_generated(
+                position,
+                &mut rng,
+                Some(&*frozen_generated.lock().map_err(|e| e.to_string())?),
+            )?;
             let priority = match position.priority.as_deref() {
                 Some("me") => Some(0),
                 Some("opponent") => Some(1),
@@ -663,6 +724,7 @@ pub(crate) fn advise_with_game(
     if options.stake_rollouts > 0 && position.stakes.is_some() && result.get("position").is_some() {
         result["stake_rollouts"] = crate::compare::stake_position_sweep(
             position,
+            &*frozen_generated.lock().map_err(|e| e.to_string())?,
             options.stake_rollouts,
             options.stake_policy_rollouts,
             options.seed,
@@ -874,6 +936,122 @@ mod tests {
         let complete: Value =
             serde_json::from_str(&advise_json(&position, &options.to_string()).unwrap()).unwrap();
         assert_eq!(complete["status"], "ok");
+    }
+    #[test]
+    fn generated_ongoing_is_fixed_across_stake_style_samples() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 5, "energy": 0, "hand": [], "deck": [],
+            "locations": [
+                {"id":"Hala","mine":[{"id":"MrSinister"},{"id":"SinisterClone"}],"theirs":[]},
+                {"id":"TheHub","mine":[{"id":"Mirage"}],"theirs":[{"id":"Nightcrawler"},{"id":"Squirrel"},{"id":"SuperSkrull"}]},
+                {"id":"WakandanEmbassy","mine":[{"id":"RedOnslaught"},{"id":"Makkari"}],"theirs":[{"id":"AntMan"},{"id":"Squirrel"}]}
+            ],
+            "opponent":{"hand":4,"deck":3}
+        })).unwrap();
+        let mut chosen = None;
+        for seed in 0..500 {
+            let mut rng = PythonRandom::seed(seed);
+            let game = build_game(&position, &mut rng).unwrap();
+            let red = game.lanes[2]
+                .cards
+                .iter()
+                .copied()
+                .find(|&id| game.cards[id].def.id == "RedOnslaught")
+                .unwrap();
+            if game.cards[red]
+                .composed_abilities
+                .iter()
+                .any(|a| a.def.id == "MadameWeb")
+            {
+                chosen = Some(game.into_owned());
+                break;
+            }
+        }
+        let first = chosen.expect("a seeded Red Onslaught grants Madame Web");
+        let plans = legal_action_plans(&first, None, &|| false);
+        assert!(
+            plans
+                .iter()
+                .flatten()
+                .any(|step| matches!(step, PlanStep::Move { .. }))
+        );
+        let children = |game: &Game<'_>| {
+            let skrull = game.lanes[1]
+                .cards
+                .iter()
+                .copied()
+                .find(|&id| game.cards[id].def.id == "SuperSkrull")
+                .unwrap();
+            let red = game.cards[skrull]
+                .virtual_ongoing_ids
+                .iter()
+                .find(|entry| entry.4.def.id == "RedOnslaught")
+                .unwrap()
+                .4
+                .id;
+            game.cards[skrull]
+                .composed_abilities
+                .iter()
+                .filter(|a| a.parent.is_some_and(|parent| parent.0 == red))
+                .map(|a| a.def.id)
+                .collect::<Vec<_>>()
+        };
+        let expected_children = children(&first);
+        assert_eq!(expected_children.len(), 3);
+        let frozen = FrozenGeneratedAbilities::capture(&first, 0);
+        for seed in 0..64 {
+            let mut rng = PythonRandom::seed(seed);
+            let game = build_game_with_generated(&position, &mut rng, Some(&frozen)).unwrap();
+            assert_eq!(children(&game), expected_children, "seed {seed}");
+            for plan in &plans {
+                let actions: Vec<_> = plan.iter().map(|step| step.action(&game)).collect();
+                let mut staged = game.fork_owned();
+                for action in actions {
+                    staged.stage_action(0, action).unwrap_or_else(|error| {
+                        panic!("seed {seed}, action {action:?}, plan {plan:?}: {error}")
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attached_red_onslaught_declines_even_approximate_advice() {
+        let position: Position = serde_json::from_value(json!({
+            "turn":3,"energy":3,"hand":[],"deck":[],
+            "locations":[
+                {"id":"Ruins","mine":[{"id":"MistyKnight"}],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]}
+            ],
+            "opponent":{"hand":0,"deck":0}
+        }))
+        .unwrap();
+        let mut rng = PythonRandom::seed(1);
+        let mut game = build_game(&position, &mut rng).unwrap();
+        let card = game.lanes[0].cards[0];
+        game.cards[card].composed_abilities.push(
+            crate::engine_ext::abilities::AbilityInstance::new(
+                crate::cards::get("RedOnslaught").unwrap(),
+                crate::engine_ext::abilities::AbilityKind::Ongoing,
+                Some(card),
+                false,
+                true,
+                None,
+            ),
+        );
+        let options: AdviseOptions = serde_json::from_value(json!({
+            "rollouts":1,"seed":1,"max_plans":1,"time_limit":null,
+            "approximate":true,"playout":"spread","workers":1
+        }))
+        .unwrap();
+        let result = advise_with_game(&position, &options, &|| false, Some((&game, 0)), 0).unwrap();
+        assert_eq!(result["status"], "unsupported");
+        assert!(
+            result["unsupported"]["state"]
+                .to_string()
+                .contains("attached Red Onslaught")
+        );
     }
 
     #[test]

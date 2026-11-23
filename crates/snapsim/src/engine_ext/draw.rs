@@ -3,7 +3,11 @@ use crate::game::Game;
 impl Game<'_> {
     /// Draw into `seat`'s hand from the selected player's deck.
     pub fn draw_from_deck(&mut self, seat: usize, deck_seat: usize) {
-        if self.players[seat].hand.len() >= 7 {
+        if crate::cards::reference_rules_enabled() && self.players[seat].hand.len() >= 7 {
+            return;
+        }
+        // Player::DrawCard (0x7de6f0c) selects a card before the pre-draw trigger.
+        if !crate::cards::reference_rules_enabled() && self.players[deck_seat].deck.is_empty() {
             return;
         }
         // WidowsBiteBehavior::StopCardDraw (0x7cf2bd8).
@@ -29,6 +33,10 @@ impl Game<'_> {
                 return;
             }
         }
+        // The client attempts the move only after PreCardDrawTrigger.
+        if self.players[seat].hand.len() >= 7 {
+            return;
+        }
         if let Some(slot) = self.next_draw_slot(deck_seat) {
             let card = self.take_deck(deck_seat, slot);
             self.add_hand(seat, card, true);
@@ -41,7 +49,7 @@ impl Game<'_> {
         let Some(slot) = self.players[seat].deck.iter().position(|&id| id == card) else {
             return;
         };
-        if self.players[seat].hand.len() >= 7
+        if (crate::cards::reference_rules_enabled() && self.players[seat].hand.len() >= 7)
             || self.players[seat].hand.iter().any(|&id| {
                 !self.cards[id].abilities_removed
                     && self.cards[id].ongoing_guard_abilities().any(|a| {
@@ -66,6 +74,9 @@ impl Game<'_> {
                 return;
             }
         }
+        if self.players[seat].hand.len() >= 7 {
+            return;
+        }
         self.take_deck(seat, slot);
         self.add_hand(seat, card, true);
     }
@@ -74,6 +85,43 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use crate::random::PythonRandom;
+
+    #[test]
+    fn full_hand_still_consumes_time_theater_interception() {
+        for selected in [false, true] {
+            let mut rng = PythonRandom::seed(45);
+            let mut game = super::super::test_game(&mut rng);
+            let def = crate::locations::get("TimeTheater").unwrap();
+            game.lanes[0].def = def;
+            game.lanes[0].state = def.initial_state.map(|init| init());
+            game.lanes[0].revealed = true;
+            game.players[0].hand.clear();
+            game.players[0].deck.clear();
+            let previous = game.create_card("Wasp", 0);
+            game.players[0].draws.push((1, previous));
+            let card = game.create_card("Hulk", 0);
+            game.players[0].deck.push(card);
+            while game.players[0].hand.len() < 7 {
+                let filler = game.create_card("Cyclops", 0);
+                game.players[0].hand.push(filler);
+            }
+            if selected {
+                game.draw_specific(0, card);
+            } else {
+                game.draw_from_deck(0, 0);
+            }
+            assert_eq!(game.players[0].deck, [card]);
+            assert_eq!(game.players[0].hand.len(), 7);
+            game.players[0].hand.pop();
+            if selected {
+                game.draw_specific(0, card);
+            } else {
+                game.draw_from_deck(0, 0);
+            }
+            assert!(game.players[0].hand.contains(&card));
+            assert!(game.players[0].deck.is_empty());
+        }
+    }
 
     #[test]
     fn selected_draw_removes_only_selected_card() {

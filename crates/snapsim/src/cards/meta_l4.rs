@@ -967,6 +967,11 @@ fn lockjaw_swap(
     let Some(lane) = game.cards[target].lane else {
         return false;
     };
+    // SwapCard (0x7ee9cfc) consumes the trigger if the character is no
+    // longer in play; Card::IsInPlay (0x7cbd704) requires it to be revealed.
+    if !game.cards[target].revealed {
+        return true;
+    }
     let choices: Vec<_> = game.players[owner]
         .deck
         .iter()
@@ -1660,6 +1665,22 @@ mod tests {
         assert!(lockjaw_swap(&mut g, &mut effect, Some(target)));
         assert_eq!(g.cards[hulk].lane, Some(1));
         assert!(g.players[0].deck.contains(&skill));
+    }
+
+    #[test]
+    fn lockjaw_consumes_trigger_when_character_is_no_longer_revealed() {
+        let mut rng = PythonRandom::seed(5);
+        let mut g = fixture(&mut rng);
+        let dog = place(&mut g, "Lockjaw", 0, 0);
+        let target = place(&mut g, "Wasp", 0, 1);
+        let replacement = g.create_card("Hulk", 0);
+        g.players[0].deck = vec![replacement];
+        lockjaw(&mut g, dog);
+        let mut effect = g.players[0].pending_effects.pop().unwrap();
+        g.cards[target].revealed = false;
+        assert!(lockjaw_swap(&mut g, &mut effect, Some(target)));
+        assert_eq!(g.cards[target].lane, Some(1));
+        assert_eq!(g.players[0].deck, [replacement]);
     }
 
     #[test]

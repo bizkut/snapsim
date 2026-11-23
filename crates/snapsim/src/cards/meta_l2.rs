@@ -674,6 +674,23 @@ fn batroc(game: &mut Game<'_>, card: usize, event: Event) {
 // trigger; BuffAndMoveCard 0x7e68fa4 buffs before moving right.
 fn arana(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
+    // NextCardPlayedAbilityDef::AddAbilityToPlayer 0x7e0cfa4 reuses the
+    // existing trigger definition; Arana then replaces its source context.
+    if !crate::cards::reference_rules_enabled()
+        && let Some(effect) = game.players[owner]
+            .pending_effects
+            .iter_mut()
+            .find(|effect| {
+                std::ptr::fn_addr_eq(
+                    effect.apply,
+                    arana_next as fn(&mut Game<'_>, &mut PendingEffect, Option<usize>) -> bool,
+                )
+            })
+    {
+        effect.source = card;
+        effect.created_turn = game.turn;
+        return;
+    }
     game.add_player_effect(
         owner,
         PendingEffect {
@@ -1110,6 +1127,13 @@ mod tests {
             game.lanes[0].cards.push(id);
         }
         arana(&mut game, source);
+        let second = game.create_card("Arana", 0);
+        game.cards[second].lane = Some(0);
+        game.cards[second].revealed = true;
+        game.lanes[0].cards.push(second);
+        arana(&mut game, second);
+        assert_eq!(game.players[0].pending_effects.len(), 1);
+        assert_eq!(game.players[0].pending_effects[0].source, second);
         let mut effect = game.players[0].pending_effects.pop().unwrap();
         let before = game.cards[target].power();
         assert!(arana_next(&mut game, &mut effect, Some(target)));

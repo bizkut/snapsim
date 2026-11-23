@@ -395,7 +395,9 @@ fn chamber(game: &mut Game<'_>, card: usize) {
             game.cards[id].owner == owner && game.cards[id].revealed && game.printed_cost(id) >= 5
         })
         .count();
-    game.add_power(card, 2 * (hand + board) as i32, owner);
+    if hand + board > 0 || crate::cards::reference_rules_enabled() {
+        game.add_power(card, 2 * (hand + board) as i32, owner);
+    }
 }
 
 // KarenPageBehavior::BuffCards 0x7eda3d4 selects one revealed allied
@@ -809,6 +811,18 @@ mod tests {
         let before = g.cards[source].power();
         chamber(&mut g, source);
         assert_eq!(g.cards[source].power(), before + 4);
+    }
+    #[test]
+    fn chamber_without_targets_does_not_record_a_power_modifier() {
+        let mut rng = PythonRandom::seed(1);
+        let mut g = setup(&mut rng);
+        let source = place(&mut g, "Chamber", 0, 0);
+        g.players[0].hand.clear();
+        let updates = g.cards[source].stat_updates.len();
+        let modifiers = g.cards[source].power_modifiers.len();
+        chamber(&mut g, source);
+        assert_eq!(g.cards[source].stat_updates.len(), updates);
+        assert_eq!(g.cards[source].power_modifiers.len(), modifiers);
     }
     #[test]
     fn karen_page_buffs_one_ally_per_printed_cost() {

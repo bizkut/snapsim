@@ -2,7 +2,7 @@
 use super::CardDef;
 use crate::game::{Event, Game};
 
-pub(crate) static TOKENS: &[&str] = &["BannerHulk"];
+pub(crate) static TOKENS: &[&str] = &["BannerHulk", "Pig"];
 
 pub(crate) static CARDS: &[CardDef] = &[
     CardDef {
@@ -45,6 +45,7 @@ pub(crate) static CARDS: &[CardDef] = &[
         ..CardDef::vanilla("Sersi")
     },
     CardDef::vanilla("BannerHulk"),
+    CardDef::vanilla("Pig"),
 ];
 
 // HulkOut 0x7e76ff8 rolls [0, 100) only with unspent energy; a roll
@@ -110,6 +111,8 @@ fn spider_ham(game: &mut Game<'_>, card: usize) {
     if count != 0 {
         let target = candidates[game.rng.borrow_mut().randbelow(count)];
         game.remove_text(target);
+        // ReplaceText (0x7f4af20) leaves Pig as the removed-text identity.
+        game.cards[target].override_ability = Some(super::get("Pig").expect("Pig registered"));
     }
 }
 
@@ -424,6 +427,7 @@ mod tests {
         spider_ham(&mut game, source);
         assert!(game.cards[target].abilities_removed);
         assert_eq!(game.cards[target].def.id, "IronMan");
+        assert_eq!(game.cards[target].default_ability().id, "Pig");
     }
 
     #[test]

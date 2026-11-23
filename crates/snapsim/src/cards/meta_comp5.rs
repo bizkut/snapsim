@@ -126,8 +126,18 @@ fn program_buff(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    for other in 0..game.lanes.len() {
-        if other == lane {
+    // BuffCards selects eligible locations before buffing any cards (0x7f19a70,
+    // location predicate 0x7f1a410); later effects cannot add a new location.
+    let mut eligible = [false; 3];
+    for (other, selected) in eligible.iter_mut().enumerate().take(game.lanes.len()) {
+        *selected = other != lane
+            && game.lanes[other]
+                .cards
+                .iter()
+                .any(|&id| game.cards[id].owner == owner && game.cards[id].revealed);
+    }
+    for (other, selected) in eligible.into_iter().enumerate().take(game.lanes.len()) {
+        if !selected {
             continue;
         }
         let mut targets: Vec<_> = game.lanes[other]
@@ -162,7 +172,9 @@ fn program_rock(game: &mut Game<'_>, card: usize) {
 }
 
 fn program_double(game: &mut Game<'_>, card: usize) {
-    game.multiply_power(card, 2, game.cards[card].owner);
+    if game.cards[card].lane.is_some() {
+        game.multiply_power(card, 2, game.cards[card].owner);
+    }
 }
 
 // IncrementCost 0x7e6be3c changes the card's dynamic AssignedCost only
@@ -187,14 +199,23 @@ fn askanison_activate(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    if !game.spawns_allowed() {
+    let spawns_allowed = game.spawns_allowed();
+    if !spawns_allowed && crate::cards::reference_rules_enabled() {
         return;
     }
-    let lanes: Vec<_> = (0..game.lanes.len())
+    let mut lanes: Vec<_> = (0..game.lanes.len())
         .filter(|&other| {
-            other != lane && game.has_space(other, owner, 0) && !game.lane_locked(other)
+            other != lane
+                && spawns_allowed
+                && game.has_space(other, owner, 0)
+                && !game.lane_locked(other)
         })
         .collect();
+    // GetRandomLocationToSpawnCard 0x7db2b64 falls back to other
+    // locations without the spawnability filter before rolling.
+    if lanes.is_empty() && !crate::cards::reference_rules_enabled() {
+        lanes.extend((0..game.lanes.len()).filter(|&other| other != lane));
+    }
     if lanes.is_empty() {
         return;
     }
@@ -214,6 +235,45 @@ fn askanison_activate(game: &mut Game<'_>, card: usize) {
 mod tests {
     use super::*;
     use crate::{locations, random::PythonRandom};
+
+    fn move_when_empowered(game: &mut Game<'_>, card: usize, event: crate::game::Event) {
+        if matches!(event, crate::game::Event::Empower { card: target, .. } if target == card) {
+            game.move_card(card, 2);
+        }
+    }
+
+    static MOVE_WHEN_EMPOWERED: CardDef = CardDef {
+        on_event: Some(move_when_empowered),
+        ..CardDef::vanilla("Wasp")
+    };
+
+    #[test]
+    fn program_buff_snapshots_eligible_locations_before_empower_triggers() {
+        let mut rng = PythonRandom::seed(15);
+        let mut game = game(&mut rng);
+        let source = game.create_card("Herbie", 0);
+        let target = game.create_card("Wasp", 0);
+        game.add_card(source, 0, 0, true);
+        game.add_card(target, 1, 0, true);
+        game.cards[target].override_ability = Some(&MOVE_WHEN_EMPOWERED);
+        let power = game.cards[target].permanent;
+        program_buff(&mut game, source);
+        assert_eq!(game.cards[target].lane, Some(2));
+        assert_eq!(game.cards[target].permanent, power + 1);
+    }
+
+    #[test]
+    fn program_double_requires_source_in_location() {
+        let mut rng = PythonRandom::seed(16);
+        let mut game = game(&mut rng);
+        let source = game.create_card("Herbie", 0);
+        let power = game.cards[source].permanent;
+        program_double(&mut game, source);
+        assert_eq!(game.cards[source].permanent, power);
+        game.add_card(source, 0, 0, true);
+        program_double(&mut game, source);
+        assert_eq!(game.cards[source].permanent, power * 2);
+    }
 
     fn game(rng: &mut PythonRandom) -> Game<'_> {
         let deck = [
@@ -307,6 +367,25 @@ mod tests {
             .copied()
             .unwrap();
         assert_eq!(game.printed_cost(spawned), 3);
+    }
+
+    #[test]
+    fn askanison_rolls_fallback_even_when_other_locations_are_full() {
+        let mut rng = PythonRandom::seed(42);
+        let mut game = game(&mut rng);
+        let source = game.create_card("Askanison", 0);
+        assert!(game.add_card(source, 0, 0, true));
+        for lane in 1..3 {
+            for _ in 0..4 {
+                let filler = game.create_card("Wasp", 0);
+                assert!(game.add_card(filler, lane, 0, false));
+            }
+        }
+        let mut before = game.rng.borrow().clone_rng();
+        askanison_activate(&mut game, source);
+        assert_eq!(game.lanes[1].cards.len(), 4);
+        assert_eq!(game.lanes[2].cards.len(), 4);
+        assert_ne!(game.rng.borrow_mut().random(), before.random());
     }
 
     #[test]

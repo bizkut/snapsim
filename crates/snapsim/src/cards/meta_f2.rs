@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn magus_selects_first_printed_cost_without_revealing() {
+    fn magus_selects_first_printed_cost_without_activating_text() {
         let mut rng = PythonRandom::seed(2);
         let mut game = build_game(&position("Magus"), &mut rng).unwrap();
         let source = game.lanes[0].cards[0];

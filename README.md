@@ -38,6 +38,9 @@ cannot be observed and answered mid-phase. Simultaneous requests use seeded
 ordering from the compare model; this random ordering is not proven client
 behavior. Observations otherwise exclude opposing hand/deck identities, hidden
 cards, unrevealed locations, and the random stream.
+This also omits opposing deck cards explicitly revealed by effects such as
+Magus (`MagusBehavior::CopyForUnspentEnergy`, `0x7eef1d4`): the simulator does
+not track per-player visibility of deck cards.
 
 `snapsim_py.VecEnv(decks, seeds, recruit=False, threads=1)` runs one game per
 pair of 12-card ID lists in `decks`, using independent integer seeds and a
@@ -283,6 +286,8 @@ Known approximations of client rules:
 
 The optional `position_rollouts` (unsigned 32-bit, default 0) independently estimates the current position by sampling hidden information and letting the configured playout policy choose for both seats. When samples complete, `position` contains `win`, `draw`, `loss`, `samples`, and `approximate` (the latter reflects incomplete coverage). This estimates policy-vs-policy outcomes, not an optimal-play guarantee. Its random stream is separate from plan search; without a time limit enabling it does not change plan results. With `time_limit`, plan search receives 70% of the budget and position sampling runs afterward within the remaining shared deadline; fewer samples may complete and the position is omitted if none complete. Cancellation and strict unsupported coverage likewise can leave it absent. The same option passes through `snapsim_py.advise`.
 
+Red Onslaught's default and virtual copied generated abilities are fixed for a single advice request, including its position and stake rollouts; simulated stake continuations preserve those generated abilities from their game state. When the identities are not available from the observation, coverage reports them as unknown and the advice is approximate. Detected attached Red Onslaught abilities that cannot be reconstructed are declined even in approximate mode.
+
 The `snapsim_py` module exposes `advise(position_json, options_json, cancel=None)`, `position_from_snap(observation_json, options_json)` (raising `snapsim_py.NotPlanningError` for frames that are not a planning point), `coverage`, `supported`, `deck_eligible_ids`, `recruit_card_pool`, `recruit_card_weights` and `deckbuild(args_json, progress=None, cancel=None)`. Values are JSON strings. It is built for the stable Python ABI (abi3, Python 3.9 or newer), so one build loads in any of those interpreters. Build it without installing into any virtual environment:
 
 ```sh
@@ -435,6 +440,11 @@ Two kinds of record are reported rather than compared:
 
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
 * Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of an engine change is listed with its exact first-divergence path and values in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. A changed card keeps the reference's version in `cards/reference_rules.rs`, which the gates switch to with `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`; live play never does. The `replay-client` gate then checks the client rules, these changes included, against every real recording. The changes:
+  * Fantasticar selects visible end-of-turn triggers, including independently attached triggers after default text removal (`FantasticarBehavior::GetTargetCard` predicate `0x7ea7c8c`); reference rules retain the earlier hidden-trigger and removed-text checks.
+  * Chamber does not record a zero-power modifier when no cards qualify (`ChamberBehavior::BuffPower`, `0x7e7fb14`); reference rules retain the earlier zero update.
+  * Fantomex afflicts front-row enemies in location and slot order (`FantomexBehavior::AfflictFrontRowCards`, `0x7ea7ee4`); reference rules retain global resolution order.
+  * Arana and Kid Omega reuse their pending next-play trigger and replace its source context on repeated activation (`NextCardPlayedAbilityDef::AddAbilityToPlayer`, `0x7e0cfa4`); reference rules retain independent pending effects.
+  * Askanison rolls a fallback other location even when none can spawn (`Game::GetRandomLocationToSpawnCard`, `0x7db2b64`); reference rules return without the fallback roll.
   * Colossus's movement immunity requires its Ongoing ability to be active (`ColossusBehavior::SetCantBeDestroyedOrMovedOrWeakened`, `0x7e834e8`); reference rules retain the unconditional movement guard.
   * Player movement consumes only its client-priority source (`MoveSystem::FindMovableByPlayerSource`, `0x7c9d9ec`); reference rules retain the earlier all-sources consumption.
   * Intrinsic hidden Ongoing movement is suppressed where hidden Ongoing abilities are disabled (`MovableOngoingAbilityDef::.ctor`, `0x7e0c8e4`); reference rules retain the earlier unconditional movement permission.
@@ -447,6 +457,7 @@ Two kinds of record are reported rather than compared:
   * Repetition effects do not repeat hidden ability instances; normal resolution still executes them once. Reference rules retain the earlier repetition behavior.
   * Nested ability dispatch uses the client's 32-active-ability limit (`Ability::CanActivate`, `0x7c8a6e0`).
   * Activate staging checks visible activation abilities and the card definition's activation cost, rather than the attached ability's cost or its target availability (`Card::HasActivateAbility`, `0x7cb36b8`; `Card::CanActivate`, `0x7cb9a24`). Reference rules retain the previous checks.
+  * A pre-draw interceptor can run with a full hand before the draw's destination check, and an empty deck does not trigger it (`Player::DrawCard`, `0x7de7abc`; `TimeTheaterBehavior::ReplaceDraw`, `0x7d8d750`). Reference rules retain the previous full-hand and empty-deck ordering.
   * Cards that ignore play restrictions can use up to four physical slots at Space Throne, rather than its normal one-slot limit (`Card::IsPlayableByCard`, `0x7cb0a28`; `Location::GetNumberOfEmptyCardSlots`, `0x7ddb4d8`). Reference rules retain the previous capacity check.
   * Each ongoing additive cost update clamps to zero before subsequent cost effects (`Card::AddCost`, `0x7cb69e4` and `0x7cb6a2c`); reference rules retain unbounded intermediate values.
   * Location cost effects emit updates only for their client-selected targets, preserving bounded Add versus Set behavior (`TheSandbarBehavior::IncreaseCardCost`, `0x7d8c410`); reference rules retain the previous numerical calculation.

@@ -99,6 +99,24 @@ fn karima(game: &mut Game<'_>, card: usize) {
 
 fn kid_omega(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
+    // AddAbilityToPlayer 0x7e0cfa4 reuses a matching trigger definition;
+    // AddDestroyTrigger 0x7ede1b4 replaces its source and turn contexts.
+    if !crate::cards::reference_rules_enabled()
+        && let Some(effect) = game.players[owner]
+            .pending_effects
+            .iter_mut()
+            .find(|effect| {
+                std::ptr::fn_addr_eq(
+                    effect.apply,
+                    kid_destroy as fn(&mut Game<'_>, &mut PendingEffect, Option<usize>) -> bool,
+                )
+            })
+    {
+        effect.source = card;
+        effect.lane = game.cards[card].lane;
+        effect.created_turn = game.turn;
+        return;
+    }
     // AddDestroyTrigger (0x7ede1b4) creates a player-owned trigger for this turn.
     game.add_player_effect(
         owner,
@@ -307,9 +325,15 @@ mod tests {
         let power = game.cards[target].power();
         let old = game.cards[source].power();
         kid_omega(&mut game, source);
+        let second = place(&mut game, "KidOmega", 0, 0, true);
+        kid_omega(&mut game, second);
+        assert_eq!(game.players[0].pending_effects.len(), 1);
+        assert_eq!(game.players[0].pending_effects[0].source, second);
+        let second_old = game.cards[second].power();
         game.reveal(target);
         assert!(game.cards[target].lane.is_none());
-        assert_eq!(game.cards[source].power(), old + power);
+        assert_eq!(game.cards[source].power(), old);
+        assert_eq!(game.cards[second].power(), second_old + power);
         assert!(game.players[0].pending_effects.is_empty());
     }
 

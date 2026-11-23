@@ -235,14 +235,26 @@ fn fantomex(game: &mut Game<'_>, card: usize) {
     {
         return;
     }
-    let targets: Vec<_> = game
-        .revealed_cards_in_resolution_order()
-        .into_iter()
-        .filter(|&id| game.cards[id].owner != owner && game.is_front_row(id))
-        .collect();
-    for target in targets {
+    for target in fantomex_targets(game, owner) {
         game.add_power(target, -2, owner);
     }
+}
+
+// GetLocations 0x7daed18 and Location::GetAllRevealedFrontRowCards 0x7ddf184
+// enumerate locations, then the opponent's card slots within each location.
+fn fantomex_targets(game: &Game<'_>, owner: usize) -> Vec<usize> {
+    let mut candidates: Vec<_> = if crate::cards::reference_rules_enabled() {
+        game.revealed_cards_in_resolution_order()
+    } else {
+        game.lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .collect()
+    };
+    candidates.retain(|&id| {
+        game.cards[id].owner != owner && game.cards[id].revealed && game.is_front_row(id)
+    });
+    candidates
 }
 
 #[derive(Clone, Default)]
@@ -775,6 +787,11 @@ mod tests {
         let enemy = game.create_card("Hulk", 1);
         game.add_card(card, 0, 0, true);
         game.add_card(enemy, 0, 1, true);
+        let right = game.create_card("Hulk", 1);
+        game.add_card(right, 2, 1, true);
+        game.cards[enemy].latest_resolution_order = 10;
+        game.cards[right].latest_resolution_order = 1;
+        assert_eq!(fantomex_targets(&game, 0), vec![enemy, right]);
         let power = game.cards[enemy].power();
         fantomex(&mut game, card);
         assert_eq!(game.cards[enemy].power(), power);

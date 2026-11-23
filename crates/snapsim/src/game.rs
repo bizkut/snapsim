@@ -334,11 +334,18 @@ impl Card {
 
     /// FantasticarBehavior::GetTargetCard (0x7ea7514), predicate 0x7ea7c8c.
     pub fn has_end_turn_trigger(&self) -> bool {
-        !self.abilities_removed
-            && self.abilities().any(|ability| {
-                ability.supports(AbilityKind::Trigger)
-                    && (ability.def.end_turn.is_some() || ability.def.end_turn_trigger)
-            })
+        self.abilities().any(|ability| {
+            let present = if cards::reference_rules_enabled() {
+                !self.abilities_removed
+            } else {
+                (ability.id.is_some() || !self.abilities_removed)
+                    && !ability.hidden
+                    && !ability.def.end_turn_trigger_hidden
+            };
+            present
+                && ability.supports(AbilityKind::Trigger)
+                && (ability.def.end_turn.is_some() || ability.def.end_turn_trigger)
+        })
     }
 
     /// Card::HasNoText (0x7cb3768) uses the effective client behavior

@@ -111,14 +111,22 @@ fn scarlet_spider(game: &mut Game<'_>, card: usize) {
         }
     }
     let copy = game.create_card("ScarletSpiderClone", owner);
-    let lanes: Vec<_> = (0..3)
-        .filter(|&lane| lane != origin && game.can_add(copy, lane, owner))
-        .collect();
-    if lanes.is_empty() {
+    let mut lanes = [0; 2];
+    let mut count = 0;
+    for lane in 0..3 {
+        if lane != origin && game.can_add(copy, lane, owner) {
+            lanes[count] = lane;
+            count += 1;
+        }
+    }
+    // GetRandomLocationToSpawnCard (0x7db2b64) falls back to all other
+    // locations when none can spawn, still consuming a random roll.
+    if count == 0 {
+        let _ = game.rng.borrow_mut().randbelow(2);
         game.cards.pop();
         return;
     }
-    let lane = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
+    let lane = lanes[game.rng.borrow_mut().randbelow(count)];
     game.cards[copy].permanent = power;
     game.cards[copy]
         .power_modifiers
@@ -282,6 +290,47 @@ mod tests {
             .unwrap();
         assert_eq!(clone.permanent, 3);
         assert_ne!(clone.lane, Some(0));
+    }
+
+    #[test]
+    fn scarlet_spider_rolls_fallback_when_spawns_are_blocked() {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(23);
+        let mut control_rng = PythonRandom::seed(23);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        let control = Game::new([&deck, &deck], &locations, &mut control_rng).unwrap();
+        let spider = game.create_card("ScarletSpider", 0);
+        let stardust = game.create_card("Stardust", 0);
+        game.add_card(spider, 0, 0, true);
+        game.add_card(stardust, 0, 0, true);
+        assert!(!game.spawns_allowed());
+        control.rng.borrow_mut().randbelow(2);
+        scarlet_spider(&mut game, spider);
+        assert!(
+            !game
+                .cards
+                .iter()
+                .any(|card| card.def.id == "ScarletSpiderClone")
+        );
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.rng.borrow_mut().randbelow(10000)
+        );
     }
 
     #[test]

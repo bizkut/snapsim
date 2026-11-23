@@ -749,14 +749,20 @@ fn stake_estimate(
         workers: 1,
         plays_only: false,
     };
-    let result = advise::advise_with_game(&position, &options, stopped, None, min_plan_samples)?;
+    let result = advise::advise_with_game(
+        &position,
+        &options,
+        stopped,
+        Some((game, player)),
+        min_plan_samples,
+    )?;
     if stopped() {
         return Err("stake estimate interrupted".into());
     }
     let plan = result["plans"]
         .as_array()
         .and_then(|plans| plans.first())
-        .ok_or_else(|| "stake estimate unavailable".to_owned())?;
+        .ok_or_else(|| format!("stake estimate unavailable: {}", result["unsupported"]))?;
     if let Some(stats) = stats {
         let candidates = result["policy_estimate_diagnostics"]["candidate_plans"]
             .as_u64()
@@ -840,6 +846,7 @@ fn stake_outcome(game: &Game<'_>, value: i64) -> StakeOutcome {
 #[allow(clippy::too_many_arguments)]
 fn stake_position_game(
     position: &Position,
+    frozen: Option<&position::FrozenGeneratedAbilities>,
     initial: StakeDecision,
     local_can_raise: bool,
     opponent: ThresholdStakePolicy,
@@ -858,7 +865,7 @@ fn stake_position_game(
         return Ok(StakeOutcome::Unavailable);
     }
     let mut random = PythonRandom::seed(seed);
-    let mut game = position::build_game(position, &mut random)?;
+    let mut game = position::build_game_with_generated(position, &mut random, frozen)?;
     game.stakes = Some(stakes);
     if initial == StakeDecision::Retreat && !game.can_retreat_seat(0, false) {
         return Ok(StakeOutcome::Unavailable);
@@ -985,6 +992,7 @@ fn stake_sample_value(total: i64, count: u32, unknown: u32, available: bool) -> 
 
 pub(crate) fn stake_position_sweep(
     position: &Position,
+    frozen: &position::FrozenGeneratedAbilities,
     samples: u32,
     policy_rollouts: usize,
     seed: i128,
@@ -1042,6 +1050,7 @@ pub(crate) fn stake_position_sweep(
                     }
                     let outcome = stake_position_game(
                         position,
+                        Some(frozen),
                         action,
                         eligible,
                         policy,
@@ -1795,8 +1804,10 @@ mod tests {
         let start = std::time::Instant::now();
         let limit = std::time::Duration::from_millis(100);
         let result =
-            super::stake_position_sweep(&position, 8, 64, 20_261_123, &|| start.elapsed() >= limit)
-                .unwrap();
+            super::stake_position_sweep(&position, &Default::default(), 8, 64, 20_261_123, &|| {
+                start.elapsed() >= limit
+            })
+            .unwrap();
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
         let scenarios = result["scenarios"].as_array().unwrap();
         assert!(scenarios.iter().any(|scenario| {
@@ -1879,12 +1890,35 @@ mod tests {
     }
 
     #[test]
+    fn stake_estimates_keep_generated_movement_legal_across_samples() {
+        let position: crate::position::Position = serde_json::from_value(json!({
+            "turn": 5, "energy": 0, "hand": [], "deck": [],
+            "locations": [
+                {"id":"Hala","mine":[{"id":"MrSinister"},{"id":"SinisterClone"}],"theirs":[]},
+                {"id":"TheHub","mine":[{"id":"Mirage"}],"theirs":[{"id":"Nightcrawler"},{"id":"Squirrel"},{"id":"SuperSkrull"}]},
+                {"id":"WakandanEmbassy","mine":[{"id":"RedOnslaught"},{"id":"Makkari"}],"theirs":[{"id":"AntMan"},{"id":"Squirrel"}]}
+            ],
+            "opponent":{"hand":4,"deck":3}
+        })).unwrap();
+        for seed in 0..16 {
+            let mut rng = crate::random::PythonRandom::seed(seed);
+            let game = crate::position::build_game(&position, &mut rng).unwrap();
+            for seat in 0..2 {
+                super::stake_estimate(&game, seat, None, 8, seed, 8, None, &|| false)
+                    .unwrap_or_else(|error| panic!("seed {seed}, seat {seat}: {error}"));
+            }
+        }
+    }
+
+    #[test]
     fn mephisto_stake_outcomes_are_declined_or_counted() {
         let mut position = crate::position::Position::default();
         position.locations[0]
             .mine
             .push(serde_json::from_value(json!({"id":"Mephisto"})).unwrap());
-        let result = super::stake_position_sweep(&position, 1, 32, 1, &|| false).unwrap();
+        let result =
+            super::stake_position_sweep(&position, &Default::default(), 1, 32, 1, &|| false)
+                .unwrap();
         assert_eq!(result["declined"], super::MEPHISTO_STAKE_REASON);
         assert_eq!(
             super::stake_sample_value(12, 19, 1, true).unwrap(),
@@ -2027,6 +2061,7 @@ mod tests {
             let mut stats = super::PolicyEstimateStats::default();
             let outcome = super::stake_position_game(
                 &position,
+                None,
                 super::StakeDecision::Snap,
                 true,
                 opponent,

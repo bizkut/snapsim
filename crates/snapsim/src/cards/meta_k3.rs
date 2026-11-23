@@ -1292,8 +1292,37 @@ mod tests {
         let enemy = game.create_card("Sunspot", 1);
         let vanilla = game.create_card("Hulk", 0);
         let horseman = game.create_card("PolarisHorseman", 0);
+        let hidden_default = game.create_card("SheHulk", 0);
+        let hidden_attached = game.create_card("Hulk", 0);
+        let visible_attached = game.create_card("Hulk", 0);
+        let sunspot = game.cards[ally].def;
+        for (target, hidden) in [(hidden_attached, true), (visible_attached, false)] {
+            game.cards[target].abilities_removed = true;
+            game.cards[target].composed_abilities.push(
+                crate::engine_ext::abilities::AbilityInstance::new(
+                    sunspot,
+                    crate::engine_ext::abilities::AbilityKind::Trigger,
+                    None,
+                    hidden,
+                    false,
+                    None,
+                ),
+            );
+        }
+        let hidden_default_before = game.cards[hidden_default].power();
+        let hidden_attached_before = game.cards[hidden_attached].power();
+        let visible_attached_before = game.cards[visible_attached].power();
         let horseman_before = game.cards[horseman].power();
-        for id in [source, ally, enemy, vanilla, horseman] {
+        for id in [
+            source,
+            ally,
+            enemy,
+            vanilla,
+            horseman,
+            hidden_default,
+            hidden_attached,
+            visible_attached,
+        ] {
             game.cards[id].lane = Some(1);
             game.cards[id].revealed = true;
             game.lanes[1].cards.push(id);
@@ -1303,6 +1332,12 @@ mod tests {
         assert_eq!(game.cards[ally].power(), before + 2);
         assert_eq!(game.cards[enemy].power(), before);
         assert_eq!(game.cards[horseman].power(), horseman_before);
+        assert_eq!(game.cards[hidden_default].power(), hidden_default_before);
+        assert_eq!(game.cards[hidden_attached].power(), hidden_attached_before);
+        assert_eq!(
+            game.cards[visible_attached].power(),
+            visible_attached_before + 2
+        );
     }
 
     #[test]

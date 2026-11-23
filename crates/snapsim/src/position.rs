@@ -1147,7 +1147,180 @@ pub(crate) fn monstro_cost_basis(position: &Position, card: &CardRef) -> Result<
     Ok(basis)
 }
 
+/// Randomly generated visible abilities are part of one observed position,
+/// not a fresh hidden-information deal for each rollout.
+#[derive(Default)]
+pub(crate) struct FrozenGeneratedAbilities {
+    cards: Vec<FrozenGeneratedCard>,
+}
+
+struct FrozenGeneratedCard {
+    lane: usize,
+    owner: usize,
+    slot: usize,
+    state: Option<Box<dyn crate::game::CardState>>,
+    abilities: Vec<crate::engine_ext::abilities::AbilityInstance>,
+    default_red: bool,
+    override_ability: Option<&'static CardDef>,
+    virtual_red: Vec<FrozenVirtualRed>,
+}
+
+struct FrozenVirtualRed {
+    source: (usize, usize, usize),
+    source_instance: Option<u64>,
+    ability: crate::engine_ext::abilities::AbilityInstance,
+    children: Vec<crate::engine_ext::abilities::AbilityInstance>,
+}
+
+impl FrozenGeneratedAbilities {
+    pub(crate) fn capture(game: &Game<'_>, seat: usize) -> Self {
+        let mut cards = Vec::new();
+        let identity = |id: usize| {
+            let card = &game.cards[id];
+            let lane = card.lane?;
+            let owner = usize::from(card.owner != seat);
+            let slot = game.lanes[lane]
+                .cards
+                .iter()
+                .copied()
+                .filter(|&other| {
+                    game.cards[other].owner == card.owner
+                        && (owner == 0 || game.cards[other].revealed)
+                })
+                .position(|other| other == id)?;
+            Some((lane, owner, slot))
+        };
+        for (lane, location) in game.lanes.iter().enumerate() {
+            for relative_owner in 0..2 {
+                let owner = if relative_owner == 0 { seat } else { 1 - seat };
+                for (slot, &id) in location
+                    .cards
+                    .iter()
+                    .filter(|&&id| {
+                        game.cards[id].owner == owner
+                            && (relative_owner == 0 || game.cards[id].revealed)
+                    })
+                    .enumerate()
+                {
+                    let card = &game.cards[id];
+                    let default_red = card.revealed && card.default_ability().id == "RedOnslaught";
+                    let virtual_red: Vec<_> = card
+                        .virtual_ongoing_ids
+                        .iter()
+                        .filter_map(|entry| {
+                            if entry.4.def.id != "RedOnslaught" {
+                                return None;
+                            }
+                            Some(FrozenVirtualRed {
+                                source: identity(entry.0)?,
+                                source_instance: entry.1,
+                                ability: entry.4.clone(),
+                                children: card
+                                    .composed_abilities
+                                    .iter()
+                                    .filter(|ability| {
+                                        ability.parent.is_some_and(|parent| parent.0 == entry.4.id)
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            })
+                        })
+                        .collect();
+                    if default_red || !virtual_red.is_empty() {
+                        cards.push(FrozenGeneratedCard {
+                            lane,
+                            owner: relative_owner,
+                            slot,
+                            state: card.state.clone(),
+                            abilities: card
+                                .composed_abilities
+                                .iter()
+                                .filter(|ability| {
+                                    ability.parent == Some((0, card.default_ability_generation))
+                                })
+                                .cloned()
+                                .collect(),
+                            default_red,
+                            override_ability: card.override_ability,
+                            virtual_red,
+                        });
+                    }
+                }
+            }
+        }
+        Self { cards }
+    }
+
+    fn apply(&self, game: &mut Game<'_>) {
+        fn board_card(game: &Game<'_>, identity: (usize, usize, usize)) -> Option<usize> {
+            let (lane, owner, slot) = identity;
+            game.lanes[lane]
+                .cards
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    game.cards[id].owner == owner && (owner == 0 || game.cards[id].revealed)
+                })
+                .nth(slot)
+        }
+        for source in &self.cards {
+            let Some(target) = board_card(game, (source.lane, source.owner, source.slot)) else {
+                continue;
+            };
+            let generation = game.cards[target].default_ability_generation;
+            if source.default_red {
+                game.cards[target].override_ability = source.override_ability;
+                game.cards[target].state = source.state.clone();
+                game.cards[target].composed_abilities = source
+                    .abilities
+                    .iter()
+                    .cloned()
+                    .map(|mut ability| {
+                        ability.origin = Some(target);
+                        ability.parent = Some((0, generation));
+                        ability
+                    })
+                    .collect();
+            }
+            for virtual_red in &source.virtual_red {
+                let Some(other) = board_card(game, virtual_red.source) else {
+                    continue;
+                };
+                let source_generation = if virtual_red.source_instance.is_none() {
+                    game.cards[other].default_ability_generation
+                } else {
+                    0
+                };
+                let mut ability = virtual_red.ability.clone();
+                ability.origin = Some(other);
+                ability.copied_from = Some((other, virtual_red.source_instance, source_generation));
+                game.cards[target].virtual_ongoing_ids.push((
+                    other,
+                    virtual_red.source_instance,
+                    source_generation,
+                    generation,
+                    ability,
+                ));
+                game.cards[target].composed_abilities.extend(
+                    virtual_red.children.iter().cloned().map(|mut child| {
+                        child.origin = Some(target);
+                        child
+                    }),
+                );
+            }
+        }
+    }
+}
+
 pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<Game<'a>, String> {
+    build_game_with_generated(position, rng, None)
+}
+
+pub(crate) fn build_game_with_generated<'a>(
+    position: &Position,
+    rng: &'a mut PythonRandom,
+    frozen: Option<&FrozenGeneratedAbilities>,
+) -> Result<Game<'a>, String> {
     if position.turn == 0 || position.turn > position.total_turns || position.hand.len() > 7 {
         return Err("invalid turn or hand size".into());
     }
@@ -1880,6 +2053,9 @@ pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<
         for &(card, _, basis) in &monstro {
             game.cards[card].cost = basis;
         }
+    }
+    if let Some(frozen) = frozen {
+        frozen.apply(&mut game);
     }
     game.ongoing();
     // The reader does not label ongoing rows. An observed row is removed only
