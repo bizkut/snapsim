@@ -420,20 +420,18 @@ fn black_vortex(game: &mut Game<'_>, lane: usize, event: Event) {
     if spent[seat] {
         return;
     }
-    // The consumed flags belong to this location instance. The transformed card's
-    // reveal can move it (Quake swaps whole lanes) or replace it (e.g. with Kyln),
-    // so mark the same state object wherever it is now, or nothing if it is gone.
-    let instance = std::ptr::from_ref(spent).cast::<()>();
     if let Some(id) = game.random_card(|row| row.cost == 6 && row.card_type == "Character") {
-        game.transform_card_without_modifiers(card, id);
-        if let Some(spent) = game.lanes.iter_mut().find_map(|lane| {
-            lane.state
-                .as_deref_mut()
-                .and_then(|state| state.as_any_mut().downcast_mut::<[bool; 2]>())
-                .filter(|flags| std::ptr::from_ref::<[bool; 2]>(flags).cast::<()>() == instance)
-        }) {
+        // Mark before transforming: the transformed card's reveal can move this
+        // location (Quake swaps whole lanes, carrying the flags) or replace it
+        // (e.g. with Kyln, dropping them), and the lane index is stale afterwards.
+        if let Some(spent) = game.lanes[lane]
+            .state
+            .as_deref_mut()
+            .and_then(|state| state.as_any_mut().downcast_mut::<[bool; 2]>())
+        {
             spent[seat] = true;
         }
+        game.transform_card_without_modifiers(card, id);
     }
 }
 
