@@ -2,7 +2,7 @@
 
 The MARVEL SNAP simulator behind Snapper-Assist: card and location rules, the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; everything added since comes from the game client's own rule definitions (Android 59.15.1), and every card in the nine SnapComplete decks of November 2026 (`decks/snapcomplete-2026-11.txt`) is supported. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
-Coverage (`snapsim coverage`, November 23, 2026): the registry holds 694 card IDs (572 of them deck-eligible; the rest are tokens, skills, spells and created cards) and 186 location IDs. Every released character in the catalog (560, including the 61 team and Champion variants) and every released location with an ID (182) is registered with client-derived rules; some unreleased catalog entries are not. Registration does not mean every restored mid-game position is exact: when a position depends on game state the readers do not export, strict advice declines and names that state (see the coverage audit). Mephisto's in-match power and play follow the client, but his extra winnings are applied server-side, so stake estimates decline when he may be in play.
+Coverage (`snapsim coverage`, November 23, 2026): the registry holds 694 card IDs (572 of them deck-eligible; the rest are tokens, skills, spells and created cards) and 186 location IDs. Every released character in the catalog (560, including the 61 team and Champion variants) and every released location with an ID (182) is registered with client-derived rules; some unreleased catalog entries are not. Registration does not mean every restored mid-game position is exact: when a position depends on game state the readers do not export, strict advice declines and names that state (see the coverage audit). Mephisto's in-match power and play follow the client, but his extra winnings are not modelled (no client rule found), so stake estimates decline when he may be in play.
 
 Documentation:
 
@@ -111,7 +111,7 @@ current/next values cannot uniquely establish the pending multiplier. The outer
 deadline and cancellation also stop nested stake-policy searches. An interrupted
 scenario is reported as `not_enough_time` rather than a partial estimate; work
 already inside an individual game operation can still finish after the deadline.
-Mephisto's extra winnings are server-side, with no client behavior definition:
+Mephisto's extra winnings are not modelled: no rule for them was found in the client's behaviour map or result builders, so the payout is presumably applied server-side (unverified):
 stake advice declines when he is observed in play or exceeds 5% of sampled
 end states. Otherwise it reports unknown sample counts and estimates from known
 outcomes. This does not prevent ordinary board advice.

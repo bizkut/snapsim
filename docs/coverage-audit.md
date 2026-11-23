@@ -1,6 +1,6 @@
 # Simulator coverage audit (M14 wave 5, stage 1)
 
-Generated 2026-11-22 from the website catalog (`data/cards.json`, `data/locations.json`), the 59.15.1 client descriptions (`snap-client/59.15.1/rules/carddefs.json`) and the simulator's `snapsim coverage` at `cb8e4d7409`. Released collectible characters: 497, supported 183, **unsupported 314**. Released locations: 183 (one catalog entry without an id excluded), supported 120, **unsupported 62**. Recordings: the owner's 60 matches in `Snapper-Assist/runs`.
+Generated 2026-11-22 from the website catalog (`data/cards.json`, `data/locations.json`), the 59.15.1 client descriptions (`snap-client/59.15.1/rules/carddefs.json`, not distributed) and the simulator's `snapsim coverage` at `cb8e4d7409`. Released collectible characters: 497, supported 183, **unsupported 314**. Released locations: 183 (one catalog entry without an id excluded), supported 120, **unsupported 62**. Recordings: a private corpus of 60 recorded matches (not distributed).
 
 Rows marked `text-only` retain provisional classifications from ability text and client descriptions. Rows marked `client-method` have been checked against the cited client methods; unsupported entries retain the reason they cannot be simulated exactly. Summary counts describe the original baseline, not the subsequently updated rows.
 
