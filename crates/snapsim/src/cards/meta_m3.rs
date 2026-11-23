@@ -150,6 +150,7 @@ fn red_hulk_fractured_frontier(game: &mut Game<'_>, card: usize) {
 
 // DiscardHand 0x7e78874 snapshots current-cost <=1 cards, discards each,
 // shuffles all revealed enemies and afflicts one per successful discard.
+// Game::DiscardCard 0x7dabe68 skips targets no longer in hand.
 fn bullseye(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let hand: Vec<_> = game.players[owner]
@@ -163,7 +164,7 @@ fn bullseye(game: &mut Game<'_>, card: usize) {
     }
     let discarded = hand
         .into_iter()
-        .filter(|&id| game.discard_card(owner, id))
+        .filter(|&id| game.players[owner].hand.contains(&id) && game.discard_card(owner, id))
         .count();
     let mut targets = game.revealed_cards_in_resolution_order();
     targets.retain(|&id| game.cards[id].owner != owner);
@@ -640,6 +641,44 @@ mod tests {
         bullseye(&mut game, card);
         assert!(game.players[0].discard.contains(&wasp));
         assert_eq!(game.cards[enemy].power(), power - 2);
+    }
+    #[test]
+    fn bullseye_skips_target_discarded_by_an_earlier_discard_trigger() {
+        let mut rng = PythonRandom::seed(9);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.players[0].hand.clear();
+        let cat = game.create_card("ZombieBlackCat", 0);
+        let swarm = game.create_card("Swarm", 0);
+        game.cards[cat].cost = 1;
+        game.add_hand(0, cat, false);
+        game.add_hand(0, swarm, false);
+        let card = game.create_card("Bullseye", 0);
+        game.add_card(card, 0, 0, true);
+        let enemies = [game.create_card("Hulk", 1), game.create_card("Hulk", 1)];
+        for &enemy in &enemies {
+            game.add_card(enemy, 0, 1, true);
+        }
+        let total_before: i32 = enemies.iter().map(|&id| game.cards[id].power()).sum();
+        bullseye(&mut game, card);
+        let total_after: i32 = enemies.iter().map(|&id| game.cards[id].power()).sum();
+        assert_eq!(game.players[0].discard_history.len(), 2);
+        assert_eq!(total_after, total_before - 2);
     }
 
     #[test]

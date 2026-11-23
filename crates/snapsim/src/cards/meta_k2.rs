@@ -310,12 +310,15 @@ fn destroyer(game: &mut Game<'_>, card: usize) {
 }
 
 // ModokBehavior::DiscardHand 0x7efd284 delegates to Player::DiscardHand
-// 0x7de78cc, which snapshots the hand before discarding.
+// 0x7de78cc, which snapshots the hand before discarding. Game::DiscardCard
+// 0x7dabe68 skips targets no longer in hand after an earlier discard trigger.
 fn modok(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let targets = game.players[owner].hand.clone();
     for target in targets {
-        game.discard_card(owner, target);
+        if game.players[owner].hand.contains(&target) {
+            game.discard_card(owner, target);
+        }
     }
 }
 
@@ -726,6 +729,24 @@ mod tests {
         modok(&mut g, source);
         assert!(g.players[0].hand.is_empty());
         assert_eq!(g.players[1].hand.len(), enemy_count);
+    }
+    #[test]
+    fn modok_skips_target_discarded_by_an_earlier_discard_trigger() {
+        let mut rng = PythonRandom::seed(1);
+        let mut g = setup(&mut rng);
+        let source = place(&mut g, "Modok", 0, 0);
+        let daken = place(&mut g, "Daken", 0, 1);
+        let power = g.cards[daken].power();
+        let cat = g.create_card("ZombieBlackCat", 0);
+        let shard = g.create_card("MuramasaShard", 0);
+        g.players[0].hand.clear();
+        g.players[0].hand.extend([cat, shard]);
+        modok(&mut g, source);
+        assert!(g.cards[cat].lane.is_some());
+        assert!(!g.players[0].hand.contains(&shard));
+        assert_eq!(g.players[0].discard_history.len(), 2);
+        assert!(g.players[0].hand.is_empty());
+        assert_eq!(g.cards[daken].power(), power * 2);
     }
     #[test]
     fn awesome_andy_buffs_one_revealed_ally_per_other_lane() {
