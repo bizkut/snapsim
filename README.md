@@ -275,6 +275,7 @@ When Stryfe uses a card's On Reveal, the borrowed reveal has its own temporary c
 Known approximations of client rules:
 
 * Random choices use the client's candidate set and number and order of rolls, but draw from `game.rng`; the client's own random stream is not reproduced.
+* Rogue Scion of Division's repeated self-copy is stopped once every highest-cost target already has the same text removed. The client repeats this no-op up to its 32-ability depth limit; the cutoff avoids exponential expansion but omits redundant random rolls, which can change subsequent random outcomes.
 * Effects that create random cards or locations draw only from implemented ones; the client draws from its full pools. Every released card and location is implemented, so this only matters for unreleased entries in the client's pools. Scarlet Witch Queen of Chaos's own pool is complete (13 curated and 11 collectible skills), so she matches the client's skill choice. Rama-Tut's pool is the client's hard-coded 107-card list (`data/past_years_pool.rs`).
 * Nico Minoru's location spell and Omniversal Presence pick locations uniformly, while the client weights the pick (`GetRandomLocationDefId`). Merging of power from the same source, the order of conditional Ongoing effects that depend on each other, and gaps left by cards that cannot shift are not modelled.
 * Visual-only abilities the client attaches (Tao Mandala, Zombie Galacti) are not modelled. `ReplacedCardDefId` follows the client's copy and clear paths, but no implemented card replaces another, so it is always empty.

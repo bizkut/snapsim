@@ -487,6 +487,16 @@ fn rogue_scion(game: &mut Game<'_>, card: usize) {
     if count == 0 {
         return;
     }
+    // StealTextFromOpponentHand (0x7f2b228) reactivates even identical text.
+    // Once every highest-cost target has already lost that same text, further
+    // activations cannot change the board. Cut this cycle before repeated
+    // reveals expand exponentially; the redundant random rolls are omitted.
+    if targets[..count].iter().all(|&target| {
+        game.cards[target].abilities_removed
+            && game.cards[target].default_ability().id == game.cards[card].default_ability().id
+    }) {
+        return;
+    }
     let target = targets[game.rng.borrow_mut().randbelow(count)];
     game.copy_text(card, target, false);
     game.remove_text(target);
@@ -1260,6 +1270,41 @@ mod tests {
             "IronMan"
         );
         assert!(game.cards[target].abilities_removed);
+    }
+    #[test]
+    fn rogue_scion_same_text_already_removed_terminates_repeated_reveals() {
+        let mut rng = PythonRandom::seed(1);
+        let deck = [
+            "Wasp",
+            "Cyclops",
+            "Hulk",
+            "Shocker",
+            "Medusa",
+            "Sentinel",
+            "Hawkeye",
+            "IronMan",
+            "MistyKnight",
+            "TheThing",
+            "Quicksilver",
+            "Abomination",
+        ]
+        .map(str::to_owned);
+        let lanes = ["KamarTaj", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let source = game.create_card("RogueScionOfDivision", 0);
+        let target = game.create_card("RogueScionOfDivision", 1);
+        game.cards[source].lane = Some(0);
+        game.cards[source].revealed = true;
+        game.lanes[0].revealed = true;
+        game.lanes[0].cards.push(source);
+        game.players[1].hand = vec![target];
+        game.trigger_text_reveal(source);
+        assert!(game.cards[target].abilities_removed);
+        assert!(!game.cards[source].abilities_removed);
+        assert_eq!(
+            game.cards[source].default_ability().id,
+            "RogueScionOfDivision"
+        );
     }
     #[test]
     fn copycat_copies_opponent_bottom_on_draw() {

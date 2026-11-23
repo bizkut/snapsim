@@ -763,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_rogue_resolve_stops_at_client_ability_depth_limit() {
+    fn mirrored_rogue_resolve_cuts_off_removed_same_text_cycle() {
         let mut rng = PythonRandom::seed(27);
         let mut game = super::super::test_game(&mut rng);
         let receiver = game.create_card("RogueScionOfDivision", 0);
@@ -775,7 +775,9 @@ mod tests {
         game.lanes[0].cards.push(receiver);
         game.trigger_on_reveal(receiver);
         assert!(game.cards[target].abilities_removed);
-        assert_eq!(game.cards[target].default_ability_generation, 32);
+        // The client repeats this no-op up to its depth limit; the simulator
+        // skips the redundant activations and their random draws.
+        assert_eq!(game.cards[target].default_ability_generation, 1);
         assert_eq!(game.ability_call_depth, 0);
         assert!(game.cards[receiver].ability_frames.is_empty());
     }
