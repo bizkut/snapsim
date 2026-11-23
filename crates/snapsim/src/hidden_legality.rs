@@ -754,6 +754,7 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     ("Hulk", Safe),
     ("MistyKnight", Safe),
     ("Monster", Safe),
+    ("Ninja", Safe),
     ("NicoMinoru", Safe),
     ("Raptor", Safe),
     ("Rock", Safe),
@@ -906,6 +907,7 @@ const LOCATION_HOOKS: &[(&str, Classification)] = &[
     ("Milano", Safe),
     ("MirrorDimension", Safe),
     ("MonsterIsland", Safe),
+    ("Shadowland", Safe), // reveal adds Ninjas; the resulting board is hydrated
     ("MuirIsland", Safe),
     ("Murderworld", Safe),
     ("Olympia", Safe),
@@ -1163,6 +1165,7 @@ mod tests {
                     | "Hulk"
                     | "MistyKnight"
                     | "Monster"
+                    | "Ninja"
                     | "NicoMinoru"
                     | "Raptor"
                     | "Rock"
@@ -1371,6 +1374,7 @@ mod tests {
                             | "Olympia"
                             | "SakaarTutorial"
                             | "SavageLand"
+                            | "Shadowland"
                             | "SubterraneaTutorial"
                             | "TheIceBox"
                             | "WakandanEmbassy"
