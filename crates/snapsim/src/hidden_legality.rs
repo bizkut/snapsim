@@ -664,6 +664,8 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     ("Starlord", Safe),
     // Movement, activation or current cost depends on unexported provenance.
     ("Electro", MayAffect),
+    ("JenniferKale", MayAffect),
+    ("KarimaShapandar", MayAffect),
     ("MadameWeb", MayAffect),
     ("Magus", MayAffect),
     ("Maverick", MayAffect),
@@ -676,63 +678,68 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     // The following hooks have not been proven independent of all hydrated
     // power, cost, move and composed-ability inputs.
     ("Agony", MayAffect),
-    ("Angela", MayAffect),
-    ("Armor", MayAffect),
-    ("Attuma", MayAffect),
-    ("BlueMarvel", MayAffect),
-    ("CaptainAmerica", MayAffect),
+    ("Angela", Safe), // on_play runs only after a card resolves
+    ("Armor", Safe), // visible destruction protection
+    ("Attuma", Safe), // end_turn only
+    // Ongoing power uses the visible board and active abilities.
+    ("BlueMarvel", Safe),
+    ("CaptainAmerica", Safe),
     ("CaptainCarter", MayAffect),
-    ("Colossus", MayAffect),
-    ("Cosmo", MayAffect),
+    ("Colossus", Safe), // visible protection flag
+    ("Cosmo", Safe), // visible reveal suppression
     ("Dagger", MayAffect),
     ("Daredevil", MayAffect),
     ("DevilDinosaur", MayAffect),
-    ("DraxAvatarOfLife", MayAffect),
+    ("DraxAvatarOfLife", Safe), // end_turn only
     ("EzekielSims", MayAffect),
     ("Galacta", MayAffect),
     ("Giganto", MayAffect),
-    ("Goliath", MayAffect),
+    ("Goliath", Safe),
     ("HighEvolutionary", MayAffect),
     ("HumanTorchFirstSteps", MayAffect),
-    ("IronMan", MayAffect),
-    ("Isca", MayAffect),
-    ("JJonahJameson", MayAffect),
+    ("IronMan", Safe),
+    ("Isca", Safe), // end_turn only
+    ("JJonahJameson", Safe), // cosmetic ongoing
     ("JoaquinTorres", MayAffect),
     ("JubileeSilverSurfer", MayAffect),
     ("JuggernautHorseman", MayAffect),
     ("Kang", MayAffect),
     ("Knull", MayAffect),
-    ("Lizard", MayAffect),
+    ("Lizard", Safe),
     ("LukeCage", MayAffect),
-    ("MrFantastic", MayAffect),
-    ("MrFantasticFirstSteps", MayAffect),
-    ("Namor", MayAffect),
+    ("MrFantastic", Safe),
+    ("MrFantasticFirstSteps", Safe), // end_turn only
+    ("Namor", Safe),
     ("Namorita", MayAffect),
     ("Nebula", MayAffect),
-    ("NicholasScratch", MayAffect),
-    ("Onslaught", MayAffect),
+    ("NicholasScratch", Safe), // on_play runs at resolution
+    // Late ongoing depends on lane-power resolution.
+    ("OmegaRed", MayAffect),
+    ("Onslaught", Safe), // multiplier derives from visible ongoing sources
     ("PowerStone", MayAffect),
-    ("ProfessorX", MayAffect),
-    ("Punisher", MayAffect),
-    ("Quicksilver", MayAffect),
-    ("ScarletWitchQueenOfChaos", MayAffect),
+    ("ProfessorX", Safe),
+    ("Punisher", Safe),
+    ("Quicksilver", Safe),
+    ("ScarletWitchQueenOfChaos", Safe), // start_turn only
     ("SebastianShaw", MayAffect),
+    // A clipped discount can hide the underlying permanent cost. Moving or
+    // suppressing Sera may expose it during this decision.
     ("Sera", MayAffect),
     ("ShangChiMasterOfTheRings", MayAffect),
-    ("SoulStone", MayAffect),
-    ("SpaceStone", MayAffect),
-    ("Stardust", MayAffect),
-    ("SuperiorSpiderMan", MayAffect),
-    ("Surge", MayAffect),
-    ("TenRings", MayAffect),
+    ("SoulStone", Safe), // active visible stone controls protection
+    ("SpaceStone", Safe), // active visible stone controls Thanos permission
+    ("Stardust", Safe),
+    ("SuperiorSpiderMan", Safe), // start_turn only
+    ("Surge", Safe), // reveal and on_play run at resolution
+    ("TenRings", Safe), // starting hand and reveal
     ("TenRingsUpgrade", MayAffect),
     ("Thanos", MayAffect),
-    ("ThanosFracturedFrontier", MayAffect),
+    ("ThanosFracturedFrontier", Safe), // game start and reveal
     ("TheCollector", MayAffect),
     ("TheThingFirstSteps", MayAffect),
     ("Topaz", MayAffect),
     ("VampireEnchantress", MayAffect),
-    ("VampireKillmonger", MayAffect),
+    ("VampireKillmonger", Safe), // end_turn only
     ("Venus", MayAffect),
     ("WinterSoldierThunderbolts", MayAffect),
     ("Wolverine", MayAffect),
@@ -758,6 +765,8 @@ const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
     ("ZombieHorde", Safe),
     // Reveals happen at resolution; resulting board and hand are hydrated.
     ("Agent13", Safe),
+    ("AntiVenom", Safe),
+    ("Mirage", Safe),
     ("AmericaChavez", Safe),
     ("BlackPanther", Safe),
     ("Blade", Safe),
@@ -1142,12 +1151,18 @@ mod tests {
             assert_eq!(
                 (d.reveal.is_some(), d.ongoing.is_some(), d.on_play.is_some()),
                 match id {
-                    "AntMan" | "KaZar" | "Klaw" => (false, true, false),
+                    "AntMan" | "KaZar" | "Klaw" | "BlueMarvel" | "CaptainAmerica"
+                    | "Goliath" | "IronMan" | "Lizard" | "MrFantastic" | "Namor"
+                    | "ProfessorX" | "Punisher" => (false, true, false),
                     "Squirrel" | "Broodling" | "Cyclops" | "Demon" | "Drone" | "Hulk"
                     | "MistyKnight" | "Monster" | "NicoMinoru" | "Raptor" | "Rock" | "Shocker"
-                    | "SinisterClone" | "Symbiote" | "TheThing" | "TigerSpirit" | "ZombieHorde" =>
-                        (false, false, false),
-                    "Bishop" => (false, false, true),
+                    | "SinisterClone" | "Symbiote" | "TheThing" | "TigerSpirit" | "ZombieHorde"
+                    | "Quicksilver" | "Stardust" | "Attuma" | "DraxAvatarOfLife" | "Isca"
+                    | "MrFantasticFirstSteps" | "VampireKillmonger"
+                    | "ScarletWitchQueenOfChaos" | "SuperiorSpiderMan" | "Armor"
+                    | "Colossus" | "Cosmo" | "JJonahJameson" | "Onslaught" => (false, false, false),
+                    "Bishop" | "Angela" | "NicholasScratch" => (false, false, true),
+                    "Surge" => (true, false, true),
                     _ => (true, false, false),
                 },
                 "{id}"
@@ -1166,48 +1181,49 @@ mod tests {
                         && d.move_limit == 0
                         && d.on_activate.is_none()
                         && !d.blocks_expensive_plays
-                        && !d.blocks_spawns
-                        && !d.locks_lane,
+                        && d.blocks_spawns == (id == "Stardust")
+                        && d.locks_lane == (id == "ProfessorX"),
                     "{id}"
                 );
                 assert!(
-                    d.pre_game_start.is_none()
+                    d.pre_game_start.is_some() == (id == "ThanosFracturedFrontier")
                         && d.in_hand_ongoing.is_none()
                         && d.late_in_hand_ongoing.is_none()
                         && d.conditional_in_hand_ongoing.is_none()
                         && d.objective_update.is_none()
                         && d.objective_freeze.is_none()
                         && d.late_ongoing.is_none()
-                        && !d.ongoing_ability
-                        && d.extra_ongoing_runs == 0
+                        && d.ongoing_ability == matches!(id, "Colossus" | "JJonahJameson" | "Onslaught" | "SoulStone" | "SpaceStone")
+                        && d.extra_ongoing_runs == u8::from(id == "Onslaught")
                         && d.reveal_repetitions.is_none()
                         && d.can_activate.is_none()
                         && d.activate_cost == 0
                         && !d.move_each_turn
                         && d.pre_end_turn.is_none()
-                        && d.end_turn.is_none()
+                        && d.end_turn.is_some() == matches!(id, "Attuma" | "DraxAvatarOfLife"
+                            | "Isca" | "MrFantasticFirstSteps" | "VampireKillmonger")
                         && !d.end_turn_in_hand
-                        && !d.end_turn_trigger
+                        && d.end_turn_trigger == d.end_turn.is_some()
                         && !d.end_turn_trigger_hidden
                         && d.on_move_here.is_none()
                         && d.on_move.is_none()
                         && d.on_destroy.is_none()
                         && d.on_discard.is_none()
                         && d.on_hand_added.is_none()
-                        && d.start_turn.is_none()
+                        && d.start_turn.is_some() == matches!(id, "ScarletWitchQueenOfChaos" | "SuperiorSpiderMan")
                         && d.post_start_turn.is_none()
                         && d.on_event.is_none()
                         && !d.event_active_when_unrevealed
                         && d.on_added.is_none()
-                        && d.initial_state.is_none()
+                        && d.initial_state.is_some() == matches!(id, "ScarletWitchQueenOfChaos" | "Surge")
                         && d.clear_reveal_state.is_none()
-                        && !d.blocks_reveal
+                        && d.blocks_reveal == (id == "Cosmo")
                         && !d.conceals_owner_cards
-                        && !d.prevents_destroy
+                        && d.prevents_destroy == (id == "Armor")
                         && d.destroy_guard.is_none()
                         && !d.blocks_draw_in_hand
-                        && !d.immune_destroy_move
-                        && !d.start_in_hand
+                        && d.immune_destroy_move == (id == "Colossus")
+                        && d.start_in_hand == (id == "TenRings")
                         && d.draw_turn.is_none(),
                     "{id}"
                 );
@@ -1353,6 +1369,14 @@ mod tests {
         }
         assert!(location_may_affect("Raft"));
         assert!(visible_card_may_affect("Morph"));
+        // Power Stone uses unexported play history, Sera can conceal permanent
+        // cost under its floor, and movement/activation counters need provenance.
+        for id in [
+            "PowerStone", "Sera", "Nightcrawler", "SpiderManBrandNewDay",
+            "JenniferKale", "KarimaShapandar",
+        ] {
+            assert!(visible_card_may_affect(id), "{id}");
+        }
         assert!(location_may_affect("not-a-location"));
         assert!(visible_card_may_affect("not-a-card"));
     }
