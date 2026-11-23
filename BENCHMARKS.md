@@ -18,11 +18,11 @@ Reproduce from a temporary directory after building the CLI and Python extension
 
 ```sh
 ROOT="$PWD"
-export PYTHONPATH=$SNAPSIM_REFERENCE
+export PYTHONPATH="$SNAPSIM_REFERENCE"
 export SNAPSIM_BIN="$ROOT/target-RustDeckbuild/release/snapsim"
-export SNAPSIM_PY_PATH=/tmp/snapsim-py-RustDeckbuild/snapsim_py.so
-cd /tmp
-$SNAPSIM_PYTHON "$ROOT/parity/deckbuild_bench.py"
+export SNAPSIM_PY_PATH="$ROOT/target-RustDeckbuild/release/snapsim_py.so"
+mkdir -p "$HOME/.cache/snapsim-work"; cd "$HOME/.cache/snapsim-work"
+"$SNAPSIM_PYTHON" "$ROOT/parity/deckbuild_bench.py"
 ```
 
 ## Advisor rollout comparison
@@ -42,9 +42,9 @@ Fixed-budget throughput was 8.25× higher with one worker and 7.09× with four. 
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
 crates/snapsim-py/build-module.sh
 ROOT="$PWD"
-cd /tmp
-PYTHONPATH=$SNAPSIM_REFERENCE \
-  $SNAPSIM_PYTHON \
+mkdir -p "$HOME/.cache/snapsim-work"; cd "$HOME/.cache/snapsim-work"
+PYTHONPATH="$SNAPSIM_REFERENCE" \
+  "$SNAPSIM_PYTHON" \
   "$ROOT/parity/bench_advisor.py" --rollouts 2000
 ```
 
@@ -74,12 +74,12 @@ Load averages (1, 5, 15 minutes), immediately before each measurement: Python sp
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_TARGET_DIR="$PWD/target"
 cargo build --release --bins
 ROOT="$PWD"
-mkdir -p /tmp/snapsim-bench
-cd /tmp/snapsim-bench
+mkdir -p "$HOME/.cache/snapsim-work/bench"
+cd "$HOME/.cache/snapsim-work/bench"
 for policy in spread margin; do
   uptime
-  PYTHONPATH=$SNAPSIM_REFERENCE \
-    $SNAPSIM_PYTHON \
+  PYTHONPATH="$SNAPSIM_REFERENCE" \
+    "$SNAPSIM_PYTHON" \
     "$ROOT/parity/corpus_bench.py" "$ROOT/parity/corpus-$policy.json" \
     --games 5000 --seed 20261119
   uptime
@@ -96,11 +96,12 @@ The full-Recruit game workload remains unmeasured in Rust; the advisor compariso
 Measured on Apple M4 Pro, 24 GiB RAM, macOS Darwin 27.2.0 arm64. The machine is shared; load averages immediately before measurement were 8.33, 8.91, 9.54. Results are a single run, not a controlled isolation or a statistical estimate. One Python process was used. Games include weighted Recruit deck sampling, setup and play; each game uses the seed both for its two deck samples and the independently seeded global game RNG. Both seats use the named policy. The advisor workload uses the fixed turn-3 position in `parity/turn3.json`, strict advice, spread playout, and `workers=1`.
 
 ```sh
-mkdir -p /tmp/snapsim-bench
-cd /tmp/snapsim-bench
-PYTHONPATH=$SNAPSIM_REFERENCE \
-  $SNAPSIM_PYTHON \
-  ./parity/python_bench.py \
+ROOT="$PWD"
+mkdir -p "$HOME/.cache/snapsim-work/bench"
+cd "$HOME/.cache/snapsim-work/bench"
+PYTHONPATH="$SNAPSIM_REFERENCE" \
+  "$SNAPSIM_PYTHON" \
+  "$ROOT/parity/python_bench.py" \
   --games 500 --rollouts 1000 --seed 20261119
 ```
 

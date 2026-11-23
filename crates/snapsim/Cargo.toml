@@ -2,6 +2,8 @@
 name = "snapsim"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "SnapSim: an unofficial MARVEL SNAP rules engine and rollout advisor"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

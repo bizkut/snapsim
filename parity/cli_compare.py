@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = Path('$SNAPSIM_REFERENCE')
+REFERENCE = Path(os.environ.get('SNAPSIM_REFERENCE') or sys.exit('Set SNAPSIM_REFERENCE to the frozen Python checkout'))
 BINARY = Path(os.environ.get('SNAPSIM_BIN', ROOT / 'target-RustDeckbuild/release/snapsim'))
 
 

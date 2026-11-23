@@ -37,6 +37,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('binary')
     parser.add_argument('--games', type=int, default=20)
+    parser.add_argument('--recorded-deck', type=Path, help='optional recorded selected-deck JSON')
     options = parser.parse_args()
     reference = Path(advise.__file__).parent
     hero = ','.join(recruit_card_pool()[:12])
@@ -50,9 +51,8 @@ def main():
         {'mode':'recruit', 'a_playout':'margin', 'b_playout':'spread', 'rollouts':4},
         {'mode':'recruit', 'a_rollouts':2, 'b_rollouts':4, 'rollouts':2, 'b_prior':'weighted'},
     ]
-    recorded = Path('$SNAPSIM_RUNS/20261119-044912-7d8396d1.deck.json')
-    if recorded.exists():
-        cases.append({'mode':'recruit', 'hero_deck':str(recorded), 'rollouts':2})
+    if options.recorded_deck:
+        cases.append({'mode':'recruit', 'hero_deck':str(options.recorded_deck), 'rollouts':2})
     tests = [('compare', {**common, **case}) for case in cases]
     tests.extend(('benchmark', {'mode':'recruit', 'games':2, 'seed':214, 'rollouts':2, 'opponent':opponent})
                  for opponent in ('spread', 'heuristic'))

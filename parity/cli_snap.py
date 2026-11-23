@@ -10,15 +10,18 @@ from deckcodes import encode_deck
 from snap_adapter import position_from_snap
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = Path('$SNAPSIM_REFERENCE')
-RUN = Path('$SNAPSIM_RUNS')
+REFERENCE = Path(os.environ.get('SNAPSIM_REFERENCE') or sys.exit('Set SNAPSIM_REFERENCE to the frozen Python checkout'))
+RUN = Path(os.environ.get('SNAPSIM_RUNS') or sys.exit('Set SNAPSIM_RUNS to the recordings directory'))
 BINARY = Path(os.environ.get('SNAPSIM_BIN', ROOT / 'target-RustDeckbuild/release/snapsim'))
 
 
 def main():
-    deck_path = RUN / '20261119-044912-7d8396d1.deck.json'
+    deck_path = next((path for path in sorted(RUN.glob('*.deck.json'))
+                      if path.with_name(path.name.removesuffix('.deck.json') + '.jsonl').is_file()), None)
+    if deck_path is None:
+        raise SystemExit('SNAPSIM_RUNS must contain a recording and its matching .deck.json')
     deck = json.loads(deck_path.read_text())['decks'][0]['card_ids']
-    with (RUN / '20261119-044912-7d8396d1.jsonl').open() as stream:
+    with deck_path.with_name(deck_path.name.removesuffix('.deck.json') + '.jsonl').open() as stream:
         for line in stream:
             row = json.loads(line)
             obs = row.get('envelope', {}).get('observation') if 'envelope' in row else row.get('observation', row)

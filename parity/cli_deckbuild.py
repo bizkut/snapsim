@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = Path('$SNAPSIM_REFERENCE/deckbuild.py')
+REFERENCE = Path(os.environ.get('SNAPSIM_REFERENCE') or sys.exit('Set SNAPSIM_REFERENCE to the frozen Python checkout')) / 'deckbuild.py'
 BINARY = Path(os.environ.get('SNAPSIM_BIN', ROOT / 'target-RustDeckbuild/release/snapsim'))
 CARDS = ['AntMan', 'Hawkeye', 'SquirrelGirl', 'Nightcrawler', 'Angela', 'Sentinel', 'Bishop', 'Wolfsbane', 'JessicaJones', 'KaZar', 'IronMan', 'Ultron']
 

@@ -17,10 +17,13 @@ def main():
     spec.loader.exec_module(rust)
     owned = sorted(deck_eligible_ids())[:13]
     base = owned[:12]
-    run = Path('$SNAPSIM_RUNS')
+    run = Path(os.environ.get('SNAPSIM_RUNS') or exit('Set SNAPSIM_RUNS to the recordings directory'))
     real_owned = json.loads((run / 'collection.json').read_text())
     real_saved = json.loads((run / 'decks.json').read_text())
-    selected = json.loads((run / '20261119-044912-7d8396d1.deck.json').read_text())
+    selected_path = next(iter(sorted(run.glob('*.deck.json'))), None)
+    if selected_path is None:
+        raise SystemExit('SNAPSIM_RUNS must contain a selected-deck .deck.json file')
+    selected = json.loads(selected_path.read_text())
     cases = [
         ({'owned': owned, 'seed': 42, 'workers': 1, 'confirm_rollouts': 1}, False),
         ({'owned': owned, 'base': base, 'cards': [owned[12]], 'seed': 42, 'workers': 1, 'confirm_rollouts': 1}, True),

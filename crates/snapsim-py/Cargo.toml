@@ -2,6 +2,8 @@
 name = "snapsim-py"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "SnapSim Python module (snapsim_py)"
 
 [lib]
 name = "snapsim_py"

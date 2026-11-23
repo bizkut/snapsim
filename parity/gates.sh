@@ -4,11 +4,11 @@
 # Builds go to target-gates, never the live target/release.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-REF=${SNAPSIM_REFERENCE:-$SNAPSIM_REFERENCE}
-PY=${SNAPSIM_PYTHON:-$SNAPSIM_PYTHON}
-RUNS=${SNAPSIM_RUNS:-$SNAPSIM_RUNS}
-SNAPS=${SNAPSIM_SNAPSHOTS:-$SNAPSIM_SNAPSHOTS}
-ORACLES=${SNAPSIM_ORACLES:-$HOME/.cache/snapsim-oracles}
+REF=${SNAPSIM_REFERENCE:?Set SNAPSIM_REFERENCE to the frozen Python checkout}
+PY=${SNAPSIM_PYTHON:?Set SNAPSIM_PYTHON to the Python interpreter with reference dependencies}
+RUNS=${SNAPSIM_RUNS:?Set SNAPSIM_RUNS to the recordings directory}
+SNAPS=${SNAPSIM_SNAPSHOTS:?Set SNAPSIM_SNAPSHOTS to the snapshots directory}
+ORACLES=${SNAPSIM_ORACLES:?Set SNAPSIM_ORACLES to the oracle directory}
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target-gates}
 export SNAPSIM_REFERENCE_POOL=1 SNAPSIM_REFERENCE_RULES=1
 T=$CARGO_TARGET_DIR/release
@@ -18,7 +18,8 @@ cargo build --release --quiet -p snapsim-cli
 crates/snapsim-py/build-module.sh > /dev/null
 export SNAPSIM_PY_PATH=$T/snapsim_py.so SNAPSIM_BIN=$T/snapsim
 gate() { local name=$1; shift; echo "== $name"; "$@"; }
-WORK=$(mktemp -d); cd "$WORK"
+mkdir -p "$HOME/.cache/snapsim-work"
+WORK=$(mktemp -d "$HOME/.cache/snapsim-work/gates.XXXXXXXX"); cd "$WORK"
 gate game-spread "$T/snapsim-parity" "$ROOT/parity/corpus-full-spread.json" "$ORACLES/snapsim-full/spread.jsonl"
 gate game-margin "$T/snapsim-parity" "$ROOT/parity/corpus-full-margin.json" "$ORACLES/snapsim-full/margin.jsonl"
 gate position "$T/snapsim-position-parity" "$ORACLES/snapsim-api/position.jsonl"
@@ -28,7 +29,9 @@ gate validation "$T/snapsim-validation-parity" "$ORACLES/snapsim-validation.json
 gate snap "$T/snapsim-snap-parity" "$ORACLES/snapsim-snap-oracle.jsonl"
 gate snap-binding env PYTHONPATH="$REF" "$PY" "$ROOT/parity/snap_binding.py" "$T/snapsim_py.so" "$ORACLES/snapsim-snap-oracle.jsonl"
 gate deckcodes env PYTHONPATH=$REF $PY $ROOT/parity/compare_deckcodes.py $T/snapsim-deckcodes-parity
-gate compare-harness env PYTHONPATH=$REF $PY $ROOT/parity/compare_harness.py $T/snapsim-compare-parity
+deck_files=("$RUNS"/*.deck.json)
+[[ -f "${deck_files[0]}" ]] || { echo "SNAPSIM_RUNS must contain a selected-deck .deck.json file" >&2; exit 1; }
+gate compare-harness env PYTHONPATH="$REF" "$PY" "$ROOT/parity/compare_harness.py" "$T/snapsim-compare-parity" --recorded-deck "${deck_files[0]}"
 gate deckbuild env PYTHONPATH=$REF $PY $ROOT/parity/deckbuild_compare.py
 gate cli-compare env PYTHONPATH=$REF $PY $ROOT/parity/cli_compare.py
 gate cli-deckbuild env PYTHONPATH=$REF $PY $ROOT/parity/cli_deckbuild.py

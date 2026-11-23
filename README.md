@@ -1,8 +1,8 @@
-# snapsim
+# SnapSim
 
 The MARVEL SNAP simulator behind Snapper-Assist: card and location rules, the rollout advisor, the SNAP observation adapter, the deck builder and the replay checker, with the `snapsim` command line and the `snapsim_py` Python module. It began as an exact port of the Python simulator (`Marvel-snap-simulator`), whose 84 deck cards, 10 tokens and 84 locations it still matches on the gates below; everything added since comes from the game client's own rule definitions (Android 59.15.1), and every card in the nine SnapComplete decks of November 2026 (`decks/snapcomplete-2026-11.txt`) is supported. Position validation also rejects integers too large for their Rust fields, which Python accepted. See "Python reference (frozen)" below.
 
-Coverage (`snapsim coverage`, simulator `1d55d61cb6`): 694 card definitions, of which 572 are deck-eligible and the rest tokens, skills, spells and created cards, and 186 locations. That includes every released character (560, including the 61 team and Champion variants and their skills) and every released location with an ID (182) in the catalog. Unreleased catalog entries are not all implemented. Mephisto's board behaviour is exact, but his extra winnings are applied server-side, so stake estimates decline when he may be in play.
+Coverage (`snapsim coverage`, November 23, 2026): the registry holds 694 card IDs (572 of them deck-eligible; the rest are tokens, skills, spells and created cards) and 186 location IDs. Every released character in the catalog (560, including the 61 team and Champion variants) and every released location with an ID (182) is registered with client-derived rules; some unreleased catalog entries are not. Registration does not mean every restored mid-game position is exact: when a position depends on game state the readers do not export, strict advice declines and names that state (see the coverage audit). Mephisto's in-match power and play follow the client, but his extra winnings are applied server-side, so stake estimates decline when he may be in play.
 
 Documentation:
 
@@ -18,6 +18,21 @@ The simulator has no HTTP server or web API. Use it as:
 * the Python module `snapsim_py` (see "Advisor and Python binding"), which Snapper-Assist loads in-process. Snapper-Assist hosts the web page and its own HTTP API.
 
 Write work files (benchmarks, replay reports, recorded cases) under a persistent folder such as `~/.cache/snapsim-work`, not `/tmp`. The examples below use `WORK="${WORK:-$HOME/.cache/snapsim-work}"`.
+
+## Environment
+
+Set these variables to local paths before running the examples or parity gates that need them:
+
+| Variable | Purpose |
+|---|---|
+| `SNAPSIM_REFERENCE` | Frozen Python simulator checkout; also set `PYTHONPATH="$SNAPSIM_REFERENCE"` for reference scripts |
+| `SNAPSIM_PYTHON` | Python interpreter with the reference dependencies installed |
+| `SNAPSIM_RUNS` | Snapper-Assist recordings directory |
+| `SNAPSIM_SNAPSHOTS` | SNAP snapshots directory |
+| `SNAPSIM_FIXTURES` | SNAP observation fixtures directory |
+| `SNAPSIM_ORACLES` | Directory for generated parity oracle files |
+
+The recorded-deck case in `parity/compare_harness.py` is optional; pass `--recorded-deck FILE` to include it.
 
 ## Command line
 
@@ -142,9 +157,9 @@ It writes `snapsim_py.so` next to the release build (`target/release/`, or `$CAR
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=6
 ROOT="$PWD"
 WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK"; cd "$WORK"
-PYTHONPATH=$SNAPSIM_REFERENCE \
-  $SNAPSIM_PYTHON "$ROOT/parity/record_advisor.py" \
-  "$WORK/snapsim-advisor.jsonl" --runs $SNAPSIM_RUNS
+PYTHONPATH="$SNAPSIM_REFERENCE" \
+  "$SNAPSIM_PYTHON" "$ROOT/parity/record_advisor.py" \
+  "$WORK/snapsim-advisor.jsonl" --runs "$SNAPSIM_RUNS"
 cargo run --manifest-path "$ROOT/Cargo.toml" --release --bin snapsim-advisor-parity -- "$WORK/snapsim-advisor.jsonl"
 ```
 
@@ -212,10 +227,10 @@ cases, and recorded SNAP observations (using `LocationWatch` and `DeckWatch`):
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK"
-PYTHONPATH=$SNAPSIM_REFERENCE \
-  $SNAPSIM_PYTHON \
+PYTHONPATH="$SNAPSIM_REFERENCE" \
+  "$SNAPSIM_PYTHON" \
   parity/position_record.py --games 1 --seeds 20 \
-  --recordings $SNAPSIM_RUNS \
+  --recordings "$SNAPSIM_RUNS" \
   > "$WORK/snapsim-position-cases.jsonl"
 cargo run --release -p snapsim --bin snapsim-position-parity -- \
   "$WORK/snapsim-position-cases.jsonl"
@@ -237,11 +252,11 @@ using the position and advisor recipes above, then run from an empty working dir
 ```sh
 ROOT="$PWD"
 WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK/validation"; cd "$WORK/validation"
-PYTHONPATH=$SNAPSIM_REFERENCE \
-  $SNAPSIM_PYTHON \
+PYTHONPATH="$SNAPSIM_REFERENCE" \
+  "$SNAPSIM_PYTHON" \
   "$ROOT/parity/validation_record.py" "$WORK/snapsim-validation.jsonl" \
   --corpus "$WORK/snapsim-position-cases.jsonl" --corpus "$WORK/snapsim-advisor.jsonl" \
-  --runs $SNAPSIM_RUNS
+  --runs "$SNAPSIM_RUNS"
 cargo run --manifest-path "$ROOT/Cargo.toml" --bin snapsim-validation-parity -- \
   "$WORK/snapsim-validation.jsonl"
 ```
@@ -258,8 +273,8 @@ ROOT="$PWD"
 WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK/bench"
 for policy in spread margin; do
   (cd "$WORK/bench" &&
-    PYTHONPATH=$SNAPSIM_REFERENCE \
-    $SNAPSIM_PYTHON \
+    PYTHONPATH="$SNAPSIM_REFERENCE" \
+    "$SNAPSIM_PYTHON" \
       "$ROOT/parity/record.py" "$ROOT/parity/corpus-full-$policy.json" \
       --games 1000 --seed 20261201 > "$WORK/snapsim-$policy.jsonl")
   "$ROOT/target/release/snapsim-parity" "$ROOT/parity/corpus-full-$policy.json" \
@@ -298,25 +313,25 @@ Two kinds of record are reported rather than compared:
 
 `parity/gates.sh` runs every gate in order and stops at the first failure (inputs: the recorder outputs listed in its header).
 
-The gate reads oracle files from `${SNAPSIM_ORACLES:-$HOME/.cache/snapsim-oracles}`.
+The gate reads oracle files from `$SNAPSIM_ORACLES`.
 To regenerate the historical six-run corpus (the recording directory has grown since
 the original run), execute from this repository:
 
 ```sh
 ROOT="$PWD"
-O="${SNAPSIM_ORACLES:-$HOME/.cache/snapsim-oracles}"
-RUNS=$SNAPSIM_RUNS
-SNAPS=$SNAPSIM_SNAPSHOTS
-FIXTURES=$SNAPSIM_FIXTURES
-PY=$SNAPSIM_PYTHON
-export PYTHONPATH=$SNAPSIM_REFERENCE
+O="$SNAPSIM_ORACLES"
+RUNS="$SNAPSIM_RUNS"
+SNAPS="$SNAPSIM_SNAPSHOTS"
+FIXTURES="$SNAPSIM_FIXTURES"
+PY="$SNAPSIM_PYTHON"
+export PYTHONPATH="$SNAPSIM_REFERENCE"
 export SNAPSIM_REFERENCE_POOL=1
 mkdir -p "$O/snapsim-full" "$O/snapsim-api" "$O/reference-runs"
 for f in "$RUNS"/20261118*.jsonl "$RUNS"/20261119*.jsonl \
          "$RUNS"/20261118*.deck.json "$RUNS"/20261119*.deck.json; do
   [ ! -e "$f" ] || ln -sf "$f" "$O/reference-runs/$(basename "$f")"
 done
-cd "$(mktemp -d)"
+mkdir -p "$HOME/.cache/snapsim-work"; cd "$(mktemp -d "$HOME/.cache/snapsim-work/oracle.XXXXXXXX")"
 for policy in spread margin; do
   "$PY" "$ROOT/parity/record.py" "$ROOT/parity/corpus-full-$policy.json" \
     --games 1000 --seed 20261201 > "$O/snapsim-full/$policy.jsonl"
@@ -355,8 +370,8 @@ The Python suite of the frozen checkout (360 tests) also passes against this mod
 Refresh data and regenerate RNG fixtures:
 
 ```sh
-python3 parity/refresh_data.py /path/to/Marvel-snap-simulator-advice
-$SNAPSIM_PYTHON parity/generate_rng_fixtures.py
+python3 parity/refresh_data.py "$SNAPSIM_REFERENCE"
+"$SNAPSIM_PYTHON" parity/generate_rng_fixtures.py
 cargo test --test random
 ```
 
@@ -368,8 +383,16 @@ Compare the registry with the reference worktree's implemented rules:
 cargo build --release --bin snapsim-inventory
 ROOT="$PWD"
 WORK="${WORK:-$HOME/.cache/snapsim-work}"; mkdir -p "$WORK/bench"; cd "$WORK/bench"
-PYTHONPATH=$SNAPSIM_REFERENCE \
-  $SNAPSIM_PYTHON "$ROOT/parity/inventory.py"
+PYTHONPATH="$SNAPSIM_REFERENCE" \
+  "$SNAPSIM_PYTHON" "$ROOT/parity/inventory.py"
 ```
 
 It lists every card and location the reference implemented and confirms none is missing here; everything else in the registry comes from the client (current totals under "Coverage" above). Set `CARGO_TARGET_DIR` if the inventory binary was built elsewhere.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+## Disclaimer
+
+SnapSim is an unofficial fan project. It is not affiliated with, endorsed by or sponsored by Marvel, Second Dinner or Nuverse. MARVEL SNAP and all related names, card names, card text, artwork and game data are trademarks and property of their respective owners. The card and location catalogs in `data/` (card text gathered from marvelsnapzone.com, and rule data derived from the game client) are included for interoperability and research; the licenses above cover SnapSim's own code and documentation, not that third-party material. Client method names and addresses in comments and docs are citations of evidence, not game code; the repository contains no game binaries, dumps or decompiled source.
