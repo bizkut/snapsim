@@ -151,10 +151,9 @@ fn king_eitri(game: &mut Game<'_>, card: usize) {
         .nth(pick)
         .map(|(slot, _)| slot)
         .expect("selected a counted created card");
-    if game.players[owner].hand.len() < 7 {
-        let target = game.take_deck(owner, slot);
-        game.add_hand(owner, target, true);
-    }
+    // DrawCreatedCard (0x7edf338) delegates to Player::DrawCard (0x7de7abc).
+    let target = game.players[owner].deck[slot];
+    game.draw_specific(owner, target);
 }
 
 fn zombie_reveal(game: &mut Game<'_>, card: usize) {
@@ -342,6 +341,22 @@ mod tests {
         }
         king_eitri(&mut game, source);
         assert!(game.players[0].deck.contains(&blocked));
+    }
+
+    #[test]
+    fn eitri_respects_draw_blocking_after_selecting_a_created_card() {
+        let mut rng = PythonRandom::seed(3);
+        let mut game = game(&mut rng);
+        let source = place(&mut game, "KingEitri", 0, 0, true);
+        game.players[0].hand.clear();
+        game.players[0].deck.clear();
+        let target = game.create_card("Hulk", 0);
+        game.players[0].deck.push(target);
+        let bite = game.create_card("WidowsBite", 0);
+        game.add_hand(0, bite, false);
+        king_eitri(&mut game, source);
+        assert!(game.players[0].deck.contains(&target));
+        assert!(!game.players[0].hand.contains(&target));
     }
 
     #[test]

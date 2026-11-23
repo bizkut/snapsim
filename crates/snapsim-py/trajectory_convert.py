@@ -230,6 +230,7 @@ def remask(paths, output_dir):
     illegal_cases = []
     counts = Counter()
     blockers = Counter()
+    reason_codes = Counter()
     for number in range(1, report["counts"]["shards"] + 1):
         shard = output_dir / f"trajectory-{number:06d}.npz"
         with np.load(shard, allow_pickle=False) as source:
@@ -276,9 +277,32 @@ def remask(paths, output_dir):
                 arrays["mask_reason"][index] = "visible_card_unknown"
                 counts["visible_card_unknown"] += 1
                 continue
+            # Inventory reasons are diagnostic only; a definition ID does not
+            # prove that the corresponding simulator effect was restored.
+            provenance = observation.get("game", {}).get("provenance")
+            if isinstance(provenance, dict) and isinstance(provenance.get("entities"), list):
+                for entity in provenance["entities"]:
+                    if not isinstance(entity, dict):
+                        reason_codes["provenance_entity_invalid"] += 1
+                        continue
+                    for name in ("abilities", "movable_components", "modifiers", "play_requirements"):
+                        inventory = entity.get(name)
+                        if inventory is None:
+                            continue
+                        if not isinstance(inventory, dict):
+                            reason_codes[f"provenance_{name}_invalid"] += 1
+                            continue
+                        if inventory.get("complete") is not True:
+                            reasons = inventory.get("reasons")
+                            if not isinstance(reasons, list) or not reasons:
+                                reason_codes[f"provenance_{name}_incomplete"] += 1
+                            else:
+                                for reason in set(r for r in reasons if isinstance(r, str)):
+                                    reason_codes[f"provenance_{name}_{reason}"] += 1
             gate_reasons = sim.snapshot_hidden_mask_gate(active, recruit_pool if use_recruit else pool, visible_ids)
             categories = set()
             for reason in gate_reasons:
+                reason_codes[reason] += 1
                 prefix = "hidden card has affecting or unreviewed hooks: "
                 if reason.startswith(prefix):
                     blockers[reason[len(prefix):]] += 1
@@ -297,10 +321,6 @@ def remask(paths, output_dir):
                     counts["blocker_" + category] += 1
                 arrays["mask_reason"][index] = "hidden_dependent" if "opponent_hidden" in categories else "provenance_unknown"
                 counts[str(arrays["mask_reason"][index])] += 1
-                continue
-            if not arrays["snap_flags_known"][index]:
-                arrays["mask_reason"][index] = "snap_state_unknown"
-                counts["snap_state_unknown"] += 1
                 continue
             try:
                 encoded = arrays["observation"][index]
@@ -345,7 +365,7 @@ def remask(paths, output_dir):
         counts.setdefault(name, 0)
     checked = counts["legal_actions_checked"]
     result = {"counts": dict(counts), "hidden_card_blockers": dict(blockers.most_common()),
-              "illegal_cases": illegal_cases,
+              "gate_reasons": dict(reason_codes.most_common()), "illegal_cases": illegal_cases,
               "legal_percent": 100 * counts["legal_actions"] / checked if checked else None}
     (output_dir / "remask-report.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result

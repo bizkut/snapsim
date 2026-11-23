@@ -1,5 +1,5 @@
 //! Location rules from the 59.15.1 client.
-use super::{LocationDef, location};
+use super::{CostUpdate, LocationDef, location};
 use crate::game::{Event, Game};
 
 pub const CAMELOT: LocationDef = LocationDef {
@@ -197,15 +197,11 @@ fn valley_of_the_hand(game: &mut Game<'_>, lane: usize) {
 
 // ReduceCardCost 0x7d541dc checks reveal/draw-completed context then
 // discounts each player's Hand::GetBottomCard by 2 during the reveal turn.
-fn fractured_frontier(game: &Game<'_>, lane: usize, card: usize, cost: i32) -> i32 {
+fn fractured_frontier(game: &Game<'_>, lane: usize, card: usize, _: i32) -> Option<CostUpdate> {
     let owner = game.cards[card].owner;
-    if game.lanes[lane].revealed_turn == Some(game.turn)
-        && game.players[owner].hand.last() == Some(&card)
-    {
-        cost - 2
-    } else {
-        cost
-    }
+    (game.lanes[lane].revealed_turn == Some(game.turn)
+        && game.players[owner].hand.last() == Some(&card))
+    .then_some(CostUpdate::Add(-2))
 }
 
 // AddEnergy 0x7d712c0 grants energy on reveal; LimitPlay 0x7d7177c
@@ -858,10 +854,13 @@ mod tests {
         game.players[0].hand = vec![first, last];
         game.turn = 3;
         game.lanes[0].revealed_turn = Some(3);
-        assert_eq!(fractured_frontier(&game, 0, first, 3), 3);
-        assert_eq!(fractured_frontier(&game, 0, last, 3), 1);
+        assert_eq!(fractured_frontier(&game, 0, first, 3), None);
+        assert_eq!(
+            fractured_frontier(&game, 0, last, 3),
+            Some(CostUpdate::Add(-2))
+        );
         game.turn = 4;
-        assert_eq!(fractured_frontier(&game, 0, last, 3), 3);
+        assert_eq!(fractured_frontier(&game, 0, last, 3), None);
     }
     #[test]
     fn valley_revives_graveyard_cards_after_turn_five() {

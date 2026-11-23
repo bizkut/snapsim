@@ -1,4 +1,4 @@
-use super::{LocationDef, location};
+use super::{CostUpdate, LocationDef, location};
 use crate::game::Game;
 
 pub const ASGARD: LocationDef = LocationDef {
@@ -308,11 +308,11 @@ fn madripoor(game: &mut Game<'_>, lane: usize) {
 fn not_turn_five(game: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
     game.turn != 5
 }
-fn dream(game: &Game<'_>, _: usize, _: usize, cost: i32) -> i32 {
-    cost + i32::from(game.turn == 5)
+fn dream(game: &Game<'_>, _: usize, _: usize, _: i32) -> Option<CostUpdate> {
+    (game.turn == 5).then_some(CostUpdate::Add(1))
 }
-fn elysium(_: &Game<'_>, _: usize, _: usize, cost: i32) -> i32 {
-    cost - 1
+fn elysium(_: &Game<'_>, _: usize, _: usize, _: i32) -> Option<CostUpdate> {
+    Some(CostUpdate::Add(-1))
 }
 // FloodingBehavior::MorphToFlooded (0x7d53b14) waits until after the reveal
 // turn; the frozen reference morphs immediately.

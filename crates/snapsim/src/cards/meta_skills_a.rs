@@ -280,10 +280,12 @@ fn rider_skill(game: &mut Game<'_>, card: usize) {
         let target = ties[game.rng.borrow_mut().randbelow(ties.len())];
         game.steal_power(target, champion, 5, owner);
     }
+    let owner_def_id = game.cards[card].executing_ability_def().id;
     game.cards[champion]
         .external_moves
         .push(crate::engine_ext::merge::CardMoveGrant {
             origin: card,
+            owner_def_id,
             start: game.turn,
             end: u8::MAX,
             remaining: Some(1),

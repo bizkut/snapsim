@@ -718,10 +718,12 @@ fn miek(game: &mut Game<'_>, card: usize, event: Event) {
     let turn = game.turn.saturating_add(1);
     // MiekBehavior::.cctor 0x7ef8860 constructs a hidden, zero-stack
     // MovableOngoingAbilityDef attached to Miek, not to the player.
+    let owner_def_id = game.cards[card].executing_ability_def().id;
     game.cards[card]
         .external_moves
         .push(crate::engine_ext::merge::CardMoveGrant {
             origin: card,
+            owner_def_id,
             start: turn,
             end: turn,
             remaining: None,

@@ -111,12 +111,14 @@ fn spdr(game: &mut Game<'_>, card: usize) {
     }
     let index = game.rng.borrow_mut().randbelow(choices.len());
     let target = choices[index];
+    let owner_def_id = game.cards[card].executing_ability_def().id;
     if game.merge_card(target, card) {
         let next_turn = game.turn.saturating_add(1);
         game.cards[target]
             .external_moves
             .push(crate::engine_ext::merge::CardMoveGrant {
                 origin: card,
+                owner_def_id,
                 start: next_turn,
                 end: next_turn,
                 remaining: None,
@@ -158,11 +160,13 @@ fn phoenix(game: &mut Game<'_>, card: usize) {
     while let Some(next) = game.cards[receiver].merged_to {
         receiver = next;
     }
+    let owner_def_id = game.cards[card].executing_ability_def().id;
     if game.merge_card(receiver, card) {
         game.cards[receiver]
             .external_moves
             .push(crate::engine_ext::merge::CardMoveGrant {
                 origin: card,
+                owner_def_id,
                 start: game.turn,
                 end: u8::MAX,
                 remaining: None,

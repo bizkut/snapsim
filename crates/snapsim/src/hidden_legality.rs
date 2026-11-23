@@ -642,6 +642,296 @@ fn hidden_hook_may_affect(def: &CardDef) -> bool {
     }
     *classification != Safe
 }
+// These reviews concern the already-restored private decision, not subsequent
+// reveals or turn transitions. Effects produced earlier must be hydrated and
+// independently pass the effect/provenance inventories below.
+const VISIBLE_CARD_HOOKS: &[(&str, Classification)] = &[
+    ("AntMan", Safe),
+    ("Hawkeye", Safe),
+    ("KaZar", Safe),
+    ("Klaw", Safe),
+    ("SquirrelGirl", Safe),
+    ("JessicaJones", Safe),
+    ("Medusa", Safe),
+    ("Squirrel", Safe),
+    ("Wolfsbane", Safe),
+    // Morph replaces its own definition with the copied card; an observed
+    // Morph alone does not prove what ability composition survived.
+    ("Morph", MayAffect),
+    ("Bishop", Safe),
+    ("Groot", Safe),
+    ("Ironheart", Safe),
+    ("Starlord", Safe),
+    // Movement, activation or current cost depends on unexported provenance.
+    ("Electro", MayAffect),
+    ("MadameWeb", MayAffect),
+    ("Magus", MayAffect),
+    ("Maverick", MayAffect),
+    ("Mockingbird", MayAffect),
+    ("Nightcrawler", MayAffect),
+    ("Sasquatch", MayAffect),
+    ("SpiderManBrandNewDay", MayAffect),
+    ("Vision", MayAffect),
+    ("ZombieCaptainMarvel", MayAffect),
+    // The following hooks have not been proven independent of all hydrated
+    // power, cost, move and composed-ability inputs.
+    ("Agony", MayAffect),
+    ("Angela", MayAffect),
+    ("Armor", MayAffect),
+    ("Attuma", MayAffect),
+    ("BlueMarvel", MayAffect),
+    ("CaptainAmerica", MayAffect),
+    ("CaptainCarter", MayAffect),
+    ("Colossus", MayAffect),
+    ("Cosmo", MayAffect),
+    ("Dagger", MayAffect),
+    ("Daredevil", MayAffect),
+    ("DevilDinosaur", MayAffect),
+    ("DraxAvatarOfLife", MayAffect),
+    ("EzekielSims", MayAffect),
+    ("Galacta", MayAffect),
+    ("Giganto", MayAffect),
+    ("Goliath", MayAffect),
+    ("HighEvolutionary", MayAffect),
+    ("HumanTorchFirstSteps", MayAffect),
+    ("IronMan", MayAffect),
+    ("Isca", MayAffect),
+    ("JJonahJameson", MayAffect),
+    ("JoaquinTorres", MayAffect),
+    ("JubileeSilverSurfer", MayAffect),
+    ("JuggernautHorseman", MayAffect),
+    ("Kang", MayAffect),
+    ("Knull", MayAffect),
+    ("Lizard", MayAffect),
+    ("LukeCage", MayAffect),
+    ("MrFantastic", MayAffect),
+    ("MrFantasticFirstSteps", MayAffect),
+    ("Namor", MayAffect),
+    ("Namorita", MayAffect),
+    ("Nebula", MayAffect),
+    ("NicholasScratch", MayAffect),
+    ("Onslaught", MayAffect),
+    ("PowerStone", MayAffect),
+    ("ProfessorX", MayAffect),
+    ("Punisher", MayAffect),
+    ("Quicksilver", MayAffect),
+    ("ScarletWitchQueenOfChaos", MayAffect),
+    ("SebastianShaw", MayAffect),
+    ("Sera", MayAffect),
+    ("ShangChiMasterOfTheRings", MayAffect),
+    ("SoulStone", MayAffect),
+    ("SpaceStone", MayAffect),
+    ("Stardust", MayAffect),
+    ("SuperiorSpiderMan", MayAffect),
+    ("Surge", MayAffect),
+    ("TenRings", MayAffect),
+    ("TenRingsUpgrade", MayAffect),
+    ("Thanos", MayAffect),
+    ("ThanosFracturedFrontier", MayAffect),
+    ("TheCollector", MayAffect),
+    ("TheThingFirstSteps", MayAffect),
+    ("Topaz", MayAffect),
+    ("VampireEnchantress", MayAffect),
+    ("VampireKillmonger", MayAffect),
+    ("Venus", MayAffect),
+    ("WinterSoldierThunderbolts", MayAffect),
+    ("Wolverine", MayAffect),
+    ("Wong", MayAffect),
+    ("ZombieBlade", MayAffect),
+    ("ZombieScarletWitch", MayAffect),
+    // Vanilla cards have no dispatched legality hook.
+    ("Broodling", Safe),
+    ("Cyclops", Safe),
+    ("Demon", Safe),
+    ("Drone", Safe),
+    ("Hulk", Safe),
+    ("MistyKnight", Safe),
+    ("Monster", Safe),
+    ("NicoMinoru", Safe),
+    ("Raptor", Safe),
+    ("Rock", Safe),
+    ("Shocker", Safe),
+    ("SinisterClone", Safe),
+    ("Symbiote", Safe),
+    ("TheThing", Safe),
+    ("TigerSpirit", Safe),
+    ("ZombieHorde", Safe),
+    // Reveals happen at resolution; resulting board and hand are hydrated.
+    ("Agent13", Safe),
+    ("AmericaChavez", Safe),
+    ("BlackPanther", Safe),
+    ("Blade", Safe),
+    ("Brood", Safe),
+    ("Cable", Safe),
+    ("Carnage", Safe),
+    ("Drax", Safe),
+    ("Elektra", Safe),
+    ("Elixir", Safe),
+    ("Forge", Safe),
+    ("Gamora", Safe),
+    ("GreenGoblin", Safe),
+    ("Hobgoblin", Safe),
+    ("Hood", Safe),
+    ("Iceman", Safe),
+    ("Kahhori", Safe),
+    ("KnightsVow", Safe),
+    ("Magik", Safe),
+    ("MajesticWingbeat", Safe),
+    ("MindStone", Safe),
+    ("MrSinister", Safe),
+    ("Nakia", Safe),
+    ("Odin", Safe),
+    ("Phastos", Safe),
+    ("Polaris", Safe),
+    ("Polymorph", Safe),
+    ("RemoteMines", Safe),
+    ("Selene", Safe),
+    ("Sentinel", Safe),
+    ("SilverSable", Safe),
+    ("SilverSurfer", Safe),
+    ("Spectrum", Safe),
+    ("Spell03Agamotto", Safe),
+    ("SpiderMan", Safe),
+    ("Stick", Safe),
+    ("SwordMaster", Safe),
+    ("TheHunger", Safe),
+    ("VampiricSpear", Safe),
+    ("VibroShockGauntlets", Safe),
+    ("WebSling", Safe),
+    ("WhiteTiger", Safe),
+    ("ZombieGiantMan", Safe),
+    ("Ultron", Safe),
+];
+
+const LOCATION_HOOKS: &[(&str, Classification)] = &[
+    // Energy at this decision is hydrated; this hook runs at turn start.
+    ("ReedsLab", Safe),
+    // The copy is produced on a later play, not at this decision.
+    ("Machineworld", Safe),
+    // A move can fire BeforeCardMoved and award a card; the consumed flag is
+    // not present in the restored position.
+    ("Raft", MayAffect),
+    // Current-turn, card-cost/power, or unconditional predicates only.
+    ("AvengersCompound", Safe),
+    ("CrimsonCosmos", Safe),
+    ("HellfireClub", Safe),
+    ("IslandPrison", Safe),
+    ("Kyln", Safe),
+    ("MiniaturizedLab", Safe),
+    ("NewYork", Safe),
+    ("PitOfExile", Safe),
+    ("SanctumSanctorum", Safe),
+    ("TheBigHouse", Safe),
+    ("Vault", Safe),
+    ("DreamDimension", Safe),
+    ("Elysium", Safe),
+    ("Titan", Safe),
+    ("Utopia", Safe),
+    // Sandbar reads card.created, which need not be exported.
+    ("TheSandbar", MayAffect),
+    ("Morag", MayAffect),
+    ("PetAvengersMansion", MayAffect),
+    ("TheAbbey", MayAffect),
+    // Remaining present hooks are retained conservatively until their full
+    // interactions with action staging and hydrated inputs are established.
+    ("AsteroidM", MayAffect),
+    ("Atlantis", MayAffect),
+    ("BarSinister", MayAffect),
+    ("BaxterBuilding", MayAffect),
+    ("CloningVats", MayAffect),
+    ("CrimsonCitadel", MayAffect),
+    ("CrownCity", MayAffect),
+    ("DarkDimension", MayAffect),
+    ("DeathsDomain", MayAffect),
+    ("FiskTower", MayAffect),
+    ("IsleOfSilence", MayAffect),
+    ("JosiesBar", MayAffect),
+    ("KamarTaj", MayAffect),
+    ("Knowhere", MayAffect),
+    ("KunLun", MayAffect),
+    ("LakeHellas", MayAffect),
+    ("Lemuria", MayAffect),
+    ("Limbo", MayAffect),
+    ("MonsterMetropolis", MayAffect),
+    ("OnslaughtsCitadel", MayAffect),
+    ("OrchisForge", MayAffect),
+    ("OttosLab", MayAffect),
+    ("Proscenium", MayAffect),
+    ("QuantumRealm", MayAffect),
+    ("QuantumTunnel", MayAffect),
+    ("ShurisLab", MayAffect),
+    ("SinisterLondon", MayAffect),
+    ("SpiderIsland", MayAffect),
+    ("TimeTheater", MayAffect),
+    ("TinkerersWorkshop", MayAffect),
+    ("Vormir", MayAffect),
+    ("Wakanda", MayAffect),
+    ("WashingtonDC", MayAffect),
+    // Static power only, or no effects.
+    ("Xandar", Safe),
+    ("NegativeZone", Safe),
+    ("Necrosha", Safe),
+    ("SewerSystem", Safe),
+    ("Ruins", Safe),
+    // These only dispatch on location reveal or at turn boundaries.
+    ("Asgard", Safe),
+    ("Attilan", Safe),
+    ("Bifrost", Safe),
+    ("Boardwalk", Safe),
+    ("CampLehigh", Safe),
+    ("CaveOfTheDragon", Safe),
+    ("CelestialCircuit", Safe),
+    ("CentralPark", Safe),
+    ("ChronosphereSphinx", Safe),
+    ("CollapsedMine", Safe),
+    ("Ebonshire", Safe),
+    ("EternityRange", Safe),
+    ("Genosha", Safe),
+    ("GrandCentral", Safe),
+    ("GreatPortal", Safe),
+    ("Hala", Safe),
+    ("HellsKitchen", Safe),
+    ("Jotunheim", Safe),
+    ("Klyntar", Safe),
+    ("Milano", Safe),
+    ("MirrorDimension", Safe),
+    ("MonsterIsland", Safe),
+    ("MuirIsland", Safe),
+    ("Murderworld", Safe),
+    ("Olympia", Safe),
+    ("OscorpTower", Safe),
+    ("PyramidOfRamaTut", Safe),
+    ("RocketPad", Safe),
+    ("SakaarTutorial", Safe),
+    ("SavageLand", Safe),
+    ("StarBrandCrater", Safe),
+    ("StarkIndustries", Safe),
+    ("StarkTower", Safe),
+    ("StrangeAcademy", Safe),
+    ("SubterraneaTutorial", Safe),
+    ("TaLo", Safe),
+    ("TheDeadlands", Safe),
+    ("TheIceBox", Safe),
+    ("ThunderboltsTower", Safe),
+    ("WakandanEmbassy", Safe),
+    ("Weirdworld", Safe),
+    ("WhitePalace", Safe),
+    ("WorldForge", Safe),
+    ("Yggdrasil", Safe),
+    ("ZennLa", Safe),
+];
+
+fn reviewed_may_affect(id: &str, table: &[(&str, Classification)]) -> bool {
+    !matches!(table.iter().find(|(name, _)| *name == id), Some((_, Safe)))
+}
+
+fn visible_card_may_affect(id: &str) -> bool {
+    cards::get(id).is_none() || reviewed_may_affect(id, VISIBLE_CARD_HOOKS)
+}
+
+fn location_may_affect(id: &str) -> bool {
+    crate::locations::get(id).is_none() || reviewed_may_affect(id, LOCATION_HOOKS)
+}
 
 /// Return invalid for unknown, unreviewed, or potentially affecting hidden sources.
 pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
@@ -650,8 +940,9 @@ pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
         Known::Unknown => reasons.push("visible card pool is unknown".into()),
         Known::Known(ids) => {
             for id in ids {
-                // No visible-card definitions have yet been reviewed for hidden reads.
-                reasons.push(format!("unknown or unreviewed visible card: {id}"));
+                if visible_card_may_affect(id) {
+                    reasons.push(format!("unknown or unreviewed visible card: {id}"));
+                }
             }
         }
     }
@@ -659,31 +950,8 @@ pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
         Known::Unknown => reasons.push("active locations are unknown".into()),
         Known::Known(ids) => {
             for id in ids {
-                match crate::locations::get(id) {
-                    Some(def)
-                        if def.on_reveal.is_none()
-                            && def.on_turn_start.is_none()
-                            && def.on_staging_end.is_none()
-                            && def.on_turn_end.is_none()
-                            && def.ongoing.is_none()
-                            && def.conditional_ongoing.is_none()
-                            && def.before_card_reveal.is_none()
-                            && def.after_card_play.is_none()
-                            && def.on_card_moved.is_none()
-                            && def.on_card_added.is_none()
-                            && def.on_event.is_none()
-                            && def.allows_play.is_none()
-                            && def.allows_play_with_count.is_none()
-                            && def.allows_play_globally_with_count.is_none()
-                            && def.allows_play_elsewhere.is_none()
-                            && def.allows_addition.is_none()
-                            && def.allows_move_from.is_none()
-                            && def.before_draw.is_none()
-                            && def.grants_move_to.is_none()
-                            && def.energy_bonus.is_none()
-                            && def.modify_cost.is_none()
-                            && def.prevents_retreat.is_none() => {}
-                    _ => reasons.push(format!("unknown or unreviewed active location: {id}")),
+                if location_may_affect(id) {
+                    reasons.push(format!("unknown or unreviewed active location: {id}"));
                 }
             }
         }
@@ -776,6 +1044,230 @@ pub fn check_hidden_pool(inputs: &Inputs<'_>) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reviewed_visible_hook_inventory_does_not_drift() {
+        for &(id, classification) in VISIBLE_CARD_HOOKS {
+            let d = cards::get(id).unwrap();
+            if classification != Safe {
+                continue;
+            }
+            assert_eq!(
+                (d.reveal.is_some(), d.ongoing.is_some(), d.on_play.is_some()),
+                match id {
+                    "AntMan" | "KaZar" | "Klaw" => (false, true, false),
+                    "Squirrel" | "Broodling" | "Cyclops" | "Demon" | "Drone" | "Hulk"
+                    | "MistyKnight" | "Monster" | "NicoMinoru" | "Raptor" | "Rock" | "Shocker"
+                    | "SinisterClone" | "Symbiote" | "TheThing" | "TigerSpirit" | "ZombieHorde" =>
+                        (false, false, false),
+                    "Bishop" => (false, false, true),
+                    _ => (true, false, false),
+                },
+                "{id}"
+            );
+            if classification == Safe {
+                assert!(
+                    d.can_play.is_none()
+                        && d.ongoing_play_guard.is_none()
+                        && d.global_play_guard.is_none()
+                        && d.modify_final_cost.is_none()
+                        && d.cost_guard.is_none()
+                        && !d.grants_unrestricted_hand_plays
+                        && d.grants_move_from.is_none()
+                        && d.grants_move_globally.is_none()
+                        && d.blocks_player_move.is_none()
+                        && d.move_limit == 0
+                        && d.on_activate.is_none()
+                        && !d.blocks_expensive_plays
+                        && !d.blocks_spawns
+                        && !d.locks_lane,
+                    "{id}"
+                );
+                assert!(
+                    d.pre_game_start.is_none()
+                        && d.in_hand_ongoing.is_none()
+                        && d.late_in_hand_ongoing.is_none()
+                        && d.conditional_in_hand_ongoing.is_none()
+                        && d.objective_update.is_none()
+                        && d.objective_freeze.is_none()
+                        && d.late_ongoing.is_none()
+                        && !d.ongoing_ability
+                        && d.extra_ongoing_runs == 0
+                        && d.reveal_repetitions.is_none()
+                        && d.can_activate.is_none()
+                        && d.activate_cost == 0
+                        && !d.move_each_turn
+                        && d.pre_end_turn.is_none()
+                        && d.end_turn.is_none()
+                        && !d.end_turn_in_hand
+                        && !d.end_turn_trigger
+                        && !d.end_turn_trigger_hidden
+                        && d.on_move_here.is_none()
+                        && d.on_move.is_none()
+                        && d.on_destroy.is_none()
+                        && d.on_discard.is_none()
+                        && d.on_hand_added.is_none()
+                        && d.start_turn.is_none()
+                        && d.post_start_turn.is_none()
+                        && d.on_event.is_none()
+                        && !d.event_active_when_unrevealed
+                        && d.on_added.is_none()
+                        && d.initial_state.is_none()
+                        && d.clear_reveal_state.is_none()
+                        && !d.blocks_reveal
+                        && !d.conceals_owner_cards
+                        && !d.prevents_destroy
+                        && d.destroy_guard.is_none()
+                        && !d.blocks_draw_in_hand
+                        && !d.immune_destroy_move
+                        && !d.start_in_hand
+                        && d.draw_turn.is_none(),
+                    "{id}"
+                );
+            }
+        }
+        for (index, (id, _)) in VISIBLE_CARD_HOOKS.iter().enumerate() {
+            assert!(
+                !VISIBLE_CARD_HOOKS[..index]
+                    .iter()
+                    .any(|(other, _)| other == id)
+            );
+        }
+        for (index, (id, classification)) in LOCATION_HOOKS.iter().enumerate() {
+            let d = crate::locations::get(id).unwrap();
+            assert!(!LOCATION_HOOKS[..index].iter().any(|(other, _)| other == id));
+            if *classification == Safe {
+                assert!(
+                    d.on_staging_end.is_none()
+                        && d.on_event.is_none()
+                        && d.on_card_moved.is_none()
+                        && d.on_card_added.is_none()
+                        && d.allows_play_with_count.is_none()
+                        && d.allows_play_globally_with_count.is_none()
+                        && !d.blocks_activate,
+                    "{id}"
+                );
+                assert_eq!(
+                    d.allows_play.is_some(),
+                    matches!(
+                        *id,
+                        "CrimsonCosmos"
+                            | "HellfireClub"
+                            | "Kyln"
+                            | "PitOfExile"
+                            | "SanctumSanctorum"
+                            | "TheBigHouse"
+                            | "Vault"
+                    ),
+                    "{id}"
+                );
+                assert_eq!(
+                    d.allows_play_elsewhere.is_some(),
+                    *id == "AvengersCompound",
+                    "{id}"
+                );
+                assert_eq!(
+                    d.allows_addition.is_some(),
+                    *id == "MiniaturizedLab",
+                    "{id}"
+                );
+                assert_eq!(d.allows_move_from.is_some(), *id == "IslandPrison", "{id}");
+                assert_eq!(d.grants_move_to.is_some(), *id == "NewYork", "{id}");
+                assert_eq!(
+                    d.modify_cost.is_some(),
+                    matches!(*id, "DreamDimension" | "Elysium" | "Titan" | "Utopia"),
+                    "{id}"
+                );
+                assert_eq!(d.after_card_play.is_some(), *id == "Machineworld", "{id}");
+                assert_eq!(d.energy_bonus.is_some(), *id == "ReedsLab", "{id}");
+                assert!(
+                    d.ongoing.is_none()
+                        && d.conditional_ongoing.is_none()
+                        && d.before_card_reveal.is_none()
+                        && d.before_draw.is_none()
+                        && d.prevents_retreat.is_none()
+                        && d.initial_state.is_none()
+                        && !d.no_destroy
+                        && !d.delays_reveals
+                        && !d.delays_reveals_until_end
+                        && !d.disables_ongoing
+                        && !d.disables_on_reveal
+                        && d.reveal_energy == 0
+                        && d.reveal_repeats == 1
+                        && d.ongoing_repeats == 1
+                        && d.minimum_turns == 0
+                        && d.maximum_turns == 0
+                        && !d.contributes_to_other_lanes,
+                    "{id}"
+                );
+                assert_eq!(
+                    d.on_turn_start.is_some(),
+                    matches!(*id, "MirrorDimension" | "StarBrandCrater" | "WorldForge"),
+                    "{id}"
+                );
+                assert_eq!(
+                    d.on_reveal.is_some(),
+                    matches!(
+                        *id,
+                        "CampLehigh"
+                            | "CentralPark"
+                            | "ChronosphereSphinx"
+                            | "CollapsedMine"
+                            | "Ebonshire"
+                            | "GreatPortal"
+                            | "HellsKitchen"
+                            | "Milano"
+                            | "MonsterIsland"
+                            | "Olympia"
+                            | "SakaarTutorial"
+                            | "SavageLand"
+                            | "SubterraneaTutorial"
+                            | "TheIceBox"
+                            | "WakandanEmbassy"
+                            | "Weirdworld"
+                            | "WhitePalace"
+                            | "ZennLa"
+                    ),
+                    "{id}"
+                );
+                assert_eq!(
+                    d.on_turn_end.is_some(),
+                    matches!(
+                        *id,
+                        "Asgard"
+                            | "Attilan"
+                            | "Bifrost"
+                            | "Boardwalk"
+                            | "CaveOfTheDragon"
+                            | "CelestialCircuit"
+                            | "CollapsedMine"
+                            | "EternityRange"
+                            | "Genosha"
+                            | "GrandCentral"
+                            | "Hala"
+                            | "Jotunheim"
+                            | "Klyntar"
+                            | "MuirIsland"
+                            | "Murderworld"
+                            | "OscorpTower"
+                            | "PyramidOfRamaTut"
+                            | "RocketPad"
+                            | "StarkIndustries"
+                            | "StarkTower"
+                            | "StrangeAcademy"
+                            | "TaLo"
+                            | "TheDeadlands"
+                            | "ThunderboltsTower"
+                            | "Yggdrasil"
+                    ),
+                    "{id}"
+                );
+            }
+        }
+        assert!(location_may_affect("Raft"));
+        assert!(visible_card_may_affect("Morph"));
+        assert!(location_may_affect("not-a-location"));
+        assert!(visible_card_may_affect("not-a-card"));
+    }
 
     #[test]
     fn every_hidden_hook_card_is_in_review_table() {
@@ -1027,6 +1519,12 @@ mod tests {
             move_source_provenance: Known::Known(&[]),
         };
         assert_eq!(check_hidden_pool(&inputs), Result::Valid);
+        inputs.visible_cards = Known::Known(&["AntMan", "Hawkeye", "Squirrel"]);
+        inputs.active_locations = Known::Known(&["ReedsLab", "Machineworld"]);
+        assert_eq!(check_hidden_pool(&inputs), Result::Valid);
+        inputs.active_locations = Known::Known(&["Raft"]);
+        assert!(matches!(check_hidden_pool(&inputs), Result::Invalid { .. }));
+        inputs.active_locations = Known::Known(&[]);
         inputs.move_source_provenance = Known::Unknown;
         assert!(matches!(check_hidden_pool(&inputs), Result::Invalid { .. }));
         inputs.move_source_provenance = Known::Known(&[]);

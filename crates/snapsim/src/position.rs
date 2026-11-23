@@ -492,6 +492,73 @@ pub struct ObservedStakes {
     pub last_raiser: Option<usize>,
 }
 
+/// Privacy-filtered client provenance. Completeness is asserted independently
+/// for each entity and list; absence of the field is not an empty list.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Provenance {
+    pub schema_version: u32,
+    pub entities: Vec<ProvenanceEntity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceList<T> {
+    pub complete: bool,
+    pub reasons: Vec<String>,
+    pub items: Vec<T>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceEntity {
+    pub kind: String,
+    pub entity_id: i64,
+    pub card_id: Option<String>,
+    pub lane_index: Option<usize>,
+    pub abilities: ProvenanceList<ProvenanceAbility>,
+    pub movable_components: ProvenanceList<ProvenanceMoveComponent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<ProvenanceList<ProvenanceModifier>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_requirements: Option<ProvenanceList<ProvenancePlayRequirement>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceModifier {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub operation: String,
+    pub amount: i32,
+    pub creator_entity_id: Option<i64>,
+    pub owner_def_type: String,
+    pub owner_def_id: String,
+    pub player_entity_id: i64,
+    pub turn_created: Option<u32>,
+    pub expiry_turn: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenancePlayRequirement {
+    pub def_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceAbility {
+    pub ability_def_id: String,
+    pub owner_def_type: String,
+    pub owner_def_id: String,
+    pub index: u32,
+    pub turn_created: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProvenanceMoveComponent {
+    pub source_entity_id: i64,
+    pub owner_def_type: String,
+    pub owner_def_id: String,
+    pub ability_index: u32,
+    pub created_ticks: String,
+    pub destination_entity_id: i64,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Position {
     pub turn: u8,
@@ -531,6 +598,8 @@ pub struct Position {
     pub history: Option<ObservedHistory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_turn_locations: Option<PreviousTurnLocations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 impl Position {

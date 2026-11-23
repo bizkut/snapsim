@@ -27,7 +27,22 @@ pub type MoveHook = fn(&mut Game<'_>, usize, usize, usize);
 pub type PlayPredicate = fn(&Game<'_>, usize, usize, usize, usize) -> bool;
 pub type GlobalCountPlayPredicate = fn(&Game<'_>, usize, usize, usize) -> bool;
 pub type EnergyHook = fn(&Game<'_>, usize, usize) -> i32;
-pub type CostHook = fn(&Game<'_>, usize, usize, i32) -> i32;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CostUpdate {
+    Add(i32),
+    Set(i32),
+}
+
+impl CostUpdate {
+    pub(crate) fn apply(self, cost: i32) -> i32 {
+        match self {
+            Self::Add(delta) => cost + delta,
+            Self::Set(value) => value,
+        }
+    }
+}
+
+pub type CostHook = fn(&Game<'_>, usize, usize, i32) -> Option<CostUpdate>;
 pub type DrawHook = fn(&mut Game<'_>, usize, usize) -> Option<usize>;
 
 pub struct LocationDef {

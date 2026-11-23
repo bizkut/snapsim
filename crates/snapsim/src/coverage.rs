@@ -336,6 +336,43 @@ fn resolved_source_possible(position: &Position, id: &str) -> bool {
                     .any(|action| action.card_id == id && action.kind == "play" && action.resolved)
             })
 }
+
+/// Whether observed or potentially borrowed movable components lack their
+/// original ability-owner identity and consumption context.
+pub(crate) fn move_source_provenance_unknown(position: &Position) -> bool {
+    if cards::reference_rules_enabled() {
+        return false;
+    }
+    let borrowed_grant_possible = resolved_source_possible(position, "Stryfe");
+    position
+        .locations
+        .iter()
+        .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
+        .filter(|card| card.revealed)
+        .any(|card| {
+            let can_offer_move = card
+                .move_targets
+                .as_ref()
+                .is_none_or(|targets| !targets.is_empty());
+            if !can_offer_move {
+                return false;
+            }
+            let copied_text = matches!(card.id.as_str(), "Copycat" | "Stryfe");
+            let foreign_movable = card.ability_state.as_ref().is_some_and(|state| {
+                state.abilities.iter().any(|ability| {
+                    ability.ability_def_id.contains("Movable")
+                        && !ability.ability_def_id.starts_with(&card.id)
+                })
+            });
+            let movable_augment = card.augments.as_ref().is_some_and(|augments| {
+                augments
+                    .items
+                    .iter()
+                    .any(|augment| augment.id == "MoveableAugment")
+            });
+            copied_text || foreign_movable || movable_augment || borrowed_grant_possible
+        })
+}
 // Restored observations do not contain MovableByPlayerComponent.CreatedTimestamp
 // (FindMovableByPlayerSource 0x7c9d9ec). Include possible unexported grants,
 // rather than sampling a hidden game and treating it as authoritative.
@@ -512,6 +549,12 @@ pub fn coverage(position: &Position) -> Value {
     if !cards::reference_rules_enabled() && move_source_tie_possible(position) {
         extra_state.insert(
             "move_source_tie_unknown: MovableByPlayerComponent.CreatedTimestamp not exported"
+                .to_owned(),
+        );
+    }
+    if move_source_provenance_unknown(position) {
+        extra_state.insert(
+            "move_source_provenance_unknown: copied movable ability owner and stack not exported"
                 .to_owned(),
         );
     }
@@ -2680,6 +2723,31 @@ mod location_change_tests {
             ..Default::default()
         });
         assert!(coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn copied_move_source_provenance_is_gated_only_when_movement_possible() {
+        let mut position = Position {
+            turn: 3,
+            ..Position::default()
+        };
+        position.locations[0].mine.push(crate::position::CardRef {
+            id: "Copycat".into(),
+            revealed: true,
+            move_targets: Some(vec![1]),
+            ..Default::default()
+        });
+        assert!(move_source_provenance_unknown(&position));
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("move_source_provenance_unknown")
+        );
+        position.locations[0].mine[0].move_targets = Some(Vec::new());
+        assert!(!move_source_provenance_unknown(&position));
+        position.locations[0].mine[0].id = "Wasp".into();
+        position.locations[0].mine[0].move_targets = Some(vec![1]);
+        assert!(!move_source_provenance_unknown(&position));
     }
 
     #[test]

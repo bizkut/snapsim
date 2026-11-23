@@ -460,6 +460,7 @@ pub enum Action {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MoveSource {
     Intrinsic,
+    Attached(usize),
     External(usize),
     Player(usize),
     Passive(&'static str),
@@ -1858,7 +1859,8 @@ impl<'a> Game<'a> {
                 && let Some(hook) = location.def.modify_cost
             {
                 self.record_location_hook(lane, "modify_cost");
-                let next = hook(self, lane, card, current);
+                let next =
+                    hook(self, lane, card, current).map_or(current, |update| update.apply(current));
                 if self.cost_change_allowed(card, current, next) {
                     reductions += (current - next).max(0);
                     current = next;
@@ -2692,7 +2694,8 @@ impl<'a> Game<'a> {
                     && let Some(hook) = location.def.modify_cost
                 {
                     self.record_location_hook(lane, "modify_cost");
-                    let next = hook(self, lane, card, cost);
+                    let next =
+                        hook(self, lane, card, cost).map_or(cost, |update| update.apply(cost));
                     if self.cost_change_allowed(card, cost, next) {
                         cost = next;
                     }
@@ -3202,6 +3205,27 @@ impl<'a> Game<'a> {
                 impact: (1, u8::MAX, target.default_ability().move_limit, None),
             });
         }
+        {
+            for (index, ability) in target.composed_abilities.iter().enumerate() {
+                if ability.kind == AbilityKind::Ongoing
+                    && (if ability.hidden {
+                        self.lanes[source].ability_flags.hidden_ongoing
+                    } else {
+                        self.lanes[source].ability_flags.ongoing
+                    })
+                    && (ability.player_moves_used < ability.def.move_limit
+                        || ability.def.move_each_turn
+                            && ability.player_move_turn != Some(self.turn))
+                {
+                    consider(MoveCandidate {
+                        source: MoveSource::Attached(index),
+                        priority: card_priority(ability.def.id),
+                        order_group: 3,
+                        impact: (4, u8::MAX, ability.def.move_limit, Some(index)),
+                    });
+                }
+            }
+        }
         if self.lanes[source].ability_flags.hidden_ongoing {
             for (index, grant) in target.external_moves.iter().enumerate() {
                 if grant.start <= self.turn
@@ -3210,7 +3234,7 @@ impl<'a> Game<'a> {
                 {
                     consider(MoveCandidate {
                         source: MoveSource::External(index),
-                        priority: card_priority(self.cards[grant.origin].def.id),
+                        priority: card_priority(grant.owner_def_id),
                         order_group: 1,
                         impact: (
                             if grant.remaining.is_some() { 2 } else { 0 },
@@ -3373,6 +3397,18 @@ impl<'a> Game<'a> {
             && (target.player_moves_used < target.default_ability().move_limit
                 || target.default_ability().move_each_turn
                     && target.player_move_turn != Some(self.turn)))
+            || (!cards::reference_rules_enabled()
+                && target.composed_abilities.iter().any(|ability| {
+                    ability.kind == AbilityKind::Ongoing
+                        && (if ability.hidden {
+                            self.lanes[source].ability_flags.hidden_ongoing
+                        } else {
+                            self.lanes[source].ability_flags.ongoing
+                        })
+                        && (ability.player_moves_used < ability.def.move_limit
+                            || ability.def.move_each_turn
+                                && ability.player_move_turn != Some(self.turn))
+                }))
             || ((if cards::reference_rules_enabled() {
                 !self.lanes[source].revealed || !self.lanes[source].def.disables_ongoing
             } else {
@@ -3468,6 +3504,16 @@ impl<'a> Game<'a> {
                 }
                 if self.cards[card].default_ability().move_each_turn {
                     self.cards[card].player_move_turn = Some(self.turn);
+                }
+                None
+            }
+            Some(MoveSource::Attached(index)) => {
+                let ability = &mut self.cards[card].composed_abilities[index];
+                if ability.def.move_limit > 0 {
+                    ability.player_moves_used = ability.player_moves_used.saturating_add(1);
+                }
+                if ability.def.move_each_turn {
+                    ability.player_move_turn = Some(self.turn);
                 }
                 None
             }
@@ -3780,10 +3826,11 @@ impl<'a> Game<'a> {
                 let (selected, _) = self.select_move_source(card, lane, seat);
                 self.last_move_source = selected.map(|source| match source {
                     MoveSource::Intrinsic => self.cards[card].default_ability().id,
+                    MoveSource::Attached(index) => {
+                        self.cards[card].composed_abilities[index].def.id
+                    }
                     MoveSource::External(index) => {
-                        self.cards[self.cards[card].external_moves[index].origin]
-                            .default_ability()
-                            .id
+                        self.cards[card].external_moves[index].owner_def_id
                     }
                     MoveSource::Player(index) => self.players[seat].move_grants[index]
                         .owner_def_id
@@ -5302,8 +5349,15 @@ impl<'a> Game<'a> {
                             let card = self.players[seat].hand[index];
                             let cost = self.cards[card].cost + self.cards[card].ongoing_cost;
                             self.record_location_hook(lane, "modify_cost");
-                            let next = hook(self, lane, card, cost);
-                            self.add_ongoing_cost(card, next - cost, seat);
+                            match hook(self, lane, card, cost) {
+                                Some(locations::CostUpdate::Add(delta)) => {
+                                    self.add_ongoing_cost(card, delta, seat);
+                                }
+                                Some(locations::CostUpdate::Set(value)) => {
+                                    self.set_ongoing_cost(card, value, seat);
+                                }
+                                None => {}
+                            }
                         }
                     }
                 }

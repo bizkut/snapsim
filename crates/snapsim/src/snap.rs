@@ -764,6 +764,11 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         options["deck_added"].as_array().map(Vec::as_slice),
     );
     let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    if version == Some(2)
+        && let Some(provenance) = game.get("provenance")
+    {
+        position["provenance"] = provenance.clone();
+    }
     // Cube state is opt-in so existing adapter consumers retain their JSON contract.
     if options["include_stakes"] == true
         && let (Some(current), Some(next)) = (
@@ -1082,6 +1087,42 @@ mod tests {
         assert!(hidden["locations"][0].get("history_state").is_none());
         observation["schema_version"] = json!(3);
         assert!(position_from_snap(&observation, &json!({})).is_err());
+    }
+
+    #[test]
+    fn v2_provenance_round_trips_without_changing_older_positions() {
+        let mut observation = prior_observation();
+        let provenance = json!({"schema_version":1,"entities":[{
+            "kind":"card","entity_id":42,"card_id":"Nightcrawler","lane_index":null,
+            "abilities":{"complete":true,"reasons":[],"items":[{
+                "ability_def_id":"NightcrawlerMove","owner_def_type":"Card",
+                "owner_def_id":"Nightcrawler","index":0,"turn_created":null}]},
+            "movable_components":{"complete":true,"reasons":[],"items":[{
+                "source_entity_id":42,"owner_def_type":"Card","owner_def_id":"Nightcrawler",
+                "ability_index":0,"created_ticks":"638000000000000000",
+                "destination_entity_id":11}]},
+            "modifiers":{"complete":true,"reasons":[],"items":[{
+                "type":"CardCostModifier","operation":"Add","amount":-1,
+                "creator_entity_id":null,"owner_def_type":"Card","owner_def_id":"Beast",
+                "player_entity_id":10,"turn_created":null,"expiry_turn":null}]},
+            "play_requirements":{"complete":false,"reasons":["redacted"],"items":[]}
+        }]});
+        observation["game"]["provenance"] = provenance.clone();
+        assert!(
+            position_from_snap(&observation, &json!({}))
+                .unwrap()
+                .get("provenance")
+                .is_none()
+        );
+        observation["schema_version"] = json!(2);
+        let value = position_from_snap(&observation, &json!({})).unwrap();
+        assert_eq!(value["provenance"], provenance);
+        let parsed: crate::position::Provenance =
+            serde_json::from_value(value["provenance"].clone()).unwrap();
+        assert_eq!(
+            parsed.entities[0].movable_components.items[0].created_ticks,
+            "638000000000000000"
+        );
     }
 
     #[test]

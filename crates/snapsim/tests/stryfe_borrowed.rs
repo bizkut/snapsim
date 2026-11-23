@@ -410,8 +410,9 @@ fn baron_mordo_targets_stryfes_opponents_top_card() {
     let top = game.create_card("Wasp", 0);
     game.players[0].deck = vec![top];
     borrow(&mut game, "BaronMordo");
+    // SetCardCost (0x7e6ed1c) applies only before TurnNumber 6.
     assert!(game.players[0].cost_effects.iter().any(|effect|
-        matches!(effect.kind, PlayerCostEffectKind::BaronMordo { card, until: 6, value: 6 } if card == top)));
+        matches!(effect.kind, PlayerCostEffectKind::BaronMordo { card, until: 5, value: 6 } if card == top)));
     assert!(game.players[1].cost_effects.is_empty());
     game.players[0].hand.push(top);
     game.ongoing();

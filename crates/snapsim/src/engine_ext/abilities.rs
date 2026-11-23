@@ -28,6 +28,8 @@ pub struct AbilityInstance {
     pub(crate) parent: Option<(u64, u64)>,
     pub hidden: bool,
     pub reentrant: bool,
+    pub(crate) player_moves_used: u8,
+    pub(crate) player_move_turn: Option<u8>,
     pub state: Option<Box<dyn CardState>>,
 }
 
@@ -49,6 +51,8 @@ impl AbilityInstance {
             parent: None,
             hidden,
             reentrant,
+            player_moves_used: 0,
+            player_move_turn: None,
             state,
         }
     }
@@ -162,14 +166,17 @@ impl Card {
                         || ability.state.as_deref(),
                         |frame| self.ability_frames[frame.root].state.as_deref(),
                     );
-                AbilityInstance::new(
+                let mut copy = AbilityInstance::new(
                     ability.def,
                     ability.kind,
                     ability.origin,
                     ability.hidden,
                     ability.reentrant,
                     state.map(CardState::clone_box),
-                )
+                );
+                copy.player_moves_used = ability.player_moves_used;
+                copy.player_move_turn = ability.player_move_turn;
+                copy
             })
             .collect();
         for index in 0..copies.len() {
@@ -202,6 +209,17 @@ impl Card {
     /// Return the effective default definition, excluding attached instances.
     pub fn default_ability(&self) -> &'static CardDef {
         self.abilities().next().unwrap().def
+    }
+
+    pub(crate) fn executing_ability_def(&self) -> &'static CardDef {
+        self.ability_frames
+            .last()
+            .and_then(|frame| {
+                self.composed_abilities
+                    .iter()
+                    .find(|ability| ability.id == frame.instance)
+            })
+            .map_or_else(|| self.default_ability(), |ability| ability.def)
     }
 
     /// Iterate the effective default text followed by independently attached abilities.
@@ -561,6 +579,7 @@ mod tests {
             .external_moves
             .push(super::super::merge::CardMoveGrant {
                 origin: card,
+                owner_def_id: "Wasp",
                 start: 1,
                 end: u8::MAX,
                 remaining: None,
@@ -1034,5 +1053,97 @@ mod tests {
             ));
         assert!(game.copy_text(second, source, false));
         assert!(game.cards[second].composed_abilities.is_empty());
+    }
+
+    #[test]
+    fn copied_attached_move_source_preserves_definition_and_stack() {
+        let mut rng = PythonRandom::seed(21);
+        let mut game = super::super::test_game(&mut rng);
+        game.turn = 1;
+        let original = game.create_card("Wasp", 0);
+        let origin = game.create_card("Stryfe", 0);
+        game.cards[original]
+            .composed_abilities
+            .push(AbilityInstance::new(
+                crate::cards::get("Nightcrawler").unwrap(),
+                AbilityKind::Ongoing,
+                Some(origin),
+                true,
+                false,
+                None,
+            ));
+        let copy = game.copy_card(original, 0);
+        game.add_card(copy, 0, 0, false);
+        assert!(game.can_player_move(copy, 1, 0));
+        game.stage_action(
+            0,
+            crate::game::Action::Move {
+                card: copy,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(game.last_move_source, Some("Nightcrawler"));
+        assert_eq!(game.cards[copy].composed_abilities[0].player_moves_used, 1);
+        assert_eq!(
+            game.cards[original].composed_abilities[0].player_moves_used,
+            0
+        );
+        let later_copy = game.copy_card(copy, 0);
+        assert_eq!(
+            game.cards[later_copy].composed_abilities[0].player_moves_used,
+            1
+        );
+    }
+
+    #[test]
+    fn copied_external_grant_retains_ability_owner_after_source_changes() {
+        let mut rng = PythonRandom::seed(22);
+        let mut game = super::super::test_game(&mut rng);
+        game.turn = 1;
+        let source = game.create_card("Stryfe", 0);
+        let original = game.create_card("Nightcrawler", 0);
+        game.cards[original]
+            .external_moves
+            .push(super::super::merge::CardMoveGrant {
+                origin: source,
+                owner_def_id: "Cloak",
+                start: 1,
+                end: 2,
+                remaining: None,
+            });
+        let copy = game.copy_card(original, 0);
+        game.add_card(copy, 0, 0, false);
+        game.stage_action(
+            0,
+            crate::game::Action::Move {
+                card: copy,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(game.last_move_source, Some("Cloak"));
+        assert_eq!(game.cards[copy].player_moves_used, 0);
+    }
+
+    #[test]
+    fn copied_default_text_uses_original_movement_definition() {
+        let mut rng = PythonRandom::seed(23);
+        let mut game = super::super::test_game(&mut rng);
+        game.turn = 1;
+        let copycat = game.create_card("Copycat", 0);
+        let source = game.create_card("Nightcrawler", 0);
+        assert!(game.copy_text(copycat, source, false));
+        game.add_card(copycat, 0, 0, false);
+        game.stage_action(
+            0,
+            crate::game::Action::Move {
+                card: copycat,
+                lane: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(game.last_move_source, Some("Nightcrawler"));
+        assert_eq!(game.cards[copycat].player_moves_used, 1);
     }
 }

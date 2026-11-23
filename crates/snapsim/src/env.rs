@@ -61,6 +61,7 @@ pub struct Env {
     visible_actions: [usize; 2],
     pending_stakes: [Option<StakeRequest>; 2],
     omitted_tie_moves: Cell<u64>,
+    move_source_provenance_unknown: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +127,9 @@ impl Env {
             visible_actions: [0; 2],
             pending_stakes: [None; 2],
             omitted_tie_moves: Cell::new(0),
+            move_source_provenance_unknown: crate::coverage::move_source_provenance_unknown(
+                position,
+            ),
             outcome: None,
         })
     }
@@ -164,6 +168,7 @@ impl Env {
             visible_actions: [0; 2],
             pending_stakes: [None; 2],
             omitted_tie_moves: Cell::new(0),
+            move_source_provenance_unknown: false,
             outcome: None,
         })
     }
@@ -260,6 +265,7 @@ impl Env {
             visible_actions: self.visible_actions,
             pending_stakes: self.pending_stakes,
             omitted_tie_moves: Cell::new(self.omitted_tie_moves.get()),
+            move_source_provenance_unknown: self.move_source_provenance_unknown,
         }
     }
 
@@ -301,6 +307,9 @@ impl Env {
     pub fn legal_mask(&self, seat: usize) -> Result<[bool; ACTION_COUNT], String> {
         if seat >= 2 {
             return Err("invalid seat".into());
+        }
+        if self.move_source_provenance_unknown {
+            return Err("move_source_provenance_unknown".into());
         }
         let view = self.view(seat)?;
         let mask = self.mask_for_view(seat, view);
@@ -693,6 +702,20 @@ mod tests {
     }
 
     #[test]
+    fn self_play_never_inherits_restored_move_provenance_gate() {
+        let decks = decks();
+        let mut env = Env::reset(17, [&decks[0], &decks[1]], false).unwrap();
+        assert!(!env.move_source_provenance_unknown);
+        let card = env.views[0].create_card("Copycat", 0);
+        env.views[0].add_card(card, 0, 0, false);
+        assert!(env.legal_mask(0).is_ok());
+        assert!(env.legal_mask(1).is_ok());
+        let snapshot = env.snapshot();
+        assert!(!snapshot.move_source_provenance_unknown);
+        assert!(snapshot.legal_mask(0).is_ok());
+    }
+
+    #[test]
     fn restored_position_has_local_planning_mask() {
         let position: crate::position::Position = serde_json::from_value(serde_json::json!({
             "turn": 1, "energy": 1,
@@ -722,6 +745,36 @@ mod tests {
         assert!(env.seats_due()[0]);
         assert_eq!(env.observation(0).unwrap().hand[0].id, "AntMan");
         assert!(env.legal_mask(0).unwrap()[END_TURN]);
+    }
+
+    #[test]
+    fn restored_unknown_copied_move_source_invalidates_mask() {
+        let position: crate::position::Position = serde_json::from_value(serde_json::json!({
+            "turn": 3, "energy": 3, "hand": [], "deck": [], "deck_count": 0,
+            "locations": [
+                {"id": "Mojoworld", "mine": [{"id": "Copycat", "revealed": true, "move_targets": [1]}], "theirs": []},
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        })).unwrap();
+        let stakes = Stakes {
+            current: 1,
+            next: 1,
+            maximum: 8,
+            can_raise: true,
+            player_multiplier: [1; 2],
+            end_game_multiplier: 1,
+            game_multiplier: 1,
+            snapped: [false; 2],
+            last_raiser: None,
+            pending_retreat: [false; 2],
+        };
+        let env = Env::from_sampled_position(&position, stakes, 1).unwrap();
+        assert_eq!(
+            env.legal_mask(0),
+            Err("move_source_provenance_unknown".into())
+        );
     }
 
     #[test]

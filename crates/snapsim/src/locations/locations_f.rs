@@ -1,5 +1,5 @@
 //! Location rules from the 59.15.1 client.
-use super::{LocationDef, location};
+use super::{CostUpdate, LocationDef, location};
 use crate::game::Game;
 
 pub const JOTUNHEIM: LocationDef = LocationDef {
@@ -29,8 +29,8 @@ fn jotunheim(game: &mut Game<'_>, lane: usize) {
 }
 
 // UtopiaBehavior::ReduceCardCost @ 0x7d9059c checks the card's cost field.
-fn utopia(game: &Game<'_>, _: usize, card: usize, cost: i32) -> i32 {
-    cost - i32::from(matches!(game.cards[card].cost, 3 | 4))
+fn utopia(game: &Game<'_>, _: usize, card: usize, _: i32) -> Option<CostUpdate> {
+    matches!(game.cards[card].cost, 3 | 4).then_some(CostUpdate::Add(-1))
 }
 
 // CampLehighBehavior::AddRandomCard @ 0x7d42a84. Random pool is restricted
@@ -125,9 +125,9 @@ mod tests {
         let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
         let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
         let card = game.create_card("Bishop", 0);
-        assert_eq!(utopia(&game, 0, card, 2), 1);
+        assert_eq!(utopia(&game, 0, card, 2), Some(CostUpdate::Add(-1)));
         game.cards[card].cost = 2;
-        assert_eq!(utopia(&game, 0, card, 2), 2);
+        assert_eq!(utopia(&game, 0, card, 2), None);
     }
 
     #[test]

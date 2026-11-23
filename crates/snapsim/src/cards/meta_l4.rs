@@ -467,7 +467,13 @@ fn beast(game: &mut Game<'_>, card: usize) {
 // BaronMordoBehavior::AddCostSetAbilityToPlayer (0x7e6eaac).
 fn baron_mordo(game: &mut Game<'_>, card: usize) {
     if let Some(target) = game.top_card(1 - game.cards[card].owner) {
-        game.set_player_card_cost_until(target, 6, 6);
+        // SetCardCost (0x7e6ed1c) applies only before TurnNumber 6.
+        let until = if crate::cards::reference_rules_enabled() {
+            6
+        } else {
+            5
+        };
+        game.set_player_card_cost_until(target, 6, until);
     }
 }
 
@@ -2146,9 +2152,25 @@ mod tests {
         let target = game.top_card(1).unwrap();
         baron_mordo(&mut game, card);
         game.ongoing();
+        let until = if crate::cards::reference_rules_enabled() {
+            6
+        } else {
+            5
+        };
         assert!(game.players[1].cost_effects.iter().any(|effect| matches!(
-            effect.kind, crate::game::PlayerCostEffectKind::BaronMordo { card, until: 6, value: 6 } if card == target
+            effect.kind, crate::game::PlayerCostEffectKind::BaronMordo { card, until: end, value: 6 } if card == target && end == until
         )));
+        if !crate::cards::reference_rules_enabled() {
+            game.players[1].deck.retain(|&id| id != target);
+            game.players[1].hand.push(target);
+            game.cards[target].cost = 1;
+            game.turn = 5;
+            game.ongoing();
+            assert_eq!(game.card_cost(target), 6);
+            game.turn = 6;
+            game.ongoing();
+            assert_eq!(game.card_cost(target), 1);
+        }
     }
     #[test]
     fn kitty_returns_and_gains_power() {

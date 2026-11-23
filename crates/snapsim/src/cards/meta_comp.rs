@@ -1117,6 +1117,35 @@ mod tests {
     }
 
     #[test]
+    fn copied_movement_grants_report_original_ability_owner() {
+        for copier in ["Moonstone", "SuperSkrull"] {
+            let mut rng = PythonRandom::seed(39);
+            let mut game = game(&mut rng);
+            place(&mut game, copier, 0, 0);
+            let source_lane = if copier == "Moonstone" { 0 } else { 2 };
+            let source_seat = usize::from(copier == "SuperSkrull");
+            let source = place(&mut game, "MadameWeb", source_seat, source_lane);
+            let target = place(&mut game, "Wasp", 0, 0);
+            game.ongoing();
+            game.ongoing();
+            game.lanes[source_lane].cards.retain(|&id| id != source);
+            game.cards[source].lane = None;
+            assert!(
+                game.stage_action(
+                    0,
+                    crate::game::Action::Move {
+                        card: target,
+                        lane: 1
+                    }
+                )
+                .is_ok(),
+                "{copier}"
+            );
+            assert_eq!(game.last_move_source, Some("MadameWeb"), "{copier}");
+        }
+    }
+
+    #[test]
     fn skrull_copies_unrestricted_play_grant() {
         let mut rng = PythonRandom::seed(40);
         let mut game = game(&mut rng);

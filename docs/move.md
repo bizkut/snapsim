@@ -41,10 +41,10 @@ Intrinsic-card count: **0 match, 11 fixed, 3 mismatch**. These counts are per ca
 | Vision Avengers | `GetSelfIfAvengersPresent` `0x7cec434` | Match for the self grant conditioned on an allied Avenger at its location. |
 | SP//dr | `MergeCard` `0x7f4569c`, constructor `0x7f45b38` | Match for the merged card's hidden, unlimited next-turn grant. |
 | Phoenix Force | `ReviveAndMergeCard` `0x7cdb304` | Match for the merged card's hidden, unlimited movement grant. |
-| Sam Wilson | `SelectShields` predicate `0x7f2db48` | Unverified: the decompiler merged unrelated functions into the selector, so its complete target predicate remains unresolved. |
+| Sam Wilson | `SelectShields` predicate `0x7f2db48` | Match: disassembly checks Card type and its definition ID against Sam Wilson's `Card_Token`, `CapsShield`; the definition's selector restricts this to revealed allied cards. |
 | Cloak of Levitation Trinket | `IsRevealedBeforeThisTurn` `0x7d1c850`, `HasNoMoveStagedThisTurn` `0x7d1c8e4` | Mismatch, Draft trinket: client has conditional movement rules; simulator registers no-text. |
 
-Additional audited grant count: **6 match, 3 fixed, 1 mismatch, 1 unverified**; equal-priority ambiguity is gated as described below. These are scoped grant verdicts, not proof of all other abilities.
+Additional audited grant count: **7 match, 3 fixed, 1 mismatch, 0 unverified**; equal-priority ambiguity is gated as described below. These are scoped grant verdicts, not proof of all other abilities.
 
 ## Location and restriction comparisons
 
@@ -76,6 +76,7 @@ Jean Grey School (`0x7d5b11c`), Isle of Shhhhh (`0x7d5a3e8`), and Pool's School 
 ## Remaining gaps
 
 - Movement sources are selected by client priority and only the selected stack is consumed. In equal-priority cases with different consumption, expiry, or callbacks, ordering is known only within the same retained grant collection. For other ties the exact client component creation timestamps are unavailable; staging reports `move_source_tie_unknown` rather than guessing. Frozen-reference mode retains its former all-sources consumption.
-- For an ability-owned Card source, `GetSourcePriority` (`0x7c9e67c`) resolves the ability definition's owner CardDef; entity-owned sources instead use `Card::GetAbilityTextCardDefId`. Player grants retain the executing definition at creation, including Stryfe-borrowed Cloak. `Game::last_move_source` and `Env::selected_move_source` expose the selected definition as staging diagnostics, not observation data. Copied attached movement sources still need equivalent provenance verification.
+- `MoveSystem::SetCanBeMovedByPlayer` (`0x7c9d3a4`) records the granting ability definition's owner and creation timestamp in each component. `GetSourcePriority` (`0x7c9e67c`) uses that owner for ability-owned Card sources; entity-owned sources use `Card::GetAbilityTextCardDefId`. Player and attached grants retain the executing definition at creation, including Stryfe-borrowed Cloak and merged SP//dr/Phoenix abilities. Composed movement abilities retain separate stack counts across card copies. `Game::last_move_source` and `Env::selected_move_source` expose the selected definition as staging diagnostics, not observation data.
+- Restored Copycat/Stryfe or explicit foreign-movable observations with a possible move are gated as `move_source_provenance_unknown` because source owner and stack context are not exported; Env masks return that named error. On 1,143 recorded planning frames this gate newly declined 0 previously accepted frames (0%). A reader export and exact component timestamp hydration remain necessary to lift the gate safely.
 - This audit has not established completeness of every movement-granting or movement-restricting card, location, and player effect, nor independently verified the generated option table or staged undo against all client branches.
 - Colossus's destruction and power-reduction immunity use separate guards and were outside this movement-specific fix.

@@ -4,6 +4,7 @@ use crate::game::{Event, Game};
 #[derive(Clone)]
 pub(crate) struct CardMoveGrant {
     pub origin: usize,
+    pub owner_def_id: &'static str,
     pub start: u8,
     pub end: u8,
     /// None is unlimited; Some is the remaining number of player moves.

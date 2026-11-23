@@ -1,4 +1,4 @@
-use super::{LocationDef, location};
+use super::{CostUpdate, LocationDef, location};
 use crate::game::Game;
 
 pub const ONSLAUGHTS_CITADEL: LocationDef = LocationDef {
@@ -76,11 +76,17 @@ pub const WHITE_PALACE: LocationDef = LocationDef {
     ..location("WhitePalace", 0, 0, 1, false)
 };
 
-fn titan(game: &Game<'_>, _: usize, card: usize, cost: i32) -> i32 {
-    cost - i32::from(game.cards[card].cost == 6)
+fn titan(game: &Game<'_>, _: usize, card: usize, _: i32) -> Option<CostUpdate> {
+    (game.cards[card].cost == 6).then_some(CostUpdate::Add(-1))
 }
-fn sandbar(game: &Game<'_>, _: usize, card: usize, cost: i32) -> i32 {
-    cost + i32::from(game.cards[card].created && cost < 6)
+// TheSandbarBehavior::IncreaseCardCost (0x7d8c410) targets only created
+// cards and uses AddCostWithMax(+1, max(current, 6)).
+fn sandbar(game: &Game<'_>, _: usize, card: usize, cost: i32) -> Option<CostUpdate> {
+    game.cards[card].created.then_some(if cost < 6 {
+        CostUpdate::Add(1)
+    } else {
+        CostUpdate::Set(cost)
+    })
 }
 fn stark_island(game: &mut Game<'_>, _: usize) {
     for seat in 0..2 {
