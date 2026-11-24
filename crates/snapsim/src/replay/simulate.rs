@@ -1068,13 +1068,19 @@ pub(super) fn simulate(
         game.played = Default::default();
         game.start_turn();
     }
+    let mut differences = compare(&game, target, &cards);
     if !crate::cards::reference_rules_enabled()
-        && let Some(reason) = undecoded_random_draw(&game, target, &cards)
+        && let Some((reason, lanes)) = undecoded_random_draw(&game, target, &cards)
     {
-        return Err(reason);
+        // Only what happens in the lane of an undecoded draw is attributed to it;
+        // a difference anywhere else is still the rules' to explain.
+        differences.retain(|difference| !difference.lanes.iter().any(|lane| lanes.contains(lane)));
+        if differences.is_empty() {
+            return Err(reason);
+        }
     }
     Ok((
-        compare(&game, target, &cards),
+        differences,
         game.replay_hooks
             .filter(|_| collect_hooks)
             .map(RefCell::into_inner),
@@ -1087,13 +1093,16 @@ pub(super) fn simulate(
 /// roll-to-outcome mapping is not decoded, so no seed can reproduce a
 /// recorded outcome by construction. When the observed outcome is one the draw
 /// could have produced but the trial drew another, the trial proves nothing
-/// about the rules; downstream effects of the observed outcome are not simulated.
+/// about the rules in that draw's lane; the effects of the observed outcome are not
+/// simulated. Returns the reason and the affected (0-based) lanes.
 fn undecoded_random_draw(
     game: &Game<'_>,
     target: &Frame,
     cards: &[(Value, usize)],
-) -> Option<String> {
+) -> Option<(String, Vec<usize>)> {
     let hooks = game.replay_hooks.as_ref()?.borrow();
+    let mut reason = None;
+    let mut lanes = Vec::new();
     for (lane, board) in game.lanes.iter().enumerate() {
         let Some(actual) = target.locations[lane].as_str() else {
             continue;
@@ -1104,21 +1113,24 @@ fn undecoded_random_draw(
                 *drawn == board.def.id && game.location_in_random_pool(actual, excluded.as_deref())
             })
         {
-            return Some(format!(
-                "random location roll mapping undecoded (WeightedTable.GetRandom 0x60708f0): lane {} simulator drew {}, observed {actual}",
-                lane + 1,
-                board.def.id
-            ));
+            reason.get_or_insert_with(|| {
+                format!(
+                    "random location roll mapping undecoded (WeightedTable.GetRandom 0x60708f0): lane {} simulator drew {}, observed {actual}",
+                    lane + 1,
+                    board.def.id
+                )
+            });
+            lanes.push(lane);
         }
     }
     for &(card, drawn) in &hooks.random_cards {
         let Some((entity_id, _)) = cards.iter().find(|(_, index)| *index == card) else {
             continue;
         };
-        let Some(actual) = entity(target, entity_id)
-            .filter(|observed| observed.revealed)
-            .and_then(|observed| observed.id.as_str())
-        else {
+        let Some(observed) = entity(target, entity_id).filter(|observed| observed.revealed) else {
+            continue;
+        };
+        let Some(actual) = observed.id.as_str() else {
             continue;
         };
         if actual != drawn
@@ -1131,12 +1143,16 @@ fn undecoded_random_draw(
                     && row.cost == 6
             })
         {
-            return Some(format!(
-                "random 6-cost card roll mapping undecoded (Black Vortex, TransformCardInto6Cost 0x7d407d4): simulator drew {drawn}, observed {actual}"
-            ));
+            reason.get_or_insert_with(|| {
+                format!(
+                    "random 6-cost card roll mapping undecoded (Black Vortex, TransformCardInto6Cost 0x7d407d4): simulator drew {drawn}, observed {actual}"
+                )
+            });
+            lanes.extend(game.cards[card].lane);
+            lanes.push(observed.lane);
         }
     }
-    None
+    reason.map(|reason| (reason, lanes))
 }
 
 fn compare(game: &Game<'_>, target: &Frame, cards: &[(Value, usize)]) -> Vec<Difference> {

@@ -1180,10 +1180,15 @@ mod tests {
         assert!(rows[0].detail.contains("copied Ongoing text"));
     }
 
-    /// The opponent's Scarlet Witch replaces her lane's location with `observed`.
-    fn scarlet_witch_case(observed: &str) -> Vec<super::ResultRow> {
+    /// The opponent's Scarlet Witch replaces her lane's location with `observed`;
+    /// an unrelated Hulk in lane 1 ends the turn with `hulk_power`.
+    fn scarlet_witch_case(observed: &str, hulk_power: i32) -> Vec<super::ResultRow> {
         let mut start = observation(2, "scarlet-witch", false);
         start["game"]["locations"][1]["location_id"] = json!("Ruins");
+        start["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 40, "owner_entity_id": 2, "card_id": "Hulk",
+            "revealed": true, "power": 12, "turn_revealed": 1, "stat_updates": []
+        }]);
         start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
         let mut submitted = start.clone();
         submitted["game"]["players"][0]["ended_turn"] = json!(2);
@@ -1192,6 +1197,7 @@ mod tests {
             "entity_id": 34, "owner_entity_id": 2, "revealed": false
         }]);
         let mut revealed = submitted.clone();
+        revealed["game"]["locations"][0]["cards"][0]["power"] = json!(hulk_power);
         revealed["game"]["locations"][1]["location_id"] = json!(observed);
         revealed["game"]["locations"][1]["cards"] = json!([{
             "entity_id": 34, "owner_entity_id": 2, "card_id": "ScarletWitch",
@@ -1212,7 +1218,9 @@ mod tests {
     #[test]
     fn undecoded_random_location_roll_is_not_reported_as_rule_failure() {
         // Wakanda and Kyln are both drawable; one seed draws at most one of them.
-        let rows: Vec<_> = ["Wakanda", "Kyln"].map(scarlet_witch_case).into();
+        let rows: Vec<_> = ["Wakanda", "Kyln"]
+            .map(|observed| scarlet_witch_case(observed, 12))
+            .into();
         let reasons: Vec<_> = rows
             .iter()
             .filter(|rows| rows[0].status == super::Status::Uncheckable)
@@ -1233,13 +1241,28 @@ mod tests {
     #[test]
     fn undrawable_random_location_is_still_a_rule_failure() {
         // The game's own starting location can never be drawn.
-        let rows = scarlet_witch_case("Ruins");
+        let rows = scarlet_witch_case("Ruins", 12);
         assert_eq!(
             rows[0].status,
             super::Status::Inconsistent,
             "{}",
             rows[0].detail
         );
+    }
+
+    #[test]
+    fn only_the_random_draws_lane_is_excused() {
+        // Hulk's unexplained +1 in another lane is still a rule failure, whichever
+        // location the simulator drew.
+        for observed in ["Wakanda", "Kyln"] {
+            let rows = scarlet_witch_case(observed, 13);
+            assert_eq!(
+                rows[0].status,
+                super::Status::Inconsistent,
+                "{observed}: {}",
+                rows[0].detail
+            );
+        }
     }
 
     #[test]
