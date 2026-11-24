@@ -16,7 +16,7 @@ Do not commit client binaries, metadata files, class dumps, decompiled code, or 
 6. [Step 5: re-verify behavior](#step-5-re-verify-behavior)
 7. [Step 6: replay check, parity gates and fuzzing](#step-6-replay-check-parity-gates-and-fuzzing)
 8. [Release checklist](#release-checklist)
-9. [59.15.1 examples](#5915-examples)
+9. [59.15.1 examples](#59151-examples)
 
 ## Overview
 
@@ -26,7 +26,7 @@ Do not commit client binaries, metadata files, class dumps, decompiled code, or 
 | 2. Diff | old and new `rules/metadata.json` | list of renamed, removed or re-signed methods; RVA map for every RVA cited here |
 | 3. Regenerate | the new corpus | `data/client_cards.json`, `data/past_years_pool.{json,rs}`, `cards/no_text.rs`, `cards/ongoing_priorities.rs`, `move_priority.rs` |
 | 4. Catalog | the public website catalog and the client definitions | `data/cards.json`, `data/locations.json` |
-| 5. Re-verify | cited RVAs and per-area hook inventories | audit ledgers, fixes with tests, README divergence lines |
+| 5. Re-verify | cited RVAs and per-area hook inventories | audit ledgers, fixes with tests, parity divergence lines |
 | 6. Check | local recordings | `snapsim-replaycheck`, `parity/gates.sh`, fuzzing |
 
 Order matters: derived files (step 3) and the catalog (step 4) change which cards and locations exist, so do them before auditing behavior (step 5). Run the gates (step 6) after every batch of fixes, not only at the end.
@@ -99,7 +99,7 @@ Run each generator against the new corpus, then review the diff. The scripts har
 3. **Check `status` against reality.** The website labels are a lagging signal. In 59.15.1 data, Jean Grey School was listed `unreleased` and unregistered while a recorded live ranked match contained it, and Crimson Citadel was also `unreleased`. Both were corrected to `released` and registered with client-derived rules. For every entry still marked `unreleased`, ask whether it appears in a recording, in the reader's catalog of the installed client, or in a live game; if so treat the label as wrong, and verify the behavior (step 5) before changing it.
 4. Know what `status` does here. `released` drives coverage counts (`snapsim coverage` reports released characters and locations that are registered) and the fuzzing pool. Random-card pools are built from registration, not from `status`: `cards::deck_eligible_ids()` is every registered non-token card. Registering an unreleased card therefore also puts it into simulated random pools. Register unreleased content deliberately.
 5. Run `snapsim coverage` and update the coverage paragraph in `README.md` (registered card and location counts, released counts) and the affected rows in [coverage-audit.md](coverage-audit.md). The audit's own text says its summary counts describe an earlier baseline; update its "current status" section, not the historical tables.
-6. For each new card or location follow "Adding content" in the README: a module, a descriptor in the module's slice, behavior taken from the client method with RVA comments, focused boundary tests including random-call order for random effects. Never invent a stand-in rule.
+6. For each new card or location follow [Adding content](architecture.md#adding-content): a module, a descriptor in the module's slice, behavior taken from the client method with RVA comments, focused boundary tests including random-call order for random effects. Never invent a stand-in rule.
 
 ## Step 5: re-verify behavior
 
@@ -144,13 +144,13 @@ Report counts per ledger and state their scope ("these rows only, not every inte
 
 1. Write the client rule, with the RVA comment.
 2. If the rule exists in the frozen Python reference, keep the reference behavior reachable behind `cards::reference_rules_enabled()` (a process-global switch: `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`), either in `cards/reference_rules.rs` or inside the function. The parity gates run with it on so unchanged content stays exact, and live play never sets it. Rules for content that has no reference counterpart do not need a reference branch.
-3. Add a divergence line to "Parity and checks" in the README: what the client does, the method and RVA, and what the reference did. If a seeded full-game parity run now differs, list the game in `parity/divergences.json` with its first-divergence path and a reason; `snapsim-parity` fails on any unlisted divergence and on a listed one that no longer occurs.
+3. Add a divergence line to [Python reference (frozen)](parity.md#python-reference-frozen): what the client does, the method and RVA, and what the reference did. If a seeded full-game parity run now differs, list the game in `parity/divergences.json` with its first-divergence path and a reason; `snapsim-parity` fails on any unlisted divergence and on a listed one that no longer occurs.
 4. Add a test that fails on the old behavior. For RNG changes, clone the generator before the call and assert that exactly the client's draws were consumed (count and range), and that the result indexes the client's candidate order, not lane order. Cover the edge branches the audit found (empty pool, pool no larger than the count, full hand, fallback roll). Tests cannot exercise reference mode because the switch is process-global; the parity gates cover it.
 5. Re-run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, then the gates.
 
 ### Systems with their own checks
 
-* **Stakes.** `Game::UpdateCubeValueNextTurn`, `CheckIncreaseStakesForNextTurn`, the end-of-game stake behavior and the concession checks are cited in the README's stake section with RVAs; re-read them for formula changes. Mephisto's payout has no client rule found, so stake advice declines when he may be in play; recheck whether the new build adds one.
+* **Stakes.** `Game::UpdateCubeValueNextTurn`, `CheckIncreaseStakesForNextTurn`, the end-of-game stake behavior and the concession checks are cited in [architecture](architecture.md#architecture) with RVAs; re-read them for formula changes. Mephisto's payout has no client rule found, so stake advice declines when he may be in play; recheck whether the new build adds one.
 * **Provenance and hidden legality.** `hidden_legality.rs` classifies cards and locations whose hooks might read hidden state. When the reader or recordings change (new cards in decks, new exported fields), review new visible-hook cards and keep drift tests with each review. The reader-side update is documented in that project's own update guide; SnapSim only consumes its exports.
 * **Ongoing ordering.** The pass order and conditional-retry behavior in [card-technicalities.md](card-technicalities.md) cite `AbilitySystem::UpdateOngoingStats` and its helpers. Re-read them because the generated priority table feeds that order.
 
@@ -170,7 +170,7 @@ Each turn is **consistent**, **inconsistent** or **not checkable**. Not checkabl
 
 ### Parity gates
 
-Set `SNAPSIM_REFERENCE`, `SNAPSIM_PYTHON`, `SNAPSIM_RUNS`, `SNAPSIM_SNAPSHOTS` and `SNAPSIM_ORACLES` as in the README, then:
+Set `SNAPSIM_REFERENCE`, `SNAPSIM_PYTHON`, `SNAPSIM_RUNS`, `SNAPSIM_SNAPSHOTS` and `SNAPSIM_ORACLES` as in [Environment](interfaces.md#environment), then:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -182,7 +182,7 @@ parity/gates.sh        # must print ALL GATES PASSED
 
 `gates.sh` builds into its own target directory, checks all full-game, position, advisor, coverage, validation, SNAP-adapter, deck-code, deck-builder and CLI parity, then the two replay gates. It stops at the first failure. Judge it by exit status and the final line, not through a pipeline. It reports the replay result as consistent, inconsistent and not checkable counts.
 
-The gates prove that unchanged content still behaves as the frozen reference did and that the client rules are consistent with the recordings. They do not prove that a changed rule is correct; step 5 does. Do not claim parity beyond implemented coverage: copy effects at some locations do not preserve original card state, and parity there is unproven (see the README).
+The gates prove that unchanged content still behaves as the frozen reference did and that the client rules are consistent with the recordings. They do not prove that a changed rule is correct; step 5 does. Do not claim parity beyond implemented coverage: copy effects at some locations do not preserve original card state, and parity there is unproven (see [parity](parity.md)).
 
 ### Fuzzing
 
@@ -202,12 +202,12 @@ Keep fuzz scripts and outputs in a local work folder. They are not part of the r
 3. Derived files regenerated (step 3) with hard-coded ranges updated; diffs reviewed.
 4. Catalog refreshed (step 4); `status` of anything seen in recordings or the live client checked; README coverage line and coverage audit updated.
 5. Per-area audit ledgers written for the areas that changed, each entry `match`/`fixed`/`unverified` with reason; unverified rows listed in the docs, not hidden.
-6. Every fix has a client-RVA comment, a test that fails on the old behavior, `reference_rules_enabled()` retention when the reference covers it, and a README divergence line.
+6. Every fix has a client-RVA comment, a test that fails on the old behavior, `reference_rules_enabled()` retention when the reference covers it, and a parity divergence line.
 7. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` clean.
 8. `parity/gates.sh` prints ALL GATES PASSED, with zero inconsistent turns in `replay-client`.
 9. Fuzzing run on the new build with no open findings, or each open finding written down.
 10. `snapsim_py` rebuilt with `crates/snapsim-py/build-module.sh` and the `snapsim`/`snapsim-replaycheck` binaries rebuilt, into a separate target directory if a consumer has the module loaded.
-11. Docs updated: README (coverage paragraph, divergence lines, version mentions), this guide where the procedure changed, audits. The version string in generator docstrings and generated-file headers now names the new build.
+11. Docs updated: README (coverage paragraph and version mentions), parity documentation (divergence lines), this guide where the procedure changed, audits. The version string in generator docstrings and generated-file headers now names the new build.
 12. The repository is public: scan the docs and README for personal paths (user names, absolute home or project directories) and for private recording file names; none may appear.
 13. Commit after the combined checks pass, naming the checks and the replay counts.
 
@@ -231,7 +231,7 @@ Each item cites the client method and RVA it was read from. They are findings fo
 ### Ability depth and reentrancy
 
 * `Ability::CanActivate` (`0x7c8a6e0`) caps the global active-ability stack at 32. Player and location triggers count too. `CheckReentrant` (`0x7ca61e8`) blocks re-entry of a non-reentrant instance, not nesting of distinct instances. The simulator shares one `ability_call_depth` across card frames and generic trigger frames and stops at 32.
-* Rogue Scion of Division (`StealTextFromOpponentHand`, `0x7f2b228`) reactivates even identical text, so a reveal chain could expand exponentially (this hung advice on a recorded position). The simulator cuts the cycle once every highest-cost target already has the same text removed; the client repeats that no-op until the depth limit, and the cutoff skips those redundant random draws, which can change later random outcomes. This is a known approximation, listed in the README.
+* Rogue Scion of Division (`StealTextFromOpponentHand`, `0x7f2b228`) reactivates even identical text, so a reveal chain could expand exponentially (this hung advice on a recorded position). The simulator cuts the cycle once every highest-cost target already has the same text removed; the client repeats that no-op until the depth limit, and the cutoff skips those redundant random draws, which can change later random outcomes. This is a known approximation, listed in [architecture](architecture.md#adding-content).
 
 ### Legality
 

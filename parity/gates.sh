@@ -1,6 +1,6 @@
 #!/bin/bash
 # Every Python-parity gate on the current tree. Fails closed: the first failing gate stops the run.
-# Oracle inputs are generated as documented in the README under SNAPSIM_ORACLES.
+# Oracle inputs are generated as documented in docs/parity.md under SNAPSIM_ORACLES.
 # Builds go to target-gates, never the live target/release.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
