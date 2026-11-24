@@ -1046,10 +1046,17 @@ impl<'a> std::ops::DerefMut for GameRandom<'a> {
 }
 
 /// Hooks invoked by a replay trial, collected only when explicitly enabled.
+/// The random draws are always recorded in replay trials: their roll-to-outcome
+/// mapping is not decoded (`WeightedTable.GetRandom` 0x60708f0), so a trial that
+/// drew an outcome different from the observed one proves nothing.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ReplayHooks {
     pub cards: std::collections::BTreeSet<(&'static str, &'static str)>,
     pub locations: std::collections::BTreeSet<(&'static str, &'static str)>,
+    /// `Game::GetRandomLocationDefId` draws: the excluded definition and the drawn one.
+    pub random_locations: Vec<(Option<String>, &'static str)>,
+    /// Black Vortex's random 6-cost card: the transformed card and its new definition.
+    pub random_cards: Vec<(usize, &'static str)>,
 }
 
 pub struct Game<'a> {
@@ -1127,6 +1134,19 @@ impl<'a> Game<'a> {
                 .locations
                 .insert((self.lanes[lane].def.id, kind));
         }
+    }
+
+    pub(crate) fn record_random_card(&self, card: usize, id: &'static str) {
+        if let Some(hooks) = &self.replay_hooks {
+            hooks.borrow_mut().random_cards.push((card, id));
+        }
+    }
+
+    /// Whether `Game::GetRandomLocationDefId` could have drawn `id` when `excluded`
+    /// was the morphing location's definition.
+    pub(crate) fn location_in_random_pool(&self, id: &str, excluded: Option<&str>) -> bool {
+        self.location_def_drawable(id, excluded)
+            && self.location_pool.iter().any(|def| def.id == id)
     }
 
     /// DefaultGameMode::HandleConcedeRequestInternal 0x7dd1bf4 rejects
@@ -3698,6 +3718,12 @@ impl<'a> Game<'a> {
         {
             let w = weight(def.id);
             if roll < w {
+                if let Some(hooks) = &self.replay_hooks {
+                    hooks
+                        .borrow_mut()
+                        .random_locations
+                        .push((excluded.map(str::to_owned), def.id));
+                }
                 return Some(def.id);
             }
             roll -= w;

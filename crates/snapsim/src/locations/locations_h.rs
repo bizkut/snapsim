@@ -426,6 +426,7 @@ fn black_vortex(game: &mut Game<'_>, lane: usize, event: Event) {
         {
             spent[seat] = true;
         }
+        game.record_random_card(card, id);
         game.transform_card_without_modifiers(card, id);
     }
 }
@@ -1186,6 +1187,22 @@ mod tests {
         game.played[0].push((second, 0));
         black_vortex(&mut game, 0, Event::CardResolved { card: second });
         assert_eq!(game.cards[second].def.id, "Hawkeye");
+    }
+
+    #[test]
+    fn vortex_records_its_random_card_for_replay_checking() {
+        let mut rng = PythonRandom::seed(23);
+        let deck = deck();
+        let locations = ["BlackVortex", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        game.replay_hooks = Some(Default::default());
+        game.lanes[0].state = Some(Box::new([false; 2]));
+        let card = game.create_card("Hawkeye", 0);
+        game.cards[card].turn_played = 1;
+        game.played[0].push((card, 0));
+        black_vortex(&mut game, 0, Event::CardResolved { card });
+        let hooks = game.replay_hooks.as_ref().unwrap().borrow();
+        assert_eq!(hooks.random_cards, vec![(card, game.cards[card].def.id)]);
     }
 
     #[test]

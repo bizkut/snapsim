@@ -1112,6 +1112,136 @@ mod tests {
         assert!(rows[0].detail.contains("cannot be timed"));
     }
 
+    /// Captain America and a Mystique that copied his Ongoing text; the reader
+    /// exports no copied-ability identity, only the Mystique-updated row.
+    fn copied_ongoing_case(row_value: i32, captain_power: i32) -> Vec<super::ResultRow> {
+        let mut start = observation(2, "mystique", false);
+        start["game"]["locations"][1]["location_id"] = json!("Ruins");
+        start["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 35, "owner_entity_id": 2, "zone_position": 0,
+            "card_id": "CaptainAmerica", "revealed": true, "power": captain_power,
+            "turn_revealed": 1,
+            "stat_updates": [{
+                "stat": "Power", "update": "Add", "value": row_value,
+                "updater_card_id": "Mystique"
+            }]
+        }, {
+            "entity_id": 36, "owner_entity_id": 2, "zone_position": 1,
+            "card_id": "Mystique", "revealed": true, "power": 3, "turn_revealed": 1,
+            "stat_updates": [{
+                "stat": "Power", "update": "Add", "value": 2,
+                "updater_card_id": "CaptainAmerica"
+            }]
+        }]);
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "card_id": "Spectrum",
+            "revealed": true, "power": 7, "turn_revealed": 2
+        }]);
+        // Spectrum gives +2 to each of its owner's revealed Ongoing cards,
+        // the Mystique that copied Captain America's text among them.
+        revealed["game"]["locations"][0]["cards"][0]["power"] = json!(captain_power + 2);
+        revealed["game"]["locations"][0]["cards"][1]["power"] = json!(5);
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][2]["location_id"] = json!("Ruins");
+        check_observations(
+            vec![(1, start), (2, submitted), (3, revealed), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn spectrum_buffs_a_mystique_whose_copied_ongoing_is_recovered_from_its_ledger() {
+        let rows = copied_ongoing_case(2, 5);
+        assert_eq!(
+            rows[0].status,
+            super::Status::Consistent,
+            "{}",
+            rows[0].detail
+        );
+    }
+
+    #[test]
+    fn unidentifiable_copied_ongoing_is_not_reported_as_rule_failure() {
+        // No allied Ongoing card reproduces a +3 Mystique-updated row.
+        let rows = copied_ongoing_case(3, 6);
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("copied Ongoing text"));
+    }
+
+    /// The opponent's Scarlet Witch replaces her lane's location with `observed`.
+    fn scarlet_witch_case(observed: &str) -> Vec<super::ResultRow> {
+        let mut start = observation(2, "scarlet-witch", false);
+        start["game"]["locations"][1]["location_id"] = json!("Ruins");
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][1]["location_id"] = json!(observed);
+        revealed["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "card_id": "ScarletWitch",
+            "revealed": true, "power": 4, "turn_revealed": 2, "stat_updates": []
+        }]);
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][2]["location_id"] = json!("Ruins");
+        check_observations(
+            vec![(1, start), (2, submitted), (3, revealed), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn undecoded_random_location_roll_is_not_reported_as_rule_failure() {
+        // Wakanda and Kyln are both drawable; one seed draws at most one of them.
+        let rows: Vec<_> = ["Wakanda", "Kyln"].map(scarlet_witch_case).into();
+        let reasons: Vec<_> = rows
+            .iter()
+            .filter(|rows| rows[0].status == super::Status::Uncheckable)
+            .map(|rows| rows[0].detail.as_str())
+            .collect();
+        assert!(
+            rows.iter()
+                .all(|rows| rows[0].status != super::Status::Inconsistent)
+        );
+        assert!(!reasons.is_empty());
+        assert!(
+            reasons
+                .iter()
+                .all(|detail| detail.contains("random location roll mapping undecoded"))
+        );
+    }
+
+    #[test]
+    fn undrawable_random_location_is_still_a_rule_failure() {
+        // The game's own starting location can never be drawn.
+        let rows = scarlet_witch_case("Ruins");
+        assert_eq!(
+            rows[0].status,
+            super::Status::Inconsistent,
+            "{}",
+            rows[0].detail
+        );
+    }
+
     #[test]
     fn rejects_invalid_schema_and_zero_seeds() {
         assert_eq!(

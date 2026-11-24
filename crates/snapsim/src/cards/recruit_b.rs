@@ -129,6 +129,10 @@ pub(crate) fn prediction(g: &mut Game, id: usize) {
         g.add_power(id, 4, g.cards[id].owner);
     }
 }
+// SpectrumBehavior::AddPower 0x7f45b64: targets are Game::GetAllRevealedCards(owner)
+// (0x7da87b8) filtered by Card::HasOngoingAbility(false) (0x7cb316c, predicate
+// OngoingAbility::IsOngoingAbility 0x7c90c28) over the card's current abilities,
+// copied text included.
 fn spectrum(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
     for other in 0..g.cards.len() {
@@ -543,5 +547,35 @@ mod tests {
             game.rng.borrow_mut().randbelow(10000),
             control.randbelow(10000)
         );
+    }
+
+    #[test]
+    fn spectrum_counts_a_card_that_copied_ongoing_text() {
+        // SpectrumBehavior::AddPower (0x7f45b64) selects Game::GetAllRevealedCards
+        // (0x7da87b8) with Card::HasOngoingAbility(false) (0x7cb316c); Mystique's
+        // Card::CopyText (0x7cbadb4) installs the copied Ongoing on that card.
+        let mut rng = PythonRandom::seed(7);
+        let mut game = game_for(&mut rng);
+        let captain = game.create_card("CaptainAmerica", 1);
+        let copier = game.create_card("Mystique", 1);
+        let plain = game.create_card("Mystique", 1);
+        let enemy = game.create_card("Mystique", 0);
+        for id in [captain, copier, plain, enemy] {
+            game.cards[id].lane = Some(0);
+            game.cards[id].revealed = true;
+            game.lanes[0].cards.push(id);
+        }
+        assert!(!game.cards[copier].has_ongoing(false));
+        assert!(game.copy_text(copier, captain, false));
+        assert!(game.cards[copier].has_ongoing(false));
+        let spectrum_card = game.create_card("Spectrum", 1);
+        game.add_card(spectrum_card, 1, 1, false);
+        let ids = [captain, copier, plain, enemy];
+        let before = ids.map(|id| game.cards[id].power());
+        spectrum(&mut game, spectrum_card);
+        let after = ids.map(|id| game.cards[id].power());
+        // Only Spectrum's owner's revealed Ongoing cards gain 2: the original
+        // and the copy, not a plain Mystique and not an enemy card.
+        assert_eq!([0, 1, 2, 3].map(|i| after[i] - before[i]), [2, 2, 0, 0]);
     }
 }

@@ -1,6 +1,6 @@
 use super::{Difference, Frame, History, Staging, entity, label};
 use crate::{
-    game::{Game, Lane, Player},
+    game::{Game, Lane, OngoingSource, Player, Stat, StatOperation},
     locations, position,
     random::PythonRandom,
     zones::CardZone,
@@ -145,6 +145,132 @@ fn push(
     let index = game.cards.len();
     game.cards.push(make(id, owner, cost, power)?);
     Ok(index)
+}
+
+/// One recorded or simulated stat-update row: target card, stat, operation, value.
+type UpdateRow = (usize, &'static str, &'static str, i64);
+
+/// Ongoing rows a card's current text produces, from the simulated ledger.
+fn ongoing_rows(game: &Game<'_>, source: usize) -> Vec<UpdateRow> {
+    let mut rows = Vec::new();
+    for (target, card) in game.cards.iter().enumerate() {
+        for update in &card.stat_updates {
+            if update.ongoing
+                && matches!(
+                    update.ongoing_source,
+                    Some(OngoingSource::Card { card, .. }) if card == source
+                )
+            {
+                rows.push((
+                    target,
+                    match update.stat {
+                        Stat::Power => "Power",
+                        Stat::Cost => "Cost",
+                    },
+                    match update.operation {
+                        StatOperation::Add => "Add",
+                        StatOperation::Multiply => "Multiply",
+                        StatOperation::Set => "Set",
+                    },
+                    i64::from(update.value),
+                ));
+            }
+        }
+    }
+    rows.sort_unstable();
+    rows
+}
+
+/// MystiqueBehavior::CopyAbilitiesAndPlayRequirements (0x7f085a0) installs the
+/// last played Ongoing card's text through Card::CopyText (0x7cbadb4). The
+/// reader exports no copied-ability identity: the holder's abilities inventory
+/// is empty and the copy is visible only through Ongoing rows whose updater is
+/// the holder's own definition. Restore it only when exactly one allied Ongoing
+/// definition reproduces every recorded Mystique-updated row; otherwise the
+/// text is unknown and the turn cannot be checked.
+fn restore_copied_ongoing(
+    game: &mut Game<'_>,
+    start: &Frame,
+    cards: &[(Value, usize)],
+) -> Result<(), String> {
+    let mut observed: Vec<UpdateRow> = Vec::new();
+    for (entity_id, index) in cards {
+        let Some(card) = entity(start, entity_id) else {
+            continue;
+        };
+        for entry in card.stat_updates.as_array().into_iter().flatten() {
+            if entry["updater_card_id"] != "Mystique" {
+                continue;
+            }
+            let stat = match entry["stat"].as_str() {
+                Some("Power") => "Power",
+                Some("Cost") => "Cost",
+                _ => return Err("Mystique stat update has an unknown stat".into()),
+            };
+            let operation = match entry["update"].as_str() {
+                Some("Add") => "Add",
+                Some("Multiply") => "Multiply",
+                Some("Set") => "Set",
+                _ => return Err("Mystique stat update has an unknown operation".into()),
+            };
+            let value = entry["value"]
+                .as_i64()
+                .ok_or("Mystique stat update has no value")?;
+            observed.push((*index, stat, operation, value));
+        }
+    }
+    if observed.is_empty() {
+        return Ok(());
+    }
+    observed.sort_unstable();
+    let mut holders = cards
+        .iter()
+        .map(|&(_, index)| index)
+        .filter(|&index| game.cards[index].def.id == "Mystique");
+    let (Some(holder), None) = (holders.next(), holders.next()) else {
+        return Err("Mystique's recorded Ongoing updates cannot be attributed to one card".into());
+    };
+    let owner = game.cards[holder].owner;
+    let played = game.cards[holder].turn_played;
+    let mut tried: Vec<&str> = Vec::new();
+    let mut matched: Vec<usize> = Vec::new();
+    for &(_, source) in cards {
+        let card = &game.cards[source];
+        if source == holder
+            || card.owner != owner
+            || !card.revealed
+            || card.lane.is_none()
+            || !card.has_ongoing(false)
+            || (card.turn_played != 0 && played != 0 && card.turn_played > played)
+        {
+            continue;
+        }
+        let def = card.default_ability().id;
+        if tried.contains(&def) {
+            continue;
+        }
+        tried.push(def);
+        let mut rng = game.fork_rng();
+        let mut trial = game.fork(rng.as_mut());
+        trial.is_wait_for_staging = false;
+        if trial.copy_text(holder, source, false) && ongoing_rows(&trial, holder) == observed {
+            matched.push(source);
+        }
+    }
+    match matched[..] {
+        [source] => {
+            game.copy_text(holder, source, false);
+            Ok(())
+        }
+        [] => Err(format!(
+            "Mystique [{}] copied Ongoing text is not identified by its recorded updates",
+            label(&cards.iter().find(|(_, i)| *i == holder).unwrap().0)
+        )),
+        _ => Err(format!(
+            "Mystique [{}] copied Ongoing text is ambiguous",
+            label(&cards.iter().find(|(_, i)| *i == holder).unwrap().0)
+        )),
+    }
 }
 fn diff(item: String, cards: Vec<String>, lanes: Vec<usize>) -> Difference {
     Difference { item, cards, lanes }
@@ -465,6 +591,9 @@ pub(super) fn simulate(
             }
         }
     }
+    if !crate::cards::reference_rules_enabled() {
+        restore_copied_ongoing(&mut game, start, &cards)?;
+    }
     for &(_, index) in &cards {
         if matches!(game.cards[index].def.id, "Hawkeye" | "JessicaJones")
             && game.cards[index].turn_played as i64 == start.turn - 1
@@ -759,9 +888,7 @@ pub(super) fn simulate(
             game.pending_plays[play.card.owner].push((index, play.card.lane));
         }
     }
-    if collect_hooks {
-        game.replay_hooks = Some(RefCell::new(Default::default()));
-    }
+    game.replay_hooks = Some(RefCell::new(Default::default()));
     game.is_wait_for_staging = false;
     game.ongoing();
     for play in &staged.plays {
@@ -844,7 +971,9 @@ pub(super) fn simulate(
                     vec![],
                     vec![],
                 )],
-                game.replay_hooks.map(RefCell::into_inner),
+                game.replay_hooks
+                    .filter(|_| collect_hooks)
+                    .map(RefCell::into_inner),
             ));
         }
         game.finish_reveals();
@@ -859,7 +988,9 @@ pub(super) fn simulate(
                     vec![],
                     vec![],
                 )],
-                game.replay_hooks.map(RefCell::into_inner),
+                game.replay_hooks
+                    .filter(|_| collect_hooks)
+                    .map(RefCell::into_inner),
             ));
         }
         if target.turn != start.turn && target.turn <= 3 {
@@ -937,10 +1068,75 @@ pub(super) fn simulate(
         game.played = Default::default();
         game.start_turn();
     }
+    if !crate::cards::reference_rules_enabled()
+        && let Some(reason) = undecoded_random_draw(&game, target, &cards)
+    {
+        return Err(reason);
+    }
     Ok((
         compare(&game, target, &cards),
-        game.replay_hooks.map(RefCell::into_inner),
+        game.replay_hooks
+            .filter(|_| collect_hooks)
+            .map(RefCell::into_inner),
     ))
+}
+
+/// `Game::GetRandomLocationDefId` (0x7db248c) rolls `WeightedTable.GetRandom`
+/// (0x60708f0) over the location table; Black Vortex's random 6-cost card
+/// (`TransformCardInto6Cost` 0x7d407d4) rolls a cost-filtered pool. Their
+/// roll-to-outcome mapping is not decoded, so no seed can reproduce a
+/// recorded outcome by construction. When the observed outcome is one the draw
+/// could have produced but the trial drew another, the trial proves nothing
+/// about the rules; downstream effects of the observed outcome are not simulated.
+fn undecoded_random_draw(
+    game: &Game<'_>,
+    target: &Frame,
+    cards: &[(Value, usize)],
+) -> Option<String> {
+    let hooks = game.replay_hooks.as_ref()?.borrow();
+    for (lane, board) in game.lanes.iter().enumerate() {
+        let Some(actual) = target.locations[lane].as_str() else {
+            continue;
+        };
+        if board.revealed
+            && actual != board.def.id
+            && hooks.random_locations.iter().any(|(excluded, drawn)| {
+                *drawn == board.def.id && game.location_in_random_pool(actual, excluded.as_deref())
+            })
+        {
+            return Some(format!(
+                "random location roll mapping undecoded (WeightedTable.GetRandom 0x60708f0): lane {} simulator drew {}, observed {actual}",
+                lane + 1,
+                board.def.id
+            ));
+        }
+    }
+    for &(card, drawn) in &hooks.random_cards {
+        let Some((entity_id, _)) = cards.iter().find(|(_, index)| *index == card) else {
+            continue;
+        };
+        let Some(actual) = entity(target, entity_id)
+            .filter(|observed| observed.revealed)
+            .and_then(|observed| observed.id.as_str())
+        else {
+            continue;
+        };
+        if actual != drawn
+            && crate::cards::get(actual)
+                .is_some_and(|def| crate::cards::deck_eligible_ids().contains(&def.id))
+            && crate::data::cards().iter().any(|row| {
+                row.carddefid == actual
+                    && !row.random_pool_excluded
+                    && row.card_type == "Character"
+                    && row.cost == 6
+            })
+        {
+            return Some(format!(
+                "random 6-cost card roll mapping undecoded (Black Vortex, TransformCardInto6Cost 0x7d407d4): simulator drew {drawn}, observed {actual}"
+            ));
+        }
+    }
+    None
 }
 
 fn compare(game: &Game<'_>, target: &Frame, cards: &[(Value, usize)]) -> Vec<Difference> {
