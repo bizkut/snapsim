@@ -157,6 +157,18 @@ fn morph(game: &mut Game<'_>, card: usize) {
 }
 
 fn scarlet_witch(game: &mut Game<'_>, card: usize) {
+    let lane = game.cards[card].lane.unwrap();
+    // ScarletWitchBehavior::MorphLocation (0x7f2ff08) calls
+    // Game::GetRandomLocationDefId(excludeLocation) (0x7db248c): a rarity-weighted roll
+    // excluding only the morphing location's definition. Reference rules draw uniformly
+    // from the pool minus every location in play.
+    if !crate::cards::reference_rules_enabled() {
+        let current = game.lanes[lane].def.id;
+        if let Some(id) = game.random_location_def_id(Some(current)) {
+            game.replace_location(lane, id);
+        }
+        return;
+    }
     let choices: Vec<_> = game
         .location_pool
         .iter()
@@ -167,7 +179,6 @@ fn scarlet_witch(game: &mut Game<'_>, card: usize) {
         return;
     }
     let choice = game.rng.borrow_mut().randbelow(choices.len());
-    let lane = game.cards[card].lane.unwrap();
     game.replace_location(lane, choices[choice]);
 }
 
@@ -239,3 +250,36 @@ pub const SCARLET_WITCH: CardDef = CardDef {
     reveal: Some(scarlet_witch),
     ..CardDef::vanilla("ScarletWitch")
 };
+
+#[cfg(test)]
+mod rng_audit_tests {
+    use super::*;
+    use crate::position::{Position, build_game};
+    use crate::random::PythonRandom;
+    use serde_json::json;
+
+    #[test]
+    fn scarlet_witch_excludes_only_the_morphing_location() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 3, "energy": 3, "hand": [], "deck": [],
+            "locations": [
+                {"id": null, "mine": [{"id": "ScarletWitch"}], "theirs": []},
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        }))
+        .unwrap();
+        let mut rng = PythonRandom::seed(1);
+        let mut game = build_game(&position, &mut rng).unwrap();
+        let source = game.lanes[0].cards[0];
+        let here = crate::locations::get("Ruins").unwrap();
+        let there = crate::locations::get("Xandar").unwrap();
+        game.lanes[0].def = here;
+        game.lanes[1].def = there;
+        game.location_pool = vec![here, there];
+        game.starting_location_ids.clear();
+        scarlet_witch(&mut game, source);
+        assert_eq!(game.lanes[0].def.id, "Xandar");
+    }
+}

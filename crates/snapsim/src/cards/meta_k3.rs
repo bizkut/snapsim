@@ -385,10 +385,8 @@ fn beta_ray_bill(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let token = game.create_card("Stormbreaker", owner);
     game.push_deck(owner, token);
-    for index in (1..game.players[owner].deck.len()).rev() {
-        let selected = game.rng.borrow_mut().randbelow(index + 1);
-        game.swap_deck(owner, index, selected);
-    }
+    // AddStormbreaker (0x7e71370) ends with Deck::Shuffle (0x7cc0ac0).
+    game.shuffle_deck(owner);
 }
 
 // StormbreakerBehavior::GetTargets (0x7cc73a8), predicate 0x7cc7c14:

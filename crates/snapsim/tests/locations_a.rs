@@ -85,7 +85,7 @@ fn bar_sinister_does_not_repeat_reveal() {
     );
 }
 #[test]
-fn genosha_retains_one_highest_and_madripoor_buffs_ties() {
+fn genosha_keeps_tied_highest_and_madripoor_buffs_ties() {
     let mut rng = PythonRandom::seed(4);
     let mut game = game(&mut rng, "Madripoor");
     let a = play(&mut game, "Hulk", 0, 0);
@@ -99,7 +99,8 @@ fn genosha_retains_one_highest_and_madripoor_buffs_ties() {
     game.turn = 5;
     (game.lanes[0].def.on_turn_end.unwrap())(&mut game, 0);
     assert!(game.cards[low].lane.is_none());
-    assert_ne!(game.cards[a].lane.is_some(), game.cards[b].lane.is_some());
+    // The client keeps every card tied for the highest printed cost (no roll).
+    assert!(game.cards[a].lane.is_some() && game.cards[b].lane.is_some());
 }
 
 #[test]
@@ -168,13 +169,14 @@ fn dream_and_elysium_apply_in_location_order() {
 }
 
 #[test]
-fn danger_room_uses_one_random_float_per_play() {
+fn danger_room_rolls_zero_to_ninety_nine_per_play() {
     for seed in 0..20 {
         let mut first_rng = PythonRandom::seed(seed);
         let mut second_rng = PythonRandom::seed(seed);
         let mut first = game(&mut first_rng, "DangerRoom");
         let second = game(&mut second_rng, "DangerRoom");
-        let expected = second.rng.borrow_mut().random() < 0.25;
+        // Client: one integer Roll(0, 100), destroy below 25.
+        let expected = second.rng.borrow_mut().randbelow(100) < 25;
         let card = first.create_card("Wasp", 0);
         first.cards[card].lane = Some(0);
         first.cards[card].revealed = true;

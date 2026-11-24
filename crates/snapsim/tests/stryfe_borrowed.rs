@@ -155,6 +155,9 @@ fn nico_spells_register_independent_player_effects() {
     {
         let mut rng = PythonRandom::seed(3);
         let mut game = game(&mut rng);
+        // The fixture's location pool is its three starting lanes, which the client's
+        // random location pick (Game::GetRandomLocationDefId 0x7db248c) excludes.
+        game.starting_location_ids.clear();
         let (source, _) = borrow(&mut game, name);
         assert!(game.players[0].pending_effects.is_empty(), "{name}");
         let effect = &game.players[1].pending_effects[0];

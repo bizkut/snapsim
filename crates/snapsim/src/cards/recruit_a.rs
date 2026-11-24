@@ -201,28 +201,55 @@ fn hood(g: &mut Game<'_>, id: usize) {
 }
 fn ironheart(g: &mut Game<'_>, id: usize) {
     let owner = g.cards[id].owner;
-    let allies: Vec<_> = g
-        .lanes
-        .iter()
-        .flat_map(|lane| lane.cards.iter().copied())
-        .filter(|&other| other != id && g.cards[other].revealed && g.cards[other].owner == owner)
+    if crate::cards::reference_rules_enabled() {
+        let allies: Vec<_> = g
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .filter(|&other| {
+                other != id && g.cards[other].revealed && g.cards[other].owner == owner
+            })
+            .collect();
+        let selected = g
+            .rng
+            .borrow_mut()
+            .sample_indices(allies.len(), allies.len().min(2));
+        for index in selected {
+            g.add_power(allies[index], 3, owner);
+        }
+        return;
+    }
+    // IronheartBehavior::BuffCards (0x7ece770): Game::Shuffle (0x4b12f30) of
+    // the revealed allies in resolution order, then Take(2).
+    let mut allies: Vec<_> = g
+        .revealed_cards_in_resolution_order()
+        .into_iter()
+        .filter(|&other| other != id && g.cards[other].owner == owner)
         .collect();
-    let selected = g
-        .rng
-        .borrow_mut()
-        .sample_indices(allies.len(), allies.len().min(2));
-    for index in selected {
-        g.add_power(allies[index], 3, owner);
+    for i in 0..allies.len().saturating_sub(1) {
+        let j = i + g.rng.borrow_mut().randbelow(allies.len() - i);
+        allies.swap(i, j);
+    }
+    for &target in allies.iter().take(2) {
+        g.add_power(target, 3, owner);
     }
 }
 fn korg(g: &mut Game<'_>, id: usize) {
     let opponent = 1 - g.cards[id].owner;
     let rock = g.create_card("Rock", opponent);
-    let index = g
-        .rng
-        .borrow_mut()
-        .randbelow(g.players[opponent].deck.len() + 1);
-    g.put_deck(opponent, index, rock);
+    if crate::cards::reference_rules_enabled() {
+        let index = g
+            .rng
+            .borrow_mut()
+            .randbelow(g.players[opponent].deck.len() + 1);
+        g.put_deck(opponent, index, rock);
+        return;
+    }
+    // KorgBehavior::ShuffleRocks (0x7ee1d1c) creates the Rock in the deck
+    // and shuffles the whole deck (Deck::Shuffle, 0x7cc0ac0).
+    let end = g.players[opponent].deck.len();
+    g.put_deck(opponent, end, rock);
+    g.shuffle_deck(opponent);
 }
 fn lady_sif(g: &mut Game<'_>, id: usize) {
     let owner = g.cards[id].owner;
@@ -264,5 +291,89 @@ fn lizard(g: &mut Game<'_>, id: usize) {
         .count();
     if count >= 4 {
         g.add_ongoing_power(id, -4, g.cards[id].owner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::random::PythonRandom;
+
+    fn game_for<'a>(rng: &'a mut PythonRandom) -> Game<'a> {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        Game::new([&deck, &deck], &lanes, rng).unwrap()
+    }
+
+    #[test]
+    fn ironheart_shuffles_resolution_ordered_allies_and_takes_two() {
+        let mut rng = PythonRandom::seed(95);
+        let mut game = game_for(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let first = game.create_card("Wasp", 0);
+        game.add_card(first, 2, 0, true);
+        let source = game.create_card("Ironheart", 0);
+        game.add_card(source, 0, 0, true);
+        let second = game.create_card("Hulk", 0);
+        game.add_card(second, 1, 0, true);
+        let third = game.create_card("Cyclops", 0);
+        game.add_card(third, 1, 0, true);
+        let mut allies = [first, second, third];
+        let before: Vec<_> = allies.iter().map(|&id| game.cards[id].power()).collect();
+        ironheart(&mut game, source);
+        // IronheartBehavior::BuffCards (0x7ece770): Game::Shuffle (0x4b12f30)
+        // of GetAllRevealedCards (resolution order), then Take(2).
+        for i in 0..allies.len() - 1 {
+            let j = i + control.randbelow(allies.len() - i);
+            allies.swap(i, j);
+        }
+        let ordered = [first, second, third];
+        for (slot, &id) in ordered.iter().enumerate() {
+            let buffed = allies[..2].contains(&id);
+            assert_eq!(
+                game.cards[id].power(),
+                before[slot] + if buffed { 3 } else { 0 }
+            );
+        }
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn korg_shuffles_the_rock_into_the_whole_opponent_deck() {
+        let mut rng = PythonRandom::seed(96);
+        let mut game = game_for(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let source = game.create_card("Korg", 0);
+        let mut expected = game.players[1].deck.clone();
+        let rock = game.cards.len();
+        expected.push(rock);
+        korg(&mut game, source);
+        // KorgBehavior::ShuffleRocks (0x7ee1d1c): create, then Deck::Shuffle (0x7cc0ac0).
+        for i in 0..expected.len() - 1 {
+            let j = i + control.randbelow(expected.len() - i);
+            expected.swap(i, j);
+        }
+        assert_eq!(game.players[1].deck, expected);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
     }
 }

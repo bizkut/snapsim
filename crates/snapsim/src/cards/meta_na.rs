@@ -195,14 +195,13 @@ fn doom_2099(game: &mut Game<'_>, card: usize) {
         return;
     }
     let bot = game.create_card("DoomBot2099", owner);
-    let lanes: Vec<_> = (0..3)
-        .filter(|&lane| game.can_add(bot, lane, owner))
-        .collect();
-    if lanes.is_empty() {
-        game.cards.pop();
-    } else {
-        let lane = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
-        game.add_card(bot, lane, owner, true);
+    // GetRandomLocationToSpawnCard (0x7db2b64) falls back to every location
+    // when none can spawn the bot, still consuming a roll.
+    match game.random_location_to_spawn_card(bot, owner, None, true) {
+        Some(lane) if game.add_card(bot, lane, owner, true) => {}
+        _ => {
+            game.cards.pop();
+        }
     }
 }
 
@@ -254,11 +253,9 @@ fn hela(game: &mut Game<'_>, card: usize) {
             continue;
         }
         let target = candidates[game.rng.borrow_mut().randbelow(candidates.len())];
-        let lanes: Vec<_> = (0..3)
-            .filter(|&lane| game.can_add(target, lane, owner))
-            .collect();
-        if !lanes.is_empty() {
-            let lane = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
+        // GetRandomLocationToSpawnCard (0x7db2b64) falls back to every
+        // location when none can spawn the card, still consuming a roll.
+        if let Some(lane) = game.random_location_to_spawn_card(target, owner, None, true) {
             game.resurrect_from_zone(target, lane, owner);
         }
     }
@@ -307,11 +304,9 @@ fn death_fractured(game: &mut Game<'_>, card: usize) {
         {
             continue;
         }
-        let lanes: Vec<_> = (0..3)
-            .filter(|&lane| game.can_add(target, lane, owner))
-            .collect();
-        if !lanes.is_empty() {
-            let lane = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
+        // GetRandomLocationToSpawnCard (0x7db2b64) falls back to every
+        // location when none can spawn the card, still consuming a roll.
+        if let Some(lane) = game.random_location_to_spawn_card(target, owner, None, true) {
             game.resurrect_from_zone(target, lane, owner);
         }
     }
@@ -734,6 +729,77 @@ mod tests {
                 .iter()
                 .flat_map(|lane| &lane.cards)
                 .any(|&id| game.cards[id].def.id == "DoomBot2099")
+        );
+    }
+    // GetRandomLocationToSpawnCard (0x7db2b64) rolls over all three locations
+    // when Stardust blocks every spawn, so each card consumes exactly that roll.
+    fn blocked_game<'a>(rng: &'a mut PythonRandom) -> Game<'a> {
+        let mut game = setup(rng);
+        let stardust = game.create_card("Stardust", 1);
+        game.add_card(stardust, 0, 1, true);
+        assert!(!game.spawns_allowed());
+        game
+    }
+    #[test]
+    fn doom_rolls_fallback_location_when_spawns_are_blocked() {
+        let mut rng = PythonRandom::seed(41);
+        let mut game = blocked_game(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let card = game.create_card("Doom2099", 0);
+        game.players[0]
+            .staged_history
+            .push(crate::game::StagedPlay {
+                turn: game.turn,
+                card,
+                def_id: "Doom2099",
+                printed_cost: 4,
+                created: false,
+                resolved: true,
+            });
+        let cards = game.cards.len();
+        doom_2099(&mut game, card);
+        control.randbelow(3);
+        assert_eq!(game.cards.len(), cards);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+    #[test]
+    fn death_fractured_rolls_fallback_location_per_destroyed_character() {
+        let mut rng = PythonRandom::seed(42);
+        let mut game = blocked_game(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let card = game.create_card("DeathFracturedFrontier", 0);
+        let first = game.create_card("Wasp", 0);
+        let second = game.create_card("Cyclops", 0);
+        game.players[0]
+            .graveyard
+            .extend([(first, Some(0)), (second, Some(1))]);
+        death_fractured(&mut game, card);
+        control.randbelow(3);
+        control.randbelow(3);
+        assert!(game.cards[first].lane.is_none() && game.cards[second].lane.is_none());
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+    #[test]
+    fn hela_rolls_candidate_then_fallback_location_per_cost() {
+        let mut rng = PythonRandom::seed(43);
+        let mut game = blocked_game(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let card = game.create_card("Hela", 0);
+        let wasp = game.create_card("Wasp", 0);
+        game.players[0].discard.push(wasp);
+        hela(&mut game, card);
+        control.randbelow(1);
+        control.randbelow(3);
+        assert!(game.cards[wasp].lane.is_none());
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
         );
     }
     #[test]

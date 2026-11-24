@@ -437,9 +437,6 @@ fn esme_cuckoo(game: &mut Game<'_>, card: usize) {
 // CreateACopy 0x7ef9ad0 rolls lowest-current-cost opposing hand characters.
 fn mirage(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
-    if game.players[owner].hand.len() >= 7 {
-        return;
-    }
     let mut lowest = i32::MAX;
     let mut targets = [0; 7];
     let mut count = 0;
@@ -461,6 +458,11 @@ fn mirage(game: &mut Game<'_>, card: usize) {
         return;
     }
     let target = targets[game.rng.borrow_mut().randbelow(count)];
+    // CreateACopy has no hand-space check before the roll; CreateCopy
+    // (0x7daadf4) into a full hand simply fails.
+    if game.players[owner].hand.len() >= 7 {
+        return;
+    }
     let copy = game.copy_card(target, owner);
     if game.add_hand(owner, copy, false) {
         game.add_power(copy, 2, owner);
@@ -1239,6 +1241,44 @@ mod tests {
         let copy = game.players[0].hand[0];
         assert_eq!(game.cards[copy].def.id, "Hulk");
         assert_eq!(game.cards[copy].power(), 16);
+    }
+    // CreateACopy (0x7ef9ad0) rolls before CreateCopy fails on a full hand.
+    #[test]
+    fn mirage_rolls_even_when_the_hand_is_full() {
+        let mut rng = PythonRandom::seed(1);
+        let deck = [
+            "Wasp",
+            "Cyclops",
+            "Hulk",
+            "Shocker",
+            "Medusa",
+            "Sentinel",
+            "Hawkeye",
+            "IronMan",
+            "MistyKnight",
+            "TheThing",
+            "Quicksilver",
+            "Abomination",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.players[0].hand.clear();
+        while game.players[0].hand.len() < 7 {
+            let filler = game.create_card("Wasp", 0);
+            game.add_hand(0, filler, false);
+        }
+        let source = game.create_card("Mirage", 0);
+        let target = game.create_card("Hulk", 1);
+        game.players[1].hand = vec![target];
+        let mut expected = game.rng.borrow().clone_rng();
+        expected.randbelow(1);
+        mirage(&mut game, source);
+        assert_eq!(game.players[0].hand.len(), 7);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(1_000_000),
+            expected.randbelow(1_000_000)
+        );
     }
     #[test]
     fn rogue_scion_steals_highest_printed_cost_hand_card() {

@@ -57,8 +57,9 @@ fn mind_stone(game: &mut Game<'_>, card: usize) {
             )
         })
         .collect();
-    for i in (1..stones.len()).rev() {
-        let j = game.rng.borrow_mut().randbelow(i + 1);
+    // Game::Shuffle (0x4b12f30): forward pass, swap i with Roll(i, n).
+    for i in 0..stones.len().saturating_sub(1) {
+        let j = i + game.rng.borrow_mut().randbelow(stones.len() - i);
         stones.swap(i, j);
     }
     for target in stones.into_iter().take(2) {
@@ -143,6 +144,33 @@ mod tests {
         assert_eq!(game.players[0].deck, [other]);
         assert!(game.players[0].hand.contains(&a));
         assert!(game.players[0].hand.contains(&b));
+    }
+
+    #[test]
+    fn mind_shuffles_stones_with_the_forward_pass() {
+        fn setup(rng: &mut PythonRandom) -> (Game<'_>, usize, Vec<usize>) {
+            let mut game = build_game(&position("MindStone"), rng).unwrap();
+            let source = game.lanes[0].cards[0];
+            let stones: Vec<_> = ["SpaceStone", "SoulStone", "PowerStone"]
+                .into_iter()
+                .map(|name| game.create_card(name, 0))
+                .collect();
+            game.players[0].deck.extend(stones.iter().copied());
+            (game, source, stones)
+        }
+        let mut rng = PythonRandom::seed(3);
+        let (mut game, source, stones) = setup(&mut rng);
+        mind_stone(&mut game, source);
+        let mut expected_rng = PythonRandom::seed(3);
+        let (expected, _, _) = setup(&mut expected_rng);
+        let mut order = stones.clone();
+        for i in 0..2 {
+            let j = i + expected.rng.borrow_mut().randbelow(3 - i);
+            order.swap(i, j);
+        }
+        assert!(game.players[0].hand.contains(&order[0]));
+        assert!(game.players[0].hand.contains(&order[1]));
+        assert!(game.players[0].deck.contains(&order[2]));
     }
 
     #[test]

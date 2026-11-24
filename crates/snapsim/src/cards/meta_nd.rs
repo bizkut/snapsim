@@ -175,8 +175,9 @@ fn pixie(game: &mut Game<'_>, card: usize) {
         .filter(|&id| original.map_or(!game.cards[id].created, |entities| entities.contains(&id)))
         .collect();
     let mut costs: Vec<_> = targets.iter().map(|&id| game.printed_cost(id)).collect();
-    for i in (1..costs.len()).rev() {
-        let j = game.rng.borrow_mut().randbelow(i + 1);
+    // Game::Shuffle<T> (0x4b12f30) rolls Roll(i, count) for i in 0..count - 1.
+    for i in 0..costs.len().saturating_sub(1) {
+        let j = i + game.rng.borrow_mut().randbelow(costs.len() - i);
         costs.swap(i, j);
     }
     for (target, cost) in targets.into_iter().zip(costs) {
@@ -454,6 +455,44 @@ mod tests {
             assert_eq!(stones.len(), 6);
             assert!(stones.iter().all(|&&id| game.cards[id].created));
         }
+    }
+
+    #[test]
+    fn pixie_shuffles_costs_with_the_forward_game_shuffle() {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(61);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        let mut control = game.rng.borrow().clone_rng();
+        let source = game.create_card("Pixie", 0);
+        let targets = game.players[0].deck.clone();
+        let mut costs: Vec<_> = targets.iter().map(|&id| game.printed_cost(id)).collect();
+        pixie(&mut game, source);
+        // Game::Shuffle<T> (0x4b12f30): Roll(i, count) for i in 0..count - 1.
+        for i in 0..costs.len() - 1 {
+            let j = i + control.randbelow(costs.len() - i);
+            costs.swap(i, j);
+        }
+        let after: Vec<_> = targets.iter().map(|&id| game.card_cost(id)).collect();
+        assert_eq!(after, costs);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
     }
 
     #[test]

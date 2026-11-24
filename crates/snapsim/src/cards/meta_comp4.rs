@@ -154,10 +154,17 @@ pub(crate) fn red_onslaught_pre_run(game: &mut Game<'_>, card: usize) {
     }
     game.cards[card].set_ability_state(Some(Box::new(true)));
     let mut rng = game.rng.borrow_mut();
-    let count = RED_ONSLAUGHT_IMPLEMENTED.len().min(3);
-    let mut choices = rng.sample_indices(RED_ONSLAUGHT_IMPLEMENTED.len(), count);
-    for i in (1..choices.len()).rev() {
-        let j = rng.randbelow(i + 1);
+    // GetOngoingCards (0x7f25110): Game::GetRandomCardDefIds (0x7db1dd8) picks each
+    // definition with Roll(0, remaining) and removes it (PickCardDefIds 0x7dc9ca4), then
+    // the forward Game::Shuffle pass (0x4b12528) reorders the sample.
+    let mut remaining: Vec<usize> = (0..RED_ONSLAUGHT_IMPLEMENTED.len()).collect();
+    let mut choices = Vec::new();
+    for _ in 0..remaining.len().min(3) {
+        let index = rng.randbelow(remaining.len());
+        choices.push(remaining.remove(index));
+    }
+    for i in 0..choices.len().saturating_sub(1) {
+        let j = i + rng.randbelow(choices.len() - i);
         choices.swap(i, j);
     }
     drop(rng);

@@ -97,7 +97,9 @@ fn mobius(game: &Game<'_>, guard: usize, target: usize, old: i32, new: i32) -> b
 fn kluh(game: &mut Game<'_>, card: usize) {
     // GetDistinctCostCards (0x7ee0b90) groups revealed cards by printed cost;
     // ApplyCostReductions (0x7ee0d98) rolls once per cost, excluding zero-cost hand cards.
-    for seat in 0..2 {
+    // ReduceCostsForBothPlayers (0x7ee0950) handles the owner, then the opponent.
+    let owner = game.cards[card].owner;
+    for seat in [owner, 1 - owner] {
         let mut costs = Vec::new();
         for lane in &game.lanes {
             for &id in &lane.cards {
@@ -220,10 +222,8 @@ fn daredevil(game: &mut Game<'_>, card: usize) {
         let demon = game.create_card("Demon", seat);
         game.push_deck(seat, demon);
     }
-    for i in (1..game.players[seat].deck.len()).rev() {
-        let j = game.rng.borrow_mut().randbelow(i + 1);
-        game.swap_deck(seat, i, j);
-    }
+    // Deck::Shuffle (0x7cc0ac0) is Game::Shuffle's forward pass.
+    game.shuffle_deck(seat);
 }
 
 fn daredevil_draw(game: &mut Game<'_>, card: usize, event: Event) {
@@ -363,6 +363,54 @@ mod tests {
         g.players[0].hand = vec![target];
         kluh(&mut g, k);
         assert_eq!(g.cards[target].cost, 4);
+    }
+
+    #[test]
+    fn kluh_rolls_for_its_owner_before_the_opponent() {
+        fn setup(rng: &mut PythonRandom) -> (Game<'_>, usize, Vec<usize>, Vec<usize>) {
+            let mut g = game(rng);
+            let k = place(&mut g, "Kluh", 1, true);
+            place(&mut g, "Hulk", 0, true);
+            let own: Vec<_> = (0..2).map(|_| g.create_card("Hulk", 1)).collect();
+            let other: Vec<_> = (0..3).map(|_| g.create_card("Hulk", 0)).collect();
+            g.players[1].hand = own.clone();
+            g.players[0].hand = other.clone();
+            (g, k, own, other)
+        }
+        let mut rng = PythonRandom::seed(21);
+        let (mut g, k, own, other) = setup(&mut rng);
+        kluh(&mut g, k);
+        let mut expected_rng = PythonRandom::seed(21);
+        let (e, _, _, _) = setup(&mut expected_rng);
+        let first = e.rng.borrow_mut().randbelow(2);
+        let second = e.rng.borrow_mut().randbelow(3);
+        for (i, &id) in own.iter().enumerate() {
+            assert_eq!(g.cards[id].cost, if i == first { 5 } else { 6 });
+        }
+        for (i, &id) in other.iter().enumerate() {
+            assert_eq!(g.cards[id].cost, if i == second { 5 } else { 6 });
+        }
+    }
+
+    #[test]
+    fn daredevil_shuffles_with_the_forward_pass() {
+        let mut rng = PythonRandom::seed(10);
+        let mut g = game(&mut rng);
+        let d = place(&mut g, "ShadowlandsDaredevil", 0, true);
+        let mut expected_rng = PythonRandom::seed(10);
+        let mut e = game(&mut expected_rng);
+        let ed = place(&mut e, "ShadowlandsDaredevil", 0, true);
+        for _ in 0..3 {
+            let demon = e.create_card("Demon", 0);
+            e.push_deck(0, demon);
+        }
+        for i in 0..e.players[0].deck.len() - 1 {
+            let j = i + e.rng.borrow_mut().randbelow(e.players[0].deck.len() - i);
+            e.swap_deck(0, i, j);
+        }
+        let _ = ed;
+        daredevil(&mut g, d);
+        assert_eq!(g.players[0].deck, e.players[0].deck);
     }
 
     #[test]

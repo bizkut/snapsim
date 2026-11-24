@@ -16,6 +16,8 @@ mod locations_nd;
 mod locations_ne;
 mod locations_si;
 mod recruit_a;
+#[cfg(test)]
+mod test_support;
 mod turns;
 
 pub(crate) use locations_d2::cave_candidate;
@@ -334,6 +336,16 @@ pub static REGISTRY: &[LocationDef] = &[
     locations_si::SANCTUM_INFINITUM,
     location("Ego", 0, 0, 1, false),
 ];
+
+/// Client `Game::Shuffle<T>` (0x4b12f30): forward Fisher–Yates, swapping each index
+/// `i < n - 1` with `Roll(i, n)`. The reference locations shuffled differently or not at all.
+pub(crate) fn client_shuffle<T>(game: &Game<'_>, values: &mut [T]) {
+    let count = values.len();
+    for index in 0..count.saturating_sub(1) {
+        let selected = index + game.rng.borrow_mut().randbelow(count - index);
+        values.swap(index, selected);
+    }
+}
 
 pub fn get(id: &str) -> Option<&'static LocationDef> {
     REGISTRY.iter().find(|entry| entry.id == id)

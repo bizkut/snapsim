@@ -82,12 +82,10 @@ fn makkari(game: &mut Game<'_>, card: usize) {
     if !game.players[owner].hand.contains(&card) {
         return;
     }
-    let candidates: Vec<_> = (0..3)
-        .filter(|&lane| game.can_add(card, lane, owner))
-        .collect();
-    if !candidates.is_empty() {
-        let index = game.rng.borrow_mut().randbelow(candidates.len());
-        game.move_hand_card_to_location(card, candidates[index]);
+    // GetRandomLocationToSpawnCard (0x7db2b64) falls back to every location
+    // when none can spawn the card, still consuming a roll.
+    if let Some(lane) = game.random_location_to_spawn_card(card, owner, None, true) {
+        game.move_hand_card_to_location(card, lane);
     }
 }
 
@@ -164,6 +162,9 @@ fn arishem_start(game: &mut Game<'_>, card: usize) {
         game.finish_creation_zone(created, false, owner);
         game.push_deck(owner, created);
     }
+    // ArishemBehavior::AddEnergyAndCards (0x7e6a51c) calls Deck::Shuffle
+    // (0x7cc0ac0) once after creating the cards.
+    game.shuffle_deck(owner);
     game.add_player_effect(
         owner,
         crate::game::PendingEffect {
@@ -343,6 +344,101 @@ fn sandman(game: &mut Game<'_>, _: usize) {
 mod tests {
     use super::*;
     use crate::random::PythonRandom;
+
+    #[test]
+    fn arishem_shuffles_the_deck_once_after_adding_its_cards() {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(81);
+        let mut control_rng = PythonRandom::seed(81);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let mut control = Game::new([&deck, &deck], &lanes, &mut control_rng).unwrap();
+        let source = game.create_card("Arishem", 0);
+        let control_source = control.create_card("Arishem", 0);
+        arishem_start(&mut game, source);
+        // Mirror of the client: 12 distinct random cards (GetRandomCardDefIds,
+        // 0x7db1dd8), created in order, then one Deck::Shuffle (0x7cc0ac0).
+        let mut chosen = [None; 12];
+        for index in 0..12 {
+            chosen[index] = control.random_card(|row| {
+                !control.players[0]
+                    .starting_deck
+                    .as_ref()
+                    .is_some_and(|deck| deck.contains(&row.carddefid.as_str()))
+                    && !chosen[..index].contains(&Some(row.carddefid.as_str()))
+            });
+        }
+        for id in chosen.into_iter().flatten() {
+            let created = control.create_card(id, 0);
+            control.finish_creation_zone(created, false, 0);
+            control.push_deck(0, created);
+        }
+        control.shuffle_deck(0);
+        let _ = control_source;
+        let ids = |g: &Game<'_>| -> Vec<&'static str> {
+            g.players[0]
+                .deck
+                .iter()
+                .map(|&id| g.cards[id].def.id)
+                .collect()
+        };
+        assert_eq!(ids(&game), ids(&control));
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.rng.borrow_mut().randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn makkari_rolls_fallback_location_when_spawns_are_blocked() {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(5);
+        let mut control_rng = PythonRandom::seed(5);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let control = Game::new([&deck, &deck], &lanes, &mut control_rng).unwrap();
+        let stardust = game.create_card("Stardust", 0);
+        game.add_card(stardust, 0, 0, true);
+        assert!(!game.spawns_allowed());
+        let card = game.create_card("Makkari", 0);
+        game.players[0].hand.push(card);
+        makkari(&mut game, card);
+        // GetRandomLocationToSpawnCard (0x7db2b64) rolls over all three locations.
+        control.rng.borrow_mut().randbelow(3);
+        assert!(game.players[0].hand.contains(&card));
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.rng.borrow_mut().randbelow(10000)
+        );
+    }
 
     #[test]
     fn makkari_runs_from_hand_once_and_not_when_no_lane_has_room() {

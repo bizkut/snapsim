@@ -74,13 +74,12 @@ fn crimson_citadel(game: &mut Game<'_>, lane: usize, event: Event) {
         return;
     }
     spent[seat] = true;
+    // The pool is Game::GetAllRevealedCards (0x7dac98c, latest-resolution order) filtered
+    // by the opponent's characters; the roll indexes that list.
     let choices: Vec<_> = game
-        .lanes
-        .iter()
-        .flat_map(|l| l.cards.iter().copied())
-        .filter(|&id| {
-            game.cards[id].owner != seat && game.cards[id].revealed && game.is_character(id)
-        })
+        .revealed_cards_in_resolution_order()
+        .into_iter()
+        .filter(|&id| game.cards[id].owner != seat && game.is_character(id))
         .collect();
     if !choices.is_empty() {
         let index = game.rng.borrow_mut().randbelow(choices.len());
@@ -332,5 +331,26 @@ mod tests {
             [g.cards[ids[0]].permanent, g.cards[ids[1]].permanent],
             [before[0] + 1, before[1] + 1]
         );
+    }
+
+    // StealForNextPlay (0x7d4b3c0) indexes Game::GetAllRevealedCards order.
+    #[test]
+    fn crimson_citadel_roll_indexes_resolution_order() {
+        use crate::locations::test_support::{assert_same_stream, fill, rng_game};
+        let mut rng = PythonRandom::seed(13);
+        let mut game = rng_game(&mut rng);
+        let mine = fill(&mut game, 0, 0, 1)[0];
+        let a = fill(&mut game, 1, 1, 1)[0];
+        let b = fill(&mut game, 1, 2, 1)[0];
+        game.cards[a].latest_resolution_order = 5;
+        game.cards[b].latest_resolution_order = 2;
+        game.lanes[0].state = Some(Box::new([false; 2]));
+        game.played[0].push((mine, 0));
+        let mut expected = game.rng.borrow().clone_rng();
+        let picked = [b, a][expected.randbelow(2)];
+        let before = game.cards[picked].power();
+        crimson_citadel(&mut game, 0, Event::CardResolved { card: mine });
+        assert_eq!(game.cards[picked].power(), before - 2);
+        assert_same_stream(&game, &mut *expected);
     }
 }

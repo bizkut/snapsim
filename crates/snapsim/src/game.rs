@@ -1058,6 +1058,9 @@ pub struct Game<'a> {
     pub human_seat: Option<usize>,
     pub lanes: [Lane; 3],
     pub location_pool: Vec<&'static LocationDef>,
+    /// Definitions of the locations the game started with. `Game::GetRandomLocationDefId`
+    /// (0x7db248c) never draws these (final `Except`, 0x7db2484).
+    pub starting_location_ids: Vec<&'static str>,
     pub next_resolution_order: u32,
     pub turn: u8,
     pub stakes: Option<Stakes>,
@@ -1149,6 +1152,7 @@ impl<'a> Game<'a> {
             human_seat: self.human_seat,
             lanes: self.lanes.clone(),
             location_pool: self.location_pool.clone(),
+            starting_location_ids: self.starting_location_ids.clone(),
             next_resolution_order: self.next_resolution_order,
             turn: self.turn,
             stakes: self.stakes.clone(),
@@ -2155,6 +2159,7 @@ impl<'a> Game<'a> {
             human_seat: None,
             lanes,
             location_pool: available,
+            starting_location_ids: Vec::new(),
             turn: 0,
             stakes: None,
             next_resolution_order: 1,
@@ -2229,6 +2234,7 @@ impl<'a> Game<'a> {
         } else {
             game.emit(Event::GameStart);
         }
+        game.starting_location_ids = game.lanes.iter().map(|lane| lane.def.id).collect();
         // StartGame::OnEnter (0x7e47c68) triggers game-start before the opening draw.
         for seat in 0..2 {
             game.draw_initial_hand(seat);
@@ -3646,6 +3652,59 @@ impl<'a> Game<'a> {
                 })
     }
 
+    // Game::GetRandomLocationDefId (0x7db248c): one Game::Roll over the location
+    // pool weighted by rarity (`LocationRarityDefList::.cctor` 0x7ac3c60 stores
+    // weights 200/125/75/15 for rarity ids 1..4, read by `FindWeight` 0x7c67e94 and
+    // `<.cctor>b__5_0` 0x7c68250), skipping the definition of `excluded`.
+    // [INFERENCE] ids 1..4 are common, uncommon, rare, ultra rare. Cumulative
+    // order follows `location_pool`; the client's own order (WeightedTable at
+    // 0x60708f0, generic code) is not decoded, so only the distribution is exact.
+    fn location_def_drawable(&self, id: &str, excluded: Option<&str>) -> bool {
+        Some(id) != excluded && !self.starting_location_ids.contains(&id)
+    }
+
+    pub(crate) fn random_location_def_id(&self, excluded: Option<&str>) -> Option<&'static str> {
+        static WEIGHTS: std::sync::OnceLock<std::collections::HashMap<String, u32>> =
+            std::sync::OnceLock::new();
+        let weights = WEIGHTS.get_or_init(|| {
+            crate::data::locations()
+                .into_iter()
+                .map(|row| {
+                    let weight = match row.rarity.as_str() {
+                        "uncommon" => 125,
+                        "rare" => 75,
+                        "ultra rare" => 15,
+                        _ => 200,
+                    };
+                    (row.carddefid, weight)
+                })
+                .collect()
+        });
+        let weight = |id: &str| weights.get(id).copied().unwrap_or(200) as usize;
+        let total: usize = self
+            .location_pool
+            .iter()
+            .filter(|def| self.location_def_drawable(def.id, excluded))
+            .map(|def| weight(def.id))
+            .sum();
+        if total == 0 {
+            return None;
+        }
+        let mut roll = self.rng.borrow_mut().randbelow(total);
+        for def in self
+            .location_pool
+            .iter()
+            .filter(|def| self.location_def_drawable(def.id, excluded))
+        {
+            let w = weight(def.id);
+            if roll < w {
+                return Some(def.id);
+            }
+            roll -= w;
+        }
+        None
+    }
+
     // Game::GetRandomLocationToMoveCard (0x7db2f50): try legal locations
     // other than the excluded location, then optionally all other locations.
     pub(crate) fn random_location_to_move_card(
@@ -3665,6 +3724,36 @@ impl<'a> Game<'a> {
         if count == 0 && fallback_to_any {
             for lane in 0..self.lanes.len() {
                 if lane != excluded {
+                    candidates[count] = lane;
+                    count += 1;
+                }
+            }
+        }
+        (count != 0).then(|| candidates[self.rng.borrow_mut().randbelow(count)])
+    }
+
+    // Game::GetRandomLocationToSpawnCard (0x7db2b64): one roll over the
+    // locations other than `excluded` that can spawn `card`; with
+    // `fallback_to_any` and no spawnable location, over all other locations.
+    // The caller must still check that the card can be added at the result.
+    pub(crate) fn random_location_to_spawn_card(
+        &self,
+        card: usize,
+        seat: usize,
+        excluded: Option<usize>,
+        fallback_to_any: bool,
+    ) -> Option<usize> {
+        let mut candidates = [0; 3];
+        let mut count = 0;
+        for lane in 0..self.lanes.len() {
+            if Some(lane) != excluded && self.can_add(card, lane, seat) {
+                candidates[count] = lane;
+                count += 1;
+            }
+        }
+        if count == 0 && fallback_to_any {
+            for lane in 0..self.lanes.len() {
+                if Some(lane) != excluded {
                     candidates[count] = lane;
                     count += 1;
                 }
@@ -4268,17 +4357,25 @@ impl<'a> Game<'a> {
             return Some(first);
         }
         let card = self.create_card("ZombieHorde", seat);
-        let targets: Vec<_> = (0..3)
-            .filter(|&lane| lane != origin && self.can_add(card, lane, seat))
-            .collect();
-        if targets.is_empty() {
+        // LocationCreateNewZombie (0x7e0feac) and CardCreateNewZombie (0x7e0fd58) call
+        // Game::GetRandomLocationToSpawnCard (0x7db2b64) excluding the source location with
+        // fallbackToAnyLocation = true: with no location that can take the Horde they still
+        // roll over every other location and the creation fails there. The reference chose
+        // only among spawnable locations and never rolled when there were none.
+        let target = if cards::reference_rules_enabled() {
+            let targets: Vec<_> = (0..3)
+                .filter(|&lane| lane != origin && self.can_add(card, lane, seat))
+                .collect();
+            (!targets.is_empty()).then(|| targets[self.rng.borrow_mut().randbelow(targets.len())])
+        } else {
+            self.random_location_to_spawn_card(card, seat, Some(origin), true)
+        };
+        // A new Horde is placed first (RandomCreateNewZombie and its siblings) and then grows
+        // through AddPowerPermanently, so its growth triggers in play (e.g. Venus).
+        if !target.is_some_and(|lane| self.add_card(card, lane, seat, true)) {
             self.cards.pop();
             return None;
         }
-        let choice = self.rng.borrow_mut().randbelow(targets.len());
-        // A new Horde is placed first (RandomCreateNewZombie and its siblings) and then grows
-        // through AddPowerPermanently, so its growth triggers in play (e.g. Venus).
-        self.add_card(card, targets[choice], seat, true);
         self.add_power(card, power, seat);
         if power != 0 {
             self.ongoing();

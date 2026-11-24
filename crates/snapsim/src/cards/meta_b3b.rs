@@ -319,18 +319,12 @@ fn apply_spell(game: &mut Game<'_>, effect: &mut PendingEffect, target: Option<u
             game.add_power(target, 2, owner);
         }
         5 => {
-            // Client's weighted GetRandomLocationDefId (0x7db248c) is approximated
-            // by the simulator's implemented location pool, without weights.
+            // GetRandomLocationDefId (0x7db248c): rarity-weighted, excluding the
+            // location's own definition.
             if let Some(lane) = game.cards[target].lane.or(game.cards[target].last_lane) {
-                let choices: Vec<_> = game
-                    .location_pool
-                    .iter()
-                    .filter(|location| location.id != game.lanes[lane].def.id)
-                    .map(|location| location.id)
-                    .collect();
-                if !choices.is_empty() {
-                    let index = game.rng.borrow_mut().randbelow(choices.len());
-                    game.replace_location(lane, choices[index]);
+                let current = game.lanes[lane].def.id;
+                if let Some(id) = game.random_location_def_id(Some(current)) {
+                    game.replace_location(lane, id);
                 }
             }
         }
@@ -400,12 +394,10 @@ fn jane(game: &mut Game<'_>, card: usize) {
     let rounds = 1 + usize::from(quickdraw(game, card));
     // PickAndModifyCharacters (0x7ed1900) repeats the entire random selection.
     for _ in 0..rounds {
-        let mut targets: Vec<_> = game
-            .lanes
-            .iter()
-            .flat_map(|lane| lane.cards.iter().copied())
-            .filter(|&id| id != card && game.cards[id].revealed && game.is_character(id))
-            .collect();
+        // ChangePower (0x7ed19f0) starts from Game::GetAllRevealedCards (0x7dac98c),
+        // ordered by latest resolution.
+        let mut targets = game.revealed_cards_in_resolution_order();
+        targets.retain(|&id| id != card && game.is_character(id));
         // Game::Shuffle (0x4b12f30) uses forward Fisher–Yates.
         for i in 0..targets.len().saturating_sub(1) {
             let j = i + game.rng.borrow_mut().randbelow(targets.len() - i);

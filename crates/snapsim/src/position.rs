@@ -2184,6 +2184,7 @@ pub(crate) fn build_game_with_generated<'a>(
         Some("opponent") => Some(1),
         _ => return Err("invalid priority".into()),
     };
+    let starting_location_ids: Vec<&'static str> = lanes.iter().map(|lane| lane.def.id).collect();
     let mut game = Game {
         cards: Vec::new(),
         move_provenance_known: false,
@@ -2197,6 +2198,7 @@ pub(crate) fn build_game_with_generated<'a>(
             .iter()
             .map(|id| location_def(id).expect("registered location"))
             .collect(),
+        starting_location_ids,
         turn: position.turn,
         stakes: None,
         next_resolution_order: 1,

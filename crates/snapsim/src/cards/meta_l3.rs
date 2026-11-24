@@ -769,8 +769,9 @@ fn scorn(game: &mut Game<'_>, card: usize) {
         .filter(|&id| game.cards[id].owner == owner && game.cards[id].revealed)
         .collect();
     game.discarded_to_hand_add_power(card, 2, owner);
-    for index in (1..targets.len()).rev() {
-        let selected = game.rng.borrow_mut().randbelow(index + 1);
+    // Game::Shuffle (0x4b12f30): forward pass, one Roll(i, len) per index.
+    for index in 0..targets.len().saturating_sub(1) {
+        let selected = index + game.rng.borrow_mut().randbelow(targets.len() - index);
         targets.swap(index, selected);
     }
     if let Some(&target) = targets.first() {

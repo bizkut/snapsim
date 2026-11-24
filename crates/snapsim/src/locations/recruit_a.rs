@@ -192,8 +192,15 @@ fn central_park(game: &mut Game<'_>, _: usize) {
 fn crimson(game: &Game<'_>, _: usize, card: usize, _: usize, _: usize) -> bool {
     game.card_cost(card) > 3
 }
+// DangerRoomBehavior::DestroyCard @ 0x7d4d318: Game::Roll(0, 100) below PercentChance (25)
+// destroys the card. The reference drew a CPython float below 0.25, the same probability
+// from a different RNG consumption.
 fn danger(game: &mut Game<'_>, _: usize, card: usize) {
-    let destroy = game.rng.borrow_mut().random() < 0.25;
+    let destroy = if crate::cards::reference_rules_enabled() {
+        game.rng.borrow_mut().random() < 0.25
+    } else {
+        game.rng.borrow_mut().randbelow(100) < 25
+    };
     if destroy {
         game.destroy_card(card);
     }
@@ -244,10 +251,38 @@ fn frontier(game: &mut Game<'_>, _: usize) {
 fn kitchen(game: &mut Game<'_>, _: usize) {
     matching(game, 1);
 }
+// GenoshaBehavior::DestroySmallCards @ 0x7d55abc takes Location::GetAllRevealedCards for each
+// player; with at least two it orders them by descending DefCost (key 0x7d564a4, the printed
+// cost), reads the first, and destroys every card whose DefCost differs. Equal-cost cards all
+// survive and no random roll is made. The reference kept one random card of the highest
+// current cost and destroyed the rest, hidden cards included.
 fn genosha(game: &mut Game<'_>, lane: usize) {
     if game.turn != 5 {
         return;
     }
+    if crate::cards::reference_rules_enabled() {
+        genosha_reference(game, lane);
+        return;
+    }
+    for seat in 0..2 {
+        let cards: Vec<_> = game.lanes[lane]
+            .cards
+            .iter()
+            .copied()
+            .filter(|&id| game.cards[id].owner == seat && game.cards[id].revealed)
+            .collect();
+        if cards.len() < 2 {
+            continue;
+        }
+        let highest = cards.iter().map(|&id| game.printed_cost(id)).max().unwrap();
+        for id in cards {
+            if game.printed_cost(id) != highest {
+                game.destroy_card(id);
+            }
+        }
+    }
+}
+fn genosha_reference(game: &mut Game<'_>, lane: usize) {
     for seat in 0..2 {
         let cards: Vec<_> = game.lanes[lane]
             .cards
@@ -322,9 +357,17 @@ fn flooding(game: &mut Game<'_>, lane: usize) {
         game.replace_location(lane, "Flooded");
     }
 }
-fn los_diablos(game: &mut Game<'_>, _: usize) {
+// LosDiablosBehavior::SpawnRuins @ 0x7d63384 rolls Game::Roll(0, n) over Game::GetLocations
+// filtered by `location != this` (predicate 0x7d6396c) before Location::MorphIntoNewLocation,
+// so only the other two locations can be ruined. The reference chose among all three.
+fn los_diablos(game: &mut Game<'_>, lane: usize) {
     if game.turn == 3 {
-        let target = game.rng.borrow_mut().randbelow(3);
+        let target = if crate::cards::reference_rules_enabled() {
+            game.rng.borrow_mut().randbelow(3)
+        } else {
+            let others: Vec<_> = (0..3).filter(|&other| other != lane).collect();
+            others[game.rng.borrow_mut().randbelow(others.len())]
+        };
         game.replace_location(target, "Ruins");
     }
 }
@@ -366,12 +409,19 @@ fn bar_sinister(game: &mut Game<'_>, lane: usize, card: usize) {
         }
     }
 }
+// DailyBugleBehavior::AddRandomCard @ 0x7d4cf74 calls Zone::GetRandomCard (0x7e06e70) on each
+// player's opponent hand and only then Game::CreateCopy into each hand; there is no earlier
+// hand-size test, so a full hand still consumes its roll. The reference skipped that roll.
 fn daily_bugle(game: &mut Game<'_>, _: usize) {
     let mut sources = [None; 2];
     for (seat, source) in sources.iter_mut().enumerate() {
         let hand = &game.players[1 - seat].hand;
-        if !hand.is_empty() && game.players[seat].hand.len() < 7 {
-            *source = Some(hand[game.rng.borrow_mut().randbelow(hand.len())]);
+        let full = game.players[seat].hand.len() >= 7;
+        if !hand.is_empty() && !(full && crate::cards::reference_rules_enabled()) {
+            let card = hand[game.rng.borrow_mut().randbelow(hand.len())];
+            if !full {
+                *source = Some(card);
+            }
         }
     }
     for (seat, source) in sources.into_iter().enumerate() {
@@ -384,5 +434,104 @@ fn daily_bugle(game: &mut Game<'_>, _: usize) {
 fn mindscape(game: &mut Game<'_>, _: usize) {
     if game.turn == 6 {
         game.swap_hands();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::game::Game;
+    use crate::random::PythonRandom;
+
+    fn rng_game(rng: &mut PythonRandom) -> Game<'_> {
+        let deck: Vec<String> = [
+            "Hulk",
+            "Medusa",
+            "Sentinel",
+            "IronMan",
+            "Hawkeye",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let locations = ["Genosha", "LosDiablos", "Xandar"].map(str::to_owned);
+        Game::new([&deck, &deck], &locations, rng).unwrap()
+    }
+
+    // GenoshaBehavior::DestroySmallCards (0x7d55abc): equal highest DefCost cards all
+    // survive and no roll is made.
+    #[test]
+    fn genosha_keeps_every_card_of_the_highest_printed_cost() {
+        let mut rng = PythonRandom::seed(2);
+        let mut game = rng_game(&mut rng);
+        let a = game.create_card("Hulk", 0);
+        let b = game.create_card("Hulk", 0);
+        let c = game.create_card("Wasp", 0);
+        for id in [a, b, c] {
+            assert!(game.add_card(id, 0, 0, false));
+            game.cards[id].revealed = true;
+        }
+        game.turn = 5;
+        let mut expected = game.rng.borrow().clone_rng();
+        super::genosha(&mut game, 0);
+        assert_eq!(game.cards[a].lane, Some(0));
+        assert_eq!(game.cards[b].lane, Some(0));
+        assert_ne!(game.cards[c].lane, Some(0));
+        assert_eq!(
+            game.rng.borrow_mut().getrandbits(32),
+            expected.getrandbits(32)
+        );
+    }
+
+    // LosDiablosBehavior::SpawnRuins (0x7d63384) never ruins itself.
+    #[test]
+    fn los_diablos_ruins_only_other_locations() {
+        for seed in 0..20 {
+            let mut rng = PythonRandom::seed(seed);
+            let mut game = rng_game(&mut rng);
+            game.turn = 3;
+            game.lanes[1].def = crate::locations::get("LosDiablos").unwrap();
+            super::los_diablos(&mut game, 1);
+            assert_eq!(game.lanes[1].def.id, "LosDiablos");
+        }
+    }
+
+    // AddRandomCard (0x7d4cf74): a full hand still consumes its roll.
+    #[test]
+    fn daily_bugle_rolls_when_own_hand_is_full() {
+        use crate::locations::test_support::{assert_same_stream, rng_game, set_hand};
+        let mut rng = PythonRandom::seed(10);
+        let mut game = rng_game(&mut rng);
+        set_hand(&mut game, 0, 7);
+        set_hand(&mut game, 1, 2);
+        let mut expected = game.rng.borrow().clone_rng();
+        expected.randbelow(2);
+        expected.randbelow(7);
+        super::daily_bugle(&mut game, 0);
+        assert_eq!(game.players[0].hand.len(), 7);
+        assert_eq!(game.players[1].hand.len(), 3);
+        assert_same_stream(&game, &mut *expected);
+    }
+
+    // DestroyCard (0x7d4d318): Game::Roll(0, 100) below 25 destroys the card.
+    #[test]
+    fn danger_room_rolls_zero_to_ninety_nine_against_twenty_five() {
+        use crate::locations::test_support::{assert_same_stream, fill, rng_game};
+        for seed in 0..12 {
+            let mut rng = PythonRandom::seed(seed);
+            let mut game = rng_game(&mut rng);
+            let card = fill(&mut game, 0, 0, 1)[0];
+            let mut expected = game.rng.borrow().clone_rng();
+            let roll = expected.randbelow(100);
+            super::danger(&mut game, 0, card);
+            assert_eq!(game.cards[card].lane.is_none(), roll < 25);
+            assert_same_stream(&game, &mut *expected);
+        }
     }
 }

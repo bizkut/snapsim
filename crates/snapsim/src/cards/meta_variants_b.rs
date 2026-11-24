@@ -127,11 +127,11 @@ fn spider_2099(game: &mut Game<'_>, card: usize) {
         return;
     }
     let owner = game.cards[card].owner;
+    // Game::GetAllRevealedCards (0x7da87b8) orders cards by latest resolution.
     let candidates: Vec<_> = game
-        .lanes
-        .iter()
-        .flat_map(|lane| lane.cards.iter().copied())
-        .filter(|&id| game.cards[id].owner == owner && game.cards[id].revealed)
+        .revealed_cards_in_resolution_order()
+        .into_iter()
+        .filter(|&id| game.cards[id].owner == owner)
         .collect();
     if candidates.is_empty() {
         return;
@@ -449,16 +449,10 @@ fn agony(game: &mut Game<'_>, card: usize, event: Event) {
     let Some(origin) = game.cards[target].lane else {
         return;
     };
-    let mut choices = [0; 2];
-    let mut count = 0;
-    for lane in 0..3 {
-        if lane != origin && game.can_move_card(target, lane) {
-            choices[count] = lane;
-            count += 1;
-        }
-    }
-    if count != 0 {
-        let lane = choices[game.rng.borrow_mut().randbelow(count)];
+    // MergeWithNext (0x7e62afc) calls GetRandomLocationToMoveCard (0x7db2f50)
+    // with fallback: when no location accepts the card it still rolls among
+    // the other locations.
+    if let Some(lane) = game.random_location_to_move_card(target, origin, true) {
         game.move_card(target, lane);
     }
 }
@@ -470,16 +464,13 @@ fn scarlet_witch(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    let choices: Vec<_> = game
-        .location_pool
-        .iter()
-        .filter(|location| !game.lanes.iter().any(|lane| lane.def.id == location.id))
-        .map(|location| location.id)
-        .collect();
-    if choices.is_empty() {
+    // MorphLocationAndCreateCardInHand (0x7f30290) calls
+    // Game::GetRandomLocationDefId(excludeLocation) (0x7db248c): a
+    // rarity-weighted roll excluding only this location's definition.
+    let current = game.lanes[lane].def.id;
+    let Some(choice) = game.random_location_def_id(Some(current)) else {
         return;
-    }
-    let choice = choices[game.rng.borrow_mut().randbelow(choices.len())];
+    };
     game.replace_location(lane, choice);
     if game.lane_winner(lane) != Some(owner) || game.players[owner].hand.len() >= 7 {
         return;
@@ -621,16 +612,9 @@ fn magneto(game: &mut Game<'_>, card: usize) {
         targets.swap(0, other);
     }
     for &target in &targets[..count] {
-        let mut destinations = [0; 2];
-        let mut n = 0;
-        for destination in 0..3 {
-            if destination != lane && game.can_move_card(target, destination) {
-                destinations[n] = destination;
-                n += 1;
-            }
-        }
-        if n > 0 {
-            let destination = destinations[game.rng.borrow_mut().randbelow(n)];
+        // GetRandomLocationToMoveCard (0x7db2f50) with fallback: when no
+        // location accepts the card it still rolls among the other locations.
+        if let Some(destination) = game.random_location_to_move_card(target, lane, true) {
             game.move_card(target, destination);
         }
     }
@@ -910,12 +894,109 @@ mod tests {
         assert_ne!(game.cards[target].lane, Some(0));
     }
 
+    fn fill_lane(game: &mut Game<'_>, lane: usize, seat: usize) {
+        for _ in 0..4 {
+            let filler = game.create_card("Wasp", seat);
+            game.add_card(filler, lane, seat, true);
+        }
+    }
+
+    #[test]
+    fn agony_rolls_fallback_move_location_when_no_location_accepts_the_card() {
+        let mut rng = PythonRandom::seed(51);
+        let mut game = setup(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        fill_lane(&mut game, 1, 0);
+        fill_lane(&mut game, 2, 0);
+        let card = game.create_card("AgonyWebSlingers", 0);
+        game.add_card(card, 0, 0, false);
+        let target = game.create_card("SpiderMan", 0);
+        game.add_card(target, 0, 0, false);
+        game.cards[target].turn_played = 1;
+        game.played[0].push((target, 0));
+        agony(&mut game, card, Event::CardResolved { card: target });
+        // GetRandomLocationToMoveCard (0x7db2f50) rolls over both other lanes.
+        control.randbelow(2);
+        assert_eq!(game.cards[target].lane, Some(0));
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn brotherhood_magneto_shuffles_targets_then_rolls_fallback_move_per_target() {
+        let mut rng = PythonRandom::seed(52);
+        let mut game = setup(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        fill_lane(&mut game, 1, 1);
+        fill_lane(&mut game, 2, 1);
+        let source = game.create_card("MagnetoBrotherhoodOfMutants", 0);
+        let three = game.create_card("Cyclops", 1);
+        let four = game.create_card("TheThing", 1);
+        game.add_card(source, 0, 0, false);
+        game.add_card(three, 0, 1, false);
+        game.add_card(four, 0, 1, false);
+        magneto(&mut game, source);
+        // Game::Shuffle (0x4b12f30) of two targets, then one fallback roll
+        // (0x7db2f50) over the two other locations for each.
+        control.randbelow(2);
+        control.randbelow(2);
+        control.randbelow(2);
+        assert_eq!(game.cards[three].lane, Some(0));
+        assert_eq!(game.cards[four].lane, Some(0));
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn spider_2099_draws_one_ally_per_move_in_resolution_order() {
+        let mut rng = PythonRandom::seed(53);
+        let mut game = setup(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let first = game.create_card("Wasp", 0);
+        game.add_card(first, 2, 0, true);
+        let card = game.create_card("SpiderMan2099WebSlingers", 0);
+        game.add_card(card, 0, 0, true);
+        let last = game.create_card("Hulk", 0);
+        game.add_card(last, 1, 0, true);
+        let order = game.revealed_cards_in_resolution_order();
+        assert_eq!(order, vec![first, card, last]);
+        game.players[0].cards_moved_this_game = 3;
+        let before = [first, card, last].map(|id| game.cards[id].power());
+        spider_2099(&mut game, card);
+        // BuffForEachMove (0x7f4bc4c): one Roll per move over the
+        // resolution-ordered revealed allies (GetAllRevealedCards, 0x7da87b8).
+        let mut expected = before;
+        for _ in 0..3 {
+            let index = control.randbelow(3);
+            expected[[0usize, 1, 2][index]] += 1;
+        }
+        assert_eq!(
+            [first, card, last].map(|id| game.cards[id].power()),
+            expected
+        );
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
     #[test]
     fn scarlet_witch_generates_brotherhood_card_after_winning_morph() {
         let mut rng = PythonRandom::seed(1);
         let mut game = setup(&mut rng);
         game.players[0].hand.clear();
-        game.location_pool = vec![locations::get("Wakanda").unwrap()];
+        // GetRandomLocationDefId (0x7db248c) excludes only the morphing location.
+        let target = if game.lanes[0].def.id == "Wakanda" {
+            "Xandar"
+        } else {
+            "Wakanda"
+        };
+        game.location_pool = vec![locations::get(target).unwrap()];
+        game.starting_location_ids.clear();
         let card = game.create_card("ScarletWitchBrotherhoodOfMutants", 0);
         game.add_card(card, 0, 0, false);
         scarlet_witch(&mut game, card);

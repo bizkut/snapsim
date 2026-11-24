@@ -8,6 +8,7 @@ Documentation:
 
 * [Card and engine technicalities](docs/card-technicalities.md): timing, mechanics, client evidence and restored-position limits.
 * [Coverage audit](docs/coverage-audit.md): per-card and per-location status with client method addresses, approximations and the unexported state behind each restored-position gate.
+* [Client update guide](docs/client-update.md): how to bring rules, catalog and checks to a new client build: extraction inputs, RVA diff, evidence rules, audit ledger format, replay check, parity gates, fuzzing and a release checklist.
 
 ## Interfaces
 
@@ -272,7 +273,7 @@ When Stryfe uses a card's On Reveal, the borrowed reveal has its own temporary c
 ## Adding content
 
 1. Add a module under `crates/snapsim/src/cards/` or `locations/`, define a descriptor with the card or location ID and the necessary hooks, and list it in that module's descriptor slice (cards; add a new module's `CARDS` and `TOKENS` slices to `cards::GROUPS` and `cards::TOKEN_GROUPS`) or in `locations::REGISTRY`. Tokens, which decks may not contain, go in the module's `TOKENS`. Use the catalog's current printed stats; do not invent stand-in rules.
-2. Take behavior from the Android client (59.15.1), not from card text: the card's ability definitions and the methods they run, including which candidates a random choice draws from and how many rolls it makes (using `game.rng`). Cite the client method and address in a comment. Never commit client binaries, dumps or decompiled code.
+2. Take behavior from the Android client (59.15.1), not from card text: the card's ability definitions and the methods they run, including which candidates a random choice draws from and how many rolls it makes (using `game.rng`). Cite the client method and address in a comment. Never commit client binaries, dumps or decompiled code. For a new client build see [docs/client-update.md](docs/client-update.md).
 3. Add focused boundary tests. For a random effect, test seeds and the order of random calls. New rules have no Python counterpart: check them against real matches that contain the card or location with `snapsim-replaycheck`.
 4. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `parity/gates.sh`. Gates for unchanged content must still pass. If the needed hook or state transition is unavailable, extend the core before claiming the rule is supported.
 
@@ -447,6 +448,7 @@ Two kinds of record are reported rather than compared:
 
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.
 * Deliberate changes to existing rules, made to match the 59.15.1 client. A game that diverges because of an engine change is listed with its exact first-divergence path and values in `parity/divergences.json`; `snapsim-parity` fails on any other divergence and on a listed one that no longer occurs. A changed card keeps the reference's version in `cards/reference_rules.rs`, which the gates switch to with `cards::use_reference_rules()` or `SNAPSIM_REFERENCE_RULES=1`; live play never does. The `replay-client` gate then checks the client rules, these changes included, against every real recording. The changes:
+  * Scarlet Witch replaces her location with one drawn rarity-weighted (common 200, uncommon 125, rare 75, ultra rare 15; `LocationRarityDefList::.cctor`, `0x7ac3c60`) from the pool, excluding only that location's own definition (`ScarletWitchBehavior::MorphLocation`, `0x7f2ff08`; `Game::GetRandomLocationDefId`, `0x7db248c`); reference rules draw uniformly from the pool minus every location in play. Reality Stone, Omniversal Presence and Nico's fifth spell use the same client draw (not in the reference).
   * Fantasticar selects visible end-of-turn triggers, including independently attached triggers after default text removal (`FantasticarBehavior::GetTargetCard` predicate `0x7ea7c8c`); reference rules retain the earlier hidden-trigger and removed-text checks.
   * Chamber does not record a zero-power modifier when no cards qualify (`ChamberBehavior::BuffPower`, `0x7e7fb14`); reference rules retain the earlier zero update.
   * Fantomex afflicts front-row enemies in location and slot order (`FantomexBehavior::AfflictFrontRowCards`, `0x7ea7ee4`); reference rules retain global resolution order.
@@ -475,6 +477,11 @@ Two kinds of record are reported rather than compared:
   * Yondu banishes a randomly chosen lowest-current-cost card from the opponent's deck (`YonduBehavior::BanishLowestCostInDeck`, `0x7cf8068`); the reference drops it without recording a zone transition. Reference rules: `cards/reference_rules.rs`.
   * Zenn-La recruits the first card in deck order with printed cost 3 and reveals it (`ZennLaBehavior::RecruitThreeCostCard`, predicate `0x7d9c414`); the reference checks effective cost and skips On Reveal. Reference rules: `cards/reference_rules.rs`.
   * Shuri's Lab doubles a card played there at PostCardResolved, even if it moved away; cards played elsewhere and moved into the Lab are not doubled (`ShurisLabBehavior::DoublePower`). Reference rules retain the original current-location behavior.
+  * Ironheart shuffles the revealed allies in resolution order and buffs the first two (`IronheartBehavior::BuffCards`, `0x7ece770`, `Game::Shuffle` `0x4b12f30`); reference rules sample two indices as CPython's `sample` does.
+  * Korg shuffles the Rock into the whole opponent deck (`KorgBehavior::ShuffleRocks`, `0x7ee1d1c`, `Deck::Shuffle` `0x7cc0ac0`); reference rules insert it at one random position.
+  * Mantis and White Queen roll their random pick before the full-hand check, so a full hand still consumes the roll (`MantisBehavior::CopyCard`, `0x7ef1ee8`; `WhiteQueenBehavior::CreateACopy`, `0x7cf1064`); reference rules return early.
+  * Wolverine's regeneration and White Tiger's Tiger roll `GetRandomLocationToSpawnCard` (`0x7db2b64`) with the fallback to all other locations (`WolverineBehavior::SpawnAtRandomLocation`, `0x7cf4c78`; `WhiteTigerBehavior::CreateToken`, `0x7cf1df4`); reference rules never roll when no location can take the card.
+  * Zombie Blade steals from a character in the opponent's hand only (`ZombieBladeBehavior::StealToHorde`, `0x7cf9fdc`, predicate `0x7cfa878`); reference rules pick from the whole hand.
   * Stark Industries makes eight independent picks with replacement over its revealed cards and gives each picked card +1 Power per pick, in card order (`StarkIndustriesBehavior::BuffCards`, `0x7d82ee8`, `Game::Roll` `0x7dab62c`); the reference gives every card `8 / n` and draws the remainder without replacement. Reference rules retain that split.
   * A card whose text was removed no longer reacts to events.
   * Start-of-turn, game-start, draw and Empower events also reach on-event hooks of cards in hand and deck.

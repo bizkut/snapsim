@@ -58,19 +58,15 @@ fn vormir(game: &mut Game<'_>, lane: usize, event: Event) {
     }
 }
 
-// WorldForgeBehavior::MorphOtherLocation @ 0x7d995f4 and predicate
-// 0x7d99ab4 select either other location, including an unrevealed one.
+// WorldForgeBehavior::MorphOtherLocation @ 0x7d995f4 and predicate 0x7d99ab4 roll over
+// either other location, including an unrevealed one, then call
+// Game::GetRandomLocationDefId(target) (0x7db248c): a rarity-weighted roll over the pool that
+// skips only the target's own definition (Game::random_location_def_id), so locations on the
+// board stay eligible.
 fn world_forge(game: &mut Game<'_>, lane: usize) {
     let others: Vec<_> = (0..3).filter(|&other| other != lane).collect();
     let target = others[game.rng.borrow_mut().randbelow(others.len())];
-    let candidates: Vec<_> = game
-        .location_pool
-        .iter()
-        .filter(|def| !game.lanes.iter().any(|other| other.def.id == def.id))
-        .map(|def| def.id)
-        .collect();
-    if !candidates.is_empty() {
-        let id = candidates[game.rng.borrow_mut().randbelow(candidates.len())];
+    if let Some(id) = game.random_location_def_id(Some(game.lanes[target].def.id)) {
         game.replace_location(target, id);
     }
 }
@@ -329,5 +325,25 @@ mod tests {
         assert_eq!(game.cards[first].lane, Some(1));
         assert_eq!(game.cards[second].lane, Some(0));
         assert_eq!(game.cards[enemy].lane, None);
+    }
+
+    // MorphOtherLocation (0x7d995f4): a roll over the other locations, then
+    // GetRandomLocationDefId(target), a weighted pick skipping only the target's definition.
+    #[test]
+    fn world_forge_uses_the_weighted_location_pick() {
+        use crate::locations::test_support::{assert_same_stream, rng_game_in};
+        const POOL: [&str; 6] = ["Ruins", "Xandar", "Wakanda", "Atlantis", "Asgard", "Kyln"];
+        let mut rng = PythonRandom::seed(16);
+        let mut game = rng_game_in(&mut rng, &POOL);
+        let mut oracle_rng = PythonRandom::seed(16);
+        let oracle = rng_game_in(&mut oracle_rng, &POOL);
+        let target = [1, 2][oracle.rng.borrow_mut().randbelow(2)];
+        let expected_id = oracle
+            .random_location_def_id(Some(oracle.lanes[target].def.id))
+            .unwrap();
+        let mut expected = oracle.rng.borrow().clone_rng();
+        world_forge(&mut game, 0);
+        assert_eq!(game.lanes[target].def.id, expected_id);
+        assert_same_stream(&game, &mut *expected);
     }
 }

@@ -163,8 +163,9 @@ fn white_hot_room_event(game: &mut Game<'_>, lane: usize, event: Event) {
     }
 }
 
-// ResurrectDestroyed 0x7d929d0 shuffles each graveyard, then resurrects
-// up to the number of open slots after turn five.
+// ResurrectDestroyed 0x7d929d0 shuffles each graveyard (Graveyard::GetDestroyedCards, then
+// the generic Game::Shuffle 0x4b12f30: forward Fisher-Yates, swapping each i < n - 1 with
+// Roll(i, n)), then resurrects up to the number of open slots after turn five.
 fn valley_of_the_hand(game: &mut Game<'_>, lane: usize) {
     if game.turn != 5 {
         return;
@@ -179,10 +180,7 @@ fn valley_of_the_hand(game: &mut Game<'_>, lane: usize) {
         if cards.is_empty() {
             continue;
         }
-        for index in (1..cards.len()).rev() {
-            let selected = game.rng.borrow_mut().randbelow(index + 1);
-            cards.swap(index, selected);
-        }
+        super::client_shuffle(game, &mut cards);
         let count = (4 - game.lanes[lane]
             .cards
             .iter()
@@ -975,5 +973,23 @@ mod tests {
             assert_eq!(game.players[seat].hand.len(), expected);
             assert_eq!(game.players[seat].discard.len(), 1);
         }
+    }
+
+    // ResurrectDestroyed (0x7d929d0) shuffles with the generic forward Game::Shuffle.
+    #[test]
+    fn valley_of_the_hand_shuffles_graveyard_forward() {
+        use crate::locations::test_support::{assert_same_stream, fill, rng_game};
+        let mut rng = PythonRandom::seed(11);
+        let mut game = rng_game(&mut rng);
+        for card in fill(&mut game, 0, 1, 3) {
+            assert!(game.destroy_card(card));
+        }
+        assert_eq!(game.players[0].graveyard.len(), 3);
+        game.turn = 5;
+        let mut expected = game.rng.borrow().clone_rng();
+        expected.randbelow(3);
+        expected.randbelow(2);
+        valley_of_the_hand(&mut game, 0);
+        assert_same_stream(&game, &mut *expected);
     }
 }

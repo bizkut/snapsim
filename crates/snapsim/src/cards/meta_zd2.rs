@@ -117,8 +117,9 @@ fn objective_event(game: &mut Game<'_>, card: usize, event: Event) {
                         .any(|&id| game.cards[id].owner == owner)
             })
             .collect();
-        for i in (1..lanes.len()).rev() {
-            let j = game.rng.borrow_mut().randbelow(i + 1);
+        // Game::Shuffle<T> (0x4b12f30) rolls Roll(i, count) for i in 0..count - 1.
+        for i in 0..lanes.len().saturating_sub(1) {
+            let j = i + game.rng.borrow_mut().randbelow(lanes.len() - i);
             lanes.swap(i, j);
         }
         if let Some(&lane) = lanes.first()
@@ -359,6 +360,40 @@ mod tests {
         objective_event(&mut game, source, Event::AfterTurnEnd);
         objective_event(&mut game, source, Event::AfterTurnEnd);
         assert_eq!(game.players[0].permanent_energy, 1);
+    }
+
+    #[test]
+    fn punisher_marks_the_first_lane_of_a_forward_game_shuffle() {
+        let mut rng = PythonRandom::seed(71);
+        let mut game = setup(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let source = game.create_card("PunisherWarMachine", 0);
+        objective_event(
+            &mut game,
+            source,
+            Event::CardDrawn {
+                card: source,
+                seat: 0,
+            },
+        );
+        let mut lanes = [0usize, 1, 2];
+        // Game::Shuffle<T> (0x4b12f30): Roll(i, count) for i in 0..count - 1.
+        for i in 0..2 {
+            let j = i + control.randbelow(3 - i);
+            lanes.swap(i, j);
+        }
+        let marked = game.cards[source]
+            .ability_state()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Objective>()
+            .unwrap()
+            .marked_lane;
+        assert_eq!(marked, Some(lanes[0]));
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
     }
 
     #[test]

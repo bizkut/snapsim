@@ -267,17 +267,11 @@ fn omniversal(game: &mut Game<'_>, card: usize) {
         return;
     };
     let owner = game.cards[card].owner;
-    // GetRandomLocationDefId (0x7db248c) is weighted in the client; use the
-    // simulator's implemented location pool and exclude the current definition.
-    let choices: Vec<_> = game
-        .location_pool
-        .iter()
-        .filter(|def| def.id != game.lanes[lane].def.id)
-        .map(|def| def.id)
-        .collect();
-    if !choices.is_empty() {
-        let index = game.rng.borrow_mut().randbelow(choices.len());
-        game.replace_location(lane, choices[index]);
+    // GetRandomLocationDefId (0x7db248c): rarity-weighted, excluding this location's
+    // definition (Game::random_location_def_id).
+    let current = game.lanes[lane].def.id;
+    if let Some(id) = game.random_location_def_id(Some(current)) {
+        game.replace_location(lane, id);
     }
     // MorphLocationAndBuffMerlin (0x7d04ac0) searches all revealed locations.
     let targets: Vec<_> = game

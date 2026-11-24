@@ -348,30 +348,25 @@ fn panoptichron(game: &mut Game<'_>, lane: usize) {
     }
 }
 
-// MoveCard 0x7d57450 collects revealed cards elsewhere for players with
-// room here, chooses one uniformly, then attempts the forced move.
+// MoveCard 0x7d57450 appends Game::GetAllRevealedCards(owner, exceptLocation) (0x7da87b8,
+// ordered by latest resolution, filtered to location-zone cards) for each ordered player with
+// room here, chooses one with Game::Roll, then attempts the forced move.
 fn great_web(game: &mut Game<'_>, lane: usize) {
-    let mut candidates = [0; 24];
-    let mut count = 0;
+    let mut candidates = Vec::new();
     let first = game.reveal_priority.unwrap_or(0);
+    let revealed = game.revealed_cards_in_resolution_order();
     for seat in [first, 1 - first] {
         if !game.has_space(lane, seat, 0) {
             continue;
         }
-        for source in 0..3 {
-            if source == lane {
-                continue;
-            }
-            for &card in &game.lanes[source].cards {
-                if game.cards[card].owner == seat && game.cards[card].revealed {
-                    candidates[count] = card;
-                    count += 1;
-                }
-            }
-        }
+        candidates.extend(
+            revealed.iter().copied().filter(|&card| {
+                game.cards[card].owner == seat && game.cards[card].lane != Some(lane)
+            }),
+        );
     }
-    if count != 0 {
-        let choice = game.rng.borrow_mut().randbelow(count);
+    if !candidates.is_empty() {
+        let choice = game.rng.borrow_mut().randbelow(candidates.len());
         game.move_card(candidates[choice], lane);
     }
 }
@@ -1402,5 +1397,22 @@ mod tests {
         for &card in &game.lanes[0].cards {
             assert!(game.cards[card].def.on_activate.is_some());
         }
+    }
+
+    // MoveCard (0x7d57450) indexes Game::GetAllRevealedCards order (latest resolution).
+    #[test]
+    fn great_web_roll_indexes_resolution_order() {
+        use crate::locations::test_support::{assert_same_stream, fill, rng_game};
+        let mut rng = PythonRandom::seed(12);
+        let mut game = rng_game(&mut rng);
+        let a = fill(&mut game, 0, 1, 1)[0];
+        let b = fill(&mut game, 0, 2, 1)[0];
+        game.cards[a].latest_resolution_order = 5;
+        game.cards[b].latest_resolution_order = 2;
+        let mut expected = game.rng.borrow().clone_rng();
+        let picked = [b, a][expected.randbelow(2)];
+        great_web(&mut game, 0);
+        assert_eq!(game.cards[picked].lane, Some(0));
+        assert_same_stream(&game, &mut *expected);
     }
 }

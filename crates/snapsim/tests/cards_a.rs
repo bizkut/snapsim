@@ -52,7 +52,7 @@ fn discard_returns_same_apocalypse_and_stacks() {
     assert!(!g.players[0].discard.contains(&a));
 }
 #[test]
-fn cable_and_korg_preserve_deck_order_and_owner() {
+fn cable_steals_top_card_and_korg_shuffles_a_rock_into_the_enemy_deck() {
     let mut rng = PythonRandom::seed(2);
     let mut g = game(&mut rng);
     let top = g.players[1].deck[0];
@@ -68,15 +68,18 @@ fn cable_and_korg_preserve_deck_order_and_owner() {
         .find(|&&id| g.cards[id].def.id == "Rock")
         .unwrap();
     assert_eq!(g.cards[rock].owner, 1);
-    assert_eq!(
-        g.players[1]
-            .deck
-            .iter()
-            .copied()
-            .filter(|&id| id != rock)
-            .collect::<Vec<_>>(),
-        before
-    );
+    // KorgBehavior shuffles the whole deck after adding the Rock (client Game::Shuffle),
+    // so only the multiset of the other cards is preserved, not their order.
+    let mut after: Vec<_> = g.players[1]
+        .deck
+        .iter()
+        .copied()
+        .filter(|&id| id != rock)
+        .collect();
+    let mut expected = before;
+    after.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(after, expected);
 }
 #[test]
 fn elektra_and_deathlok_only_destroy_revealed_targets() {

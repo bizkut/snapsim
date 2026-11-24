@@ -234,16 +234,9 @@ fn silk(game: &mut Game<'_>, card: usize, event: Event) {
     {
         return;
     }
-    let mut destinations = [0; 2];
-    let mut count = 0;
-    for destination in 0..3 {
-        if destination != lane && game.can_move_card(card, destination) {
-            destinations[count] = destination;
-            count += 1;
-        }
-    }
-    if count != 0 {
-        let destination = destinations[game.rng.borrow_mut().randbelow(count)];
+    // GetRandomLocationToMoveCard (0x7db2f50) with fallback to every other
+    // location; the move then fails when none was legal.
+    if let Some(destination) = game.random_location_to_move_card(card, lane, true) {
         game.move_card(card, destination);
     }
 }
@@ -467,16 +460,9 @@ fn xorn(game: &mut Game<'_>, card: usize, event: Event) {
     {
         return;
     }
-    let mut destinations = [0; 2];
-    let mut count = 0;
-    for destination in 0..3 {
-        if destination != lane && game.can_move_card(target, destination) {
-            destinations[count] = destination;
-            count += 1;
-        }
-    }
-    if count != 0 {
-        let destination = destinations[game.rng.borrow_mut().randbelow(count)];
+    // GetRandomLocationToMoveCard (0x7db2f50) with fallback to every other
+    // location; the move then fails when none was legal.
+    if let Some(destination) = game.random_location_to_move_card(target, lane, true) {
         game.move_card(target, destination);
     }
 }
@@ -505,16 +491,9 @@ fn hercules(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     *state = Some(game.turn);
-    let mut destinations = [0; 2];
-    let mut count = 0;
-    for destination in 0..3 {
-        if destination != lane && game.can_move_card(target, destination) {
-            destinations[count] = destination;
-            count += 1;
-        }
-    }
-    if count != 0 {
-        let destination = destinations[game.rng.borrow_mut().randbelow(count)];
+    // GetRandomLocationToMoveCard (0x7db2f50) with fallback to every other
+    // location; the move then fails when none was legal.
+    if let Some(destination) = game.random_location_to_move_card(target, lane, true) {
         game.move_card(target, destination);
     }
 }
@@ -534,19 +513,10 @@ fn viv(game: &mut Game<'_>, card: usize) {
                 game.add_power(target, 1, owner);
             }
         }
-    } else {
-        let mut lanes = [0; 2];
-        let mut count = 0;
-        for destination in 0..3 {
-            if destination != lane && game.can_move_card(card, destination) {
-                lanes[count] = destination;
-                count += 1;
-            }
-        }
-        if count > 0 {
-            let destination = lanes[game.rng.borrow_mut().randbelow(count)];
-            game.move_card(card, destination);
-        }
+    } else if let Some(destination) = game.random_location_to_move_card(card, lane, true) {
+        // GetRandomLocationToMoveCard (0x7db2f50) with fallback to every other
+        // location; the move then fails when none was legal.
+        game.move_card(card, destination);
     }
 }
 // MoveAndLeaveRockOrDestroy (0x7e7a788) chooses a strongest revealed
@@ -578,19 +548,12 @@ fn cannonball(game: &mut Game<'_>, card: usize) {
         return;
     }
     let target = targets[game.rng.borrow_mut().randbelow(count)];
-    let mut destinations = [0; 2];
-    let mut n = 0;
-    for destination in 0..3 {
-        if destination != lane && game.can_move_card(target, destination) {
-            destinations[n] = destination;
-            n += 1;
-        }
-    }
-    if n > 0 {
-        let destination = destinations[game.rng.borrow_mut().randbelow(n)];
-        if game.move_card(target, destination) {
-            return;
-        }
+    // GetRandomLocationToMoveCard (0x7db2f50) with fallback: when no other
+    // location is legal it still rolls over all other locations.
+    if let Some(destination) = game.random_location_to_move_card(target, lane, true)
+        && game.move_card(target, destination)
+    {
+        return;
     }
     if game.destroy_card(target) {
         let rock = game.create_card("Rock", opponent);
@@ -780,23 +743,17 @@ fn aunt_may(game: &mut Game<'_>, card: usize) {
 fn mercury_blocks(game: &Game<'_>, source: usize, target: usize) -> bool {
     game.cards[source].owner != game.cards[target].owner
 }
-// AddShieldToBoard 0x7f2d6dc picks a random spawnable other location.
+// AddShieldToBoard 0x7f2d6dc uses GetRandomLocationToSpawnCard (0x7db2b64)
+// with fallback: a roll over all other locations when none can spawn.
 fn sam_wilson(game: &mut Game<'_>, card: usize) {
     let Some(source) = game.cards[card].lane else {
         return;
     };
     let owner = game.cards[card].owner;
     let shield = game.create_card("CapsShield", owner);
-    let mut lanes = [0; 2];
-    let mut count = 0;
-    for lane in 0..3 {
-        if lane != source && game.can_add(shield, lane, owner) {
-            lanes[count] = lane;
-            count += 1;
-        }
-    }
-    if count > 0 {
-        let lane = lanes[game.rng.borrow_mut().randbelow(count)];
+    if let Some(lane) = game.random_location_to_spawn_card(shield, owner, Some(source), true)
+        && game.can_add(shield, lane, owner)
+    {
         game.cards[shield].created_by_card_id = Some("SamWilson".to_owned());
         game.cards[shield].created_by_player = Some(owner);
         game.add_card(shield, lane, owner, true);
@@ -1279,6 +1236,61 @@ mod tests {
                 .cards
                 .iter()
                 .any(|&id| game.cards[id].def.id == "Rock" && game.cards[id].owner == 1)
+        );
+    }
+
+    fn fill_lane(game: &mut Game<'_>, lane: usize, owner: usize) {
+        for _ in 0..4 {
+            let id = game.create_card("Cyclops", owner);
+            game.cards[id].lane = Some(lane);
+            game.cards[id].revealed = true;
+            game.lanes[lane].cards.push(id);
+        }
+    }
+
+    // GetRandomLocationToMoveCard (0x7db2f50) with fallback still rolls over
+    // all other locations when none is legal: target pick, then fallback pick.
+    #[test]
+    fn cannonball_rolls_fallback_location_when_other_lanes_are_full() {
+        let mut rng = PythonRandom::seed(104);
+        let mut game = token_game(&mut rng);
+        let source = game.create_card("Cannonball", 0);
+        let target = game.create_card("Hulk", 1);
+        for id in [source, target] {
+            game.cards[id].lane = Some(0);
+            game.cards[id].revealed = true;
+            game.lanes[0].cards.push(id);
+        }
+        fill_lane(&mut game, 1, 1);
+        fill_lane(&mut game, 2, 1);
+        let mut expected = game.rng.borrow().clone_rng();
+        expected.randbelow(1);
+        expected.randbelow(2);
+        cannonball(&mut game, source);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(1_000_000),
+            expected.randbelow(1_000_000)
+        );
+    }
+
+    // AddShieldToBoard (0x7f2d6dc): GetRandomLocationToSpawnCard (0x7db2b64)
+    // rolls over all other locations when none can spawn the shield.
+    #[test]
+    fn sam_wilson_rolls_fallback_location_when_other_lanes_are_full() {
+        let mut rng = PythonRandom::seed(105);
+        let mut game = token_game(&mut rng);
+        let source = game.create_card("SamWilson", 0);
+        game.cards[source].lane = Some(0);
+        game.cards[source].revealed = true;
+        game.lanes[0].cards.push(source);
+        fill_lane(&mut game, 1, 0);
+        fill_lane(&mut game, 2, 0);
+        let mut expected = game.rng.borrow().clone_rng();
+        expected.randbelow(2);
+        sam_wilson(&mut game, source);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(1_000_000),
+            expected.randbelow(1_000_000)
         );
     }
 

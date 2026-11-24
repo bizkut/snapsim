@@ -17,7 +17,9 @@ fn production_zone_mutations_use_helpers() {
             fs::read_dir(root.join(dir))
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "rs")),
+                .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+                // `locations/test_support.rs` is a `#[cfg(test)]` fixture module.
+                .filter(|path| !path.ends_with("test_support.rs")),
         );
     }
     files.sort();

@@ -155,8 +155,9 @@ fn marvel_boy(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let mut targets = game.revealed_cards_in_resolution_order();
     targets.retain(|&target| game.cards[target].owner == owner && game.printed_cost(target) == 1);
-    for i in (1..targets.len()).rev() {
-        let j = game.rng.borrow_mut().randbelow(i + 1);
+    // Game::Shuffle (0x4b12f30): forward pass, one Roll(i, len) per index.
+    for i in 0..targets.len().saturating_sub(1) {
+        let j = i + game.rng.borrow_mut().randbelow(targets.len() - i);
         targets.swap(i, j);
     }
     for target in targets.into_iter().take(3) {
@@ -211,8 +212,9 @@ fn skaar(game: &mut Game<'_>, card: usize) -> bool {
 fn corvus_glaive(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let mut targets = game.players[owner].hand.clone();
-    for i in (1..targets.len()).rev() {
-        let j = game.rng.borrow_mut().randbelow(i + 1);
+    // Game::Shuffle (0x4b12f30): forward pass, one Roll(i, len) per index.
+    for i in 0..targets.len().saturating_sub(1) {
+        let j = i + game.rng.borrow_mut().randbelow(targets.len() - i);
         targets.swap(i, j);
     }
     let count = targets.len().min(2);
@@ -484,19 +486,19 @@ fn gorgon(game: &mut Game<'_>, card: usize) {
     }
 }
 
-// CreateToken (0x7ee84e8) spawns Sword of Fu Xi at a random eligible
-// location other than Lin Lie's current location.
+// CreateToken (0x7ee84e8) spawns Sword of Fu Xi at the location chosen by
+// GetRandomLocationToSpawnCard (0x7db2b64) with fallback: one roll over the
+// spawnable other locations, else over all other locations (the spawn then
+// fails).
 fn lin_lie(game: &mut Game<'_>, card: usize) {
     let Some(source) = game.cards[card].lane else {
         return;
     };
     let owner = game.cards[card].owner;
     let sword = game.create_card("SwordOfFuXi", owner);
-    let lanes: Vec<_> = (0..game.lanes.len())
-        .filter(|&lane| lane != source && game.can_add(sword, lane, owner))
-        .collect();
-    if !lanes.is_empty() {
-        let selected = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
+    if let Some(selected) = game.random_location_to_spawn_card(sword, owner, Some(source), true)
+        && game.can_add(sword, selected, owner)
+    {
         game.add_card(sword, selected, owner, true);
     }
 }
@@ -597,26 +599,24 @@ fn aurora(game: &mut Game<'_>, card: usize) {
     }
 }
 
-// AddIllusion (0x7f07eb8) creates one illusion at a random eligible
-// other location and retains that entity in the reveal-ability context.
+// AddIllusion (0x7f07eb8) creates one illusion at the location chosen by
+// GetRandomLocationToSpawnCard (0x7db2b64) with fallback (a roll over all
+// other locations when none can spawn) and retains that entity in the
+// reveal-ability context.
 fn mysterio_reveal(game: &mut Game<'_>, card: usize) {
     let Some(source) = game.cards[card].lane else {
         return;
     };
     let owner = game.cards[card].owner;
     let illusion = game.create_card("MysterioIllusion", owner);
-    let lanes: Vec<_> = (0..game.lanes.len())
-        .filter(|&lane| lane != source && game.can_add(illusion, lane, owner))
-        .collect();
-    if !lanes.is_empty() {
-        let lane = lanes[game.rng.borrow_mut().randbelow(lanes.len())];
-        if game.add_card(illusion, lane, owner, true)
-            && let Some(state) = game.cards[card]
-                .ability_state_mut()
-                .and_then(|state| state.as_any_mut().downcast_mut::<Option<usize>>())
-        {
-            *state = Some(illusion);
-        }
+    if let Some(lane) = game.random_location_to_spawn_card(illusion, owner, Some(source), true)
+        && game.can_add(illusion, lane, owner)
+        && game.add_card(illusion, lane, owner, true)
+        && let Some(state) = game.cards[card]
+            .ability_state_mut()
+            .and_then(|state| state.as_any_mut().downcast_mut::<Option<usize>>())
+    {
+        *state = Some(illusion);
     }
 }
 
@@ -779,6 +779,35 @@ mod tests {
         let before = game.cards[ally].power();
         sword_of_fu_xi(&mut game, sword);
         assert_eq!(game.cards[ally].power(), before + 8);
+    }
+
+    // CreateToken (0x7ee84e8): GetRandomLocationToSpawnCard (0x7db2b64)
+    // rolls over all other locations when none can spawn the Sword.
+    #[test]
+    fn lin_lie_rolls_fallback_location_when_other_lanes_are_full() {
+        let mut rng = PythonRandom::seed(1);
+        let deck = test_deck();
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let source = game.create_card("LinLie", 0);
+        game.cards[source].lane = Some(1);
+        game.cards[source].revealed = true;
+        game.lanes[1].cards.push(source);
+        for lane in [0, 2] {
+            for _ in 0..4 {
+                let filler = game.create_card("Hulk", 0);
+                game.cards[filler].lane = Some(lane);
+                game.cards[filler].revealed = true;
+                game.lanes[lane].cards.push(filler);
+            }
+        }
+        let mut expected = game.rng.borrow().clone_rng();
+        expected.randbelow(2);
+        lin_lie(&mut game, source);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(1_000_000),
+            expected.randbelow(1_000_000)
+        );
     }
 
     #[test]

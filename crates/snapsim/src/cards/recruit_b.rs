@@ -212,7 +212,9 @@ fn yondu(g: &mut Game, id: usize) {
 fn professor_x(_: &mut Game, _: usize) {}
 fn mantis(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
-    if g.players[owner].hand.len() >= 7 {
+    // CopyCard (0x7ef1ee8) has no hand check before its Roll; the copy
+    // fails afterwards on a full hand.
+    if crate::cards::reference_rules_enabled() && g.players[owner].hand.len() >= 7 {
         return;
     }
     let candidates: Vec<_> = g
@@ -220,6 +222,9 @@ fn mantis(g: &mut Game, id: usize) {
         .collect();
     if !candidates.is_empty() {
         let choice = g.rng.borrow_mut().randbelow(candidates.len());
+        if g.players[owner].hand.len() >= 7 {
+            return;
+        }
         let copy = g.copy_card(candidates[choice], owner);
         g.add_hand(owner, copy, false);
     }
@@ -247,7 +252,10 @@ fn mr_sinister(g: &mut Game, id: usize) {
 }
 fn white_queen(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
-    if g.players[owner].hand.len() >= 7 {
+    // CreateACopy (0x7cf1064) has no hand check before its Roll; the copy
+    // fails afterwards on a full hand.
+    let reference = crate::cards::reference_rules_enabled();
+    if reference && g.players[owner].hand.len() >= 7 {
         return;
     }
     let hand = &g.players[1 - owner].hand;
@@ -258,6 +266,9 @@ fn white_queen(g: &mut Game, id: usize) {
             .filter(|&card| g.card_cost(card) == cost)
             .collect();
         let choice = g.rng.borrow_mut().randbelow(candidates.len());
+        if g.players[owner].hand.len() >= 7 {
+            return;
+        }
         let copy = g.copy_card(candidates[choice], owner);
         g.add_hand(owner, copy, false);
     }
@@ -266,6 +277,17 @@ fn white_tiger(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
     let lane = g.cards[id].lane.unwrap();
     let tiger = g.create_card("TigerSpirit", owner);
+    if !crate::cards::reference_rules_enabled() {
+        // WhiteTigerBehavior::CreateToken (0x7cf1df4) uses
+        // GetRandomLocationToSpawnCard (0x7db2b64) with fallback.
+        match g.random_location_to_spawn_card(tiger, owner, Some(lane), true) {
+            Some(target) if g.add_card(tiger, target, owner, true) => {}
+            _ => {
+                g.cards.pop();
+            }
+        }
+        return;
+    }
     let targets: Vec<_> = (0..3)
         .filter(|&target| target != lane && g.can_add(tiger, target, owner))
         .collect();
@@ -276,6 +298,17 @@ fn white_tiger(g: &mut Game, id: usize) {
 }
 fn regenerate(g: &mut Game, id: usize) {
     let owner = g.cards[id].owner;
+    if !crate::cards::reference_rules_enabled() {
+        // WolverineBehavior::SpawnAtRandomLocation (0x7cf4c78) uses
+        // GetRandomLocationToSpawnCard (0x7db2b64) with fallback.
+        if let Some(lane) = g.random_location_to_spawn_card(id, owner, None, true)
+            && g.can_add(id, lane, owner)
+        {
+            g.add_power(id, 2, owner);
+            g.add_card(id, lane, owner, true);
+        }
+        return;
+    }
     let targets: Vec<_> = (0..3).filter(|&lane| g.can_add(id, lane, owner)).collect();
     if !targets.is_empty() {
         g.add_power(id, 2, owner);
@@ -305,7 +338,14 @@ fn zombie_blade(g: &mut Game, id: usize) {
         return;
     }
     if let Some(horde) = g.horde(lane, owner, 0) {
-        let hand = &g.players[1 - owner].hand;
+        // StealToHorde (0x7cf9fdc) filters the hand by card type (0x7cfa878); the
+        // reference picked among every card in the hand.
+        let hand: Vec<_> = g.players[1 - owner]
+            .hand
+            .iter()
+            .copied()
+            .filter(|&card| crate::cards::reference_rules_enabled() || g.is_character(card))
+            .collect();
         if !hand.is_empty() {
             let target = hand[g.rng.borrow_mut().randbelow(hand.len())];
             g.steal_power(target, horde, 1, owner);
@@ -376,5 +416,132 @@ mod tests {
 
         assert!(game.destroy_card(blade));
         zombie_blade(&mut game, blade);
+    }
+    fn game_for<'a>(rng: &'a mut PythonRandom) -> Game<'a> {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        Game::new([&deck, &deck], &lanes, rng).unwrap()
+    }
+    fn block_spawns(game: &mut Game<'_>) {
+        let stardust = game.create_card("Stardust", 1);
+        game.add_card(stardust, 0, 1, true);
+        assert!(!game.spawns_allowed());
+    }
+    fn fill_hand(game: &mut Game<'_>, seat: usize) {
+        while game.players[seat].hand.len() < 7 {
+            let card = game.create_card("Wasp", seat);
+            game.players[seat].hand.push(card);
+        }
+    }
+
+    #[test]
+    fn wolverine_regenerate_rolls_fallback_location_when_spawns_are_blocked() {
+        let mut rng = PythonRandom::seed(91);
+        let mut game = game_for(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        block_spawns(&mut game);
+        let card = game.create_card("Wolverine", 0);
+        regenerate(&mut game, card);
+        // GetRandomLocationToSpawnCard (0x7db2b64): one roll over all 3 locations.
+        control.randbelow(3);
+        assert!(game.cards[card].lane.is_none());
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn white_tiger_rolls_fallback_over_the_other_locations_when_spawns_are_blocked() {
+        let mut rng = PythonRandom::seed(92);
+        let mut game = game_for(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        let card = game.create_card("WhiteTiger", 0);
+        game.add_card(card, 0, 0, false);
+        block_spawns(&mut game);
+        let cards = game.cards.len();
+        white_tiger(&mut game, card);
+        // 0x7db2b64 excluding the source location: one roll over 2 locations.
+        control.randbelow(2);
+        assert_eq!(game.cards.len(), cards);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn mantis_and_white_queen_roll_before_the_full_hand_check() {
+        let mut rng = PythonRandom::seed(93);
+        let mut game = game_for(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        fill_hand(&mut game, 0);
+        let mantis_card = game.create_card("Mantis", 0);
+        game.add_card(mantis_card, 0, 0, false);
+        let played = game.create_card("Hulk", 1);
+        game.add_card(played, 0, 1, false);
+        game.cards[played].turn_played = 1;
+        game.played[1].push((played, 0));
+        mantis(&mut game, mantis_card);
+        // CopyCard (0x7ef1ee8): one roll over the one played card, then the copy fails.
+        control.randbelow(1);
+        assert_eq!(game.players[0].hand.len(), 7);
+        let queen = game.create_card("WhiteQueen", 0);
+        game.add_card(queen, 1, 0, false);
+        white_queen(&mut game, queen);
+        // CreateACopy (0x7cf1064): one roll over the highest-cost opponent hand cards.
+        let hand = &game.players[1].hand;
+        let highest = hand.iter().map(|&c| game.card_cost(c)).max().unwrap();
+        let ties = hand
+            .iter()
+            .filter(|&&c| game.card_cost(c) == highest)
+            .count();
+        control.randbelow(ties);
+        assert_eq!(game.players[0].hand.len(), 7);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn zombie_blade_steals_only_from_characters_in_the_opponent_hand() {
+        let mut rng = PythonRandom::seed(94);
+        let mut game = game_for(&mut rng);
+        let mut control = game.rng.borrow().clone_rng();
+        game.players[1].hand.clear();
+        let skill = game.create_card("Skill01WeaponXWolverineChampion", 1);
+        let wasp = game.create_card("Wasp", 1);
+        game.players[1].hand.extend([skill, wasp]);
+        let horde = game.create_card("ZombieHorde", 0);
+        game.add_card(horde, 1, 0, true);
+        let blade = game.create_card("ZombieBlade", 0);
+        game.add_card(blade, 0, 0, true);
+        game.played_on_reveal[0] = true;
+        let skill_power = game.cards[skill].power();
+        let wasp_power = game.cards[wasp].power();
+        zombie_blade(&mut game, blade);
+        // StealToHorde (0x7cf9fdc, predicate 0x7cfa878): a single character, one roll.
+        control.randbelow(1);
+        assert_eq!(game.cards[skill].power(), skill_power);
+        assert_eq!(game.cards[wasp].power(), wasp_power - 1);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
     }
 }

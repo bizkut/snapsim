@@ -286,6 +286,7 @@ pub(super) fn simulate(
         order.len()
     };
     order.extend((0..3).filter(|&i| !lanes[i].revealed));
+    let starting_location_ids: Vec<&'static str> = lanes.iter().map(|lane| lane.def.id).collect();
     let mut game = Game {
         cards: Vec::new(),
         ability_call_depth: 0,
@@ -297,6 +298,7 @@ pub(super) fn simulate(
             .iter()
             .filter_map(|id| locations::get(id))
             .collect(),
+        starting_location_ids,
         turn: start.turn as u8,
         stakes: None,
         next_resolution_order: 1,

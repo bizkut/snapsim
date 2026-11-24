@@ -45,14 +45,20 @@ fn agent_coulson(game: &mut Game<'_>, card: usize) {
 }
 
 // ContingentTriggerAction::Execute (0x7d24190) runs DestroyAction only
-// when DiscardCardsAction (0x7d24be0) succeeds.
+// when DiscardCardsAction (0x7d24be0) succeeds. Both targets come from
+// RandomSelector::Select (0x7d28478) with count 1, which returns the whole
+// pool without a Game::Roll when it holds at most one card.
 fn gambit(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let count = game.players[owner].hand.len();
     if count == 0 {
         return;
     }
-    let choice = game.rng.borrow_mut().randbelow(count);
+    let choice = if count > 1 {
+        game.rng.borrow_mut().randbelow(count)
+    } else {
+        0
+    };
     let discarded = game.players[owner].hand[choice];
     if !game.discard_card(owner, discarded) {
         return;
@@ -60,7 +66,11 @@ fn gambit(game: &mut Game<'_>, card: usize) {
     let mut targets = game.revealed_cards_in_resolution_order();
     targets.retain(|&target| game.cards[target].owner != owner);
     if !targets.is_empty() {
-        let choice = game.rng.borrow_mut().randbelow(targets.len());
+        let choice = if targets.len() > 1 {
+            game.rng.borrow_mut().randbelow(targets.len())
+        } else {
+            0
+        };
         game.destroy_card(targets[choice]);
     }
 }
@@ -81,17 +91,10 @@ fn ezekiel_sims(game: &mut Game<'_>, card: usize, event: Event) {
         return;
     }
     game.add_power(card, 2, owner);
-    let mut destinations = [0; 2];
-    let mut count = 0;
-    for target in 0..game.lanes.len() {
-        if target != lane && game.can_move_card(card, target) {
-            destinations[count] = target;
-            count += 1;
-        }
-    }
-    if count != 0 {
-        let choice = game.rng.borrow_mut().randbelow(count);
-        game.move_card(card, destinations[choice]);
+    // GetRandomLocationToMoveCard (0x7db2f50) with fallback to every other
+    // location; the move then fails when none was legal.
+    if let Some(destination) = game.random_location_to_move_card(card, lane, true) {
+        game.move_card(card, destination);
     }
 }
 
@@ -112,21 +115,17 @@ fn phastos(game: &mut Game<'_>, card: usize) {
     }
 }
 
-// ReplaceLocation (0x7f0fb84) morphs Nocturne's destination after any move.
-// The location pool is restricted to implemented locations.
+// ReplaceLocation (0x7f0fb84) morphs Nocturne's destination after any move
+// to Game::GetRandomLocationDefId (0x7db248c): one rarity-weighted roll that
+// excludes only the current location's definition (not other board
+// locations). The location pool is restricted to implemented locations.
 fn nocturne(game: &mut Game<'_>, card: usize, _from: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
     };
-    let choices: Vec<_> = game
-        .location_pool
-        .iter()
-        .filter(|location| !game.lanes.iter().any(|lane| lane.def.id == location.id))
-        .map(|location| location.id)
-        .collect();
-    if !choices.is_empty() {
-        let index = game.rng.borrow_mut().randbelow(choices.len());
-        game.replace_location(lane, choices[index]);
+    let current = game.lanes[lane].def.id;
+    if let Some(id) = game.random_location_def_id(Some(current)) {
+        game.replace_location(lane, id);
     }
 }
 
@@ -144,8 +143,9 @@ fn gwenpool(game: &mut Game<'_>, card: usize) {
         return;
     }
     for _ in 0..3 {
-        for i in (1..targets.len()).rev() {
-            let j = game.rng.borrow_mut().randbelow(i + 1);
+        // Game::Shuffle (0x4b12f30): forward pass, one Roll(i, len) per index.
+        for i in 0..targets.len().saturating_sub(1) {
+            let j = i + game.rng.borrow_mut().randbelow(targets.len() - i);
             targets.swap(i, j);
         }
         game.add_power(targets[0], 2, owner);
@@ -336,12 +336,87 @@ mod tests {
         .map(str::to_owned);
         let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
         let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        // The test pool is the board itself; GetRandomLocationDefId (0x7db248c) would
+        // otherwise exclude the starting locations.
+        game.starting_location_ids.clear();
         let card = game.create_card("Nocturne", 0);
         game.cards[card].lane = Some(1);
         game.cards[card].revealed = true;
         game.lanes[1].cards.push(card);
+        let (first, second) = (game.lanes[0].def.id, game.lanes[1].def.id);
         nocturne(&mut game, card, 0);
-        assert_eq!(game.lanes[0].def.id, "Ruins");
-        assert_ne!(game.lanes[1].def.id, "Xandar");
+        assert_eq!(game.lanes[0].def.id, first);
+        assert_ne!(game.lanes[1].def.id, second);
+    }
+
+    fn client_deck() -> [String; 12] {
+        [
+            "Wasp",
+            "MistyKnight",
+            "Hulk",
+            "Cyclops",
+            "Shocker",
+            "TheThing",
+            "Abomination",
+            "Medusa",
+            "Sentinel",
+            "IronMan",
+            "Hawkeye",
+            "Quicksilver",
+        ]
+        .map(str::to_owned)
+    }
+
+    // RandomSelector::Select (0x7d28478) returns a pool of at most `count`
+    // cards without a Game::Roll.
+    #[test]
+    fn gambit_rolls_nothing_for_single_card_pools() {
+        let mut rng = PythonRandom::seed(4);
+        let deck = client_deck();
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.players[0].hand.clear();
+        let source = game.create_card("Gambit", 0);
+        let enemy = game.create_card("Hulk", 1);
+        game.cards[enemy].lane = Some(1);
+        game.cards[enemy].revealed = true;
+        game.lanes[1].cards.push(enemy);
+        let discard = game.create_card("Wasp", 0);
+        game.add_hand(0, discard, false);
+        let mut expected = game.rng.borrow().clone_rng();
+        gambit(&mut game, source);
+        assert_eq!(game.cards[enemy].lane, None);
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(1_000_000),
+            expected.randbelow(1_000_000)
+        );
+    }
+
+    // GetRandomLocationDefId (0x7db248c) excludes only the replaced
+    // location's definition, so another board location's definition can
+    // be chosen.
+    #[test]
+    fn nocturne_may_pick_a_definition_already_on_the_board() {
+        let deck = client_deck();
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(5);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        // The test pool is the board itself; GetRandomLocationDefId (0x7db248c) would
+        // otherwise exclude the starting locations.
+        game.starting_location_ids.clear();
+        let card = game.create_card("Nocturne", 0);
+        game.cards[card].lane = Some(1);
+        game.cards[card].revealed = true;
+        game.lanes[1].cards.push(card);
+        let before = game.lanes[1].def.id;
+        // The pool is exactly the three board locations, so the only legal
+        // result is one of the other two board definitions.
+        nocturne(&mut game, card, 0);
+        assert_ne!(game.lanes[1].def.id, before);
+        assert!(
+            [0, 2]
+                .iter()
+                .any(|&lane| game.lanes[lane].def.id == game.lanes[1].def.id)
+        );
     }
 }

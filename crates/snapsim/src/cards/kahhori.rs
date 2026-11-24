@@ -31,14 +31,20 @@ fn kahhori(game: &mut Game<'_>, card: usize) {
     if len == 0 {
         return;
     }
+    // BuffForEachCard (0x7ed8498) accumulates into a dictionary, so buffs apply in
+    // order of each card's first selection.
+    let mut order = [0usize; 12];
+    let mut selected = 0;
     for _ in 0..count {
         let index = game.rng.borrow_mut().randbelow(len);
+        if amounts[index] == 0 {
+            order[selected] = index;
+            selected += 1;
+        }
         amounts[index] += 1;
     }
-    for index in 0..len {
-        if amounts[index] != 0 {
-            game.add_power(targets[index], amounts[index], owner);
-        }
+    for &index in &order[..selected] {
+        game.add_power(targets[index], amounts[index], owner);
     }
 }
 

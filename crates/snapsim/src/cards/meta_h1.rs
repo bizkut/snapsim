@@ -126,15 +126,11 @@ fn reality_stone(game: &mut Game<'_>, card: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
     };
-    let choices: Vec<_> = game
-        .location_pool
-        .iter()
-        .filter(|location| !game.lanes.iter().any(|lane| lane.def.id == location.id))
-        .map(|location| location.id)
-        .collect();
-    if !choices.is_empty() {
-        let index = game.rng.borrow_mut().randbelow(choices.len());
-        game.replace_location(lane, choices[index]);
+    // RealityStoneBehavior::DoAction (0x7f238dc) calls Game::GetRandomLocationDefId
+    // (0x7db248c): rarity-weighted, excluding only this location's definition.
+    let current = game.lanes[lane].def.id;
+    if let Some(id) = game.random_location_def_id(Some(current)) {
+        game.replace_location(lane, id);
     }
 }
 
@@ -170,6 +166,41 @@ mod tests {
             "opponent": {"hand": 0, "deck": 0}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn reality_stone_excludes_only_its_own_location() {
+        let mut rng = PythonRandom::seed(1);
+        let mut game = build_game(&position("RealityStone"), &mut rng).unwrap();
+        let source = game.lanes[0].cards[0];
+        let here = crate::locations::get("Ruins").unwrap();
+        let there = crate::locations::get("Xandar").unwrap();
+        game.lanes[0].def = here;
+        game.lanes[1].def = there;
+        game.location_pool = vec![here, there];
+        game.starting_location_ids.clear();
+        reality_stone(&mut game, source);
+        assert_eq!(game.lanes[0].def.id, "Xandar");
+        assert_eq!(game.lanes[1].def.id, "Xandar");
+    }
+
+    #[test]
+    fn random_location_def_id_weights_by_rarity() {
+        let mut rng = PythonRandom::seed(9);
+        let mut game = build_game(&position("RealityStone"), &mut rng).unwrap();
+        let common = crate::locations::get("Ruins").unwrap();
+        let ultra = crate::locations::get("Ego").unwrap();
+        game.location_pool = vec![common, ultra];
+        game.starting_location_ids.clear();
+        let ultra_count = (0..4000)
+            .filter(|_| game.random_location_def_id(None) == Some("Ego"))
+            .count();
+        // 15 / (15 + 200) is about 7%.
+        assert!((150..450).contains(&ultra_count), "{ultra_count}");
+        assert_eq!(game.random_location_def_id(Some("Ruins")), Some("Ego"));
+        game.starting_location_ids = vec!["Ego"];
+        assert_eq!(game.random_location_def_id(Some("Ruins")), None);
+        assert_eq!(game.random_location_def_id(None), Some("Ruins"));
     }
 
     #[test]

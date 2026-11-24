@@ -81,7 +81,10 @@ fn prevent_move(_: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
 
 // SubterraneaTutorialBehavior::ShuffleRocks @ 0x7d85498 uses
 // Game::get_HumanPlayer to preserve the tutorial's two designated draws.
-// LocationDefList::CreateSubterranea @ 0x7a739d8 configures four rocks.
+// LocationDefList::CreateSubterranea @ 0x7a739d8 configures four rocks. Unlike
+// SubterraneaBehavior (0x7d84dbc) it makes no Deck::Shuffle call and reaches no Game::Roll, so
+// Game::CreateCard (0x7dab298) places the Rocks deterministically; they are appended, which
+// makes the bottom card read afterwards (Deck::GetBottomCard 0x7cc0b70) a Rock.
 fn subterranea_tutorial(game: &mut Game<'_>, _: usize) {
     let Some(human) = game.human_seat else { return };
     let original_count = game.players[human].deck.len();
@@ -90,11 +93,7 @@ fn subterranea_tutorial(game: &mut Game<'_>, _: usize) {
         for _ in 0..4 {
             let rock = game.create_card("Rock", seat);
             game.cards[rock].created_by_location_id = Some("SubterraneaTutorial".into());
-            let index = game
-                .rng
-                .borrow_mut()
-                .randbelow(game.players[seat].deck.len() + 1);
-            game.put_deck(seat, index, rock);
+            game.push_deck(seat, rock);
         }
     }
     let Some(&bottom) = game.players[human].deck.last() else {
@@ -280,5 +279,17 @@ mod tests {
         position.locations[0].mine[0].played_turn = Some(1);
         let state = crate::coverage::coverage(&position)["state"].to_string();
         assert!(!state.contains("Quantum Realm"));
+    }
+
+    // ShuffleRocks (0x7d85498) neither rolls nor shuffles.
+    #[test]
+    fn subterranea_tutorial_consumes_no_random_draws() {
+        use crate::locations::test_support::{assert_same_stream, rng_game};
+        let mut rng = PythonRandom::seed(14);
+        let mut game = rng_game(&mut rng);
+        game.human_seat = Some(0);
+        let mut expected = game.rng.borrow().clone_rng();
+        subterranea_tutorial(&mut game, 0);
+        assert_same_stream(&game, &mut *expected);
     }
 }

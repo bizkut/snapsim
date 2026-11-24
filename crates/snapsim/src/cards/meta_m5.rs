@@ -247,16 +247,10 @@ fn x23_discard(game: &mut Game<'_>, card: usize) {
 
 fn x23_destroy(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
-    let mut lanes = [0; 3];
-    let mut count = 0;
-    for lane in 0..3 {
-        if game.can_add(card, lane, owner) {
-            lanes[count] = lane;
-            count += 1;
-        }
-    }
-    if count != 0 {
-        let lane = lanes[game.rng.borrow_mut().randbelow(count)];
+    // X23Behavior::SpawnAtRandomLocation (0x7cf6368) calls
+    // GetRandomLocationToSpawnCard (0x7db2b64) with fallback, so it still
+    // rolls among all locations when none can spawn it.
+    if let Some(lane) = game.random_location_to_spawn_card(card, owner, None, true) {
         game.resurrect_from_zone(card, lane, owner);
     }
     game.schedule_energy(owner, game.turn.saturating_add(1), 1);
@@ -362,6 +356,42 @@ mod tests {
         assert!(game.cards[card].lane.is_some());
         assert!(!game.players[0].discard.contains(&card));
         assert_eq!(game.players[0].scheduled_energy, vec![(game.turn + 1, 1)]);
+    }
+
+    #[test]
+    fn x23_rolls_fallback_location_when_spawns_are_blocked() {
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut rng = PythonRandom::seed(31);
+        let mut control_rng = PythonRandom::seed(31);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let control = Game::new([&deck, &deck], &lanes, &mut control_rng).unwrap();
+        let stardust = game.create_card("Stardust", 0);
+        game.add_card(stardust, 0, 0, true);
+        assert!(!game.spawns_allowed());
+        let card = game.create_card("X23", 0);
+        game.players[0].hand.push(card);
+        game.discard_card(0, card);
+        control.rng.borrow_mut().randbelow(3);
+        assert!(game.cards[card].lane.is_none());
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.rng.borrow_mut().randbelow(10000)
+        );
     }
 
     #[test]
