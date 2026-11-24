@@ -63,31 +63,16 @@ CLIENT_DIR/dump/<package>/<version>/SecondDinner/CubeDef.cs
 
 Every behavior rule in the code cites a method and RVA. After an update RVAs shift even when behavior does not, so a stale RVA in a comment is not evidence. Do this before touching behavior.
 
-1. List every cited RVA:
+Run the review checklist before making changes:
 
-   ```sh
-   git grep -ohE '0x[0-9a-f]{6,8}' -- crates docs README.md parity | sort -u > cited-rvas.txt
-   ```
+```sh
+python3 parity/client_diff.py OLD_CLIENT_DIR NEW_CLIENT_DIR --objdump objdump
+python3 parity/client_diff.py OLD_CLIENT_DIR NEW_CLIENT_DIR --json > client-diff.json
+```
 
-   The list includes some non-RVA constants; discard those when a lookup fails.
-2. Name each old RVA from the **old** `metadata.json`, then find the same method (`group` plus mangled `name`, which includes its parameter types) in the **new** one. Generic instantiations can share a name, so a collision means "look by hand":
+`--objdump` (or the `OBJDUMP` environment variable) selects an ARM64-capable objdump. The tool collects cited method-start RVAs with `git grep`, resolves each old method by exact group, name and signature, and flags missing or ambiguous new methods. For mapped methods it compares instruction streams bounded by the next metadata method start, masking relocation-sensitive addresses. It compares card and behavior definitions by ID, ignoring delegate RVAs but not their method names or other fields. When both captures contain `rules/locationdefs.json` it compares those definitions too; the standard 59.15.1 capture does not contain a location definition list, so locations require a separate manual audit. If only one side has that file, the missing capture requires review.
 
-   ```python
-   import json
-
-   def load(path):
-       rows = json.load(open(path))["addressMap"]["methodDefinitions"]
-       return {(r["group"], r["name"]): int(r["virtualAddress"], 16) for r in rows}
-
-   old, new = load("old/rules/metadata.json"), load("new/rules/metadata.json")
-   removed = sorted(set(old) - set(new))     # renamed, re-signed, or deleted
-   added = sorted(set(new) - set(old))       # new behavior to look at
-   moved = {k: (hex(old[k]), hex(new[k])) for k in old.keys() & new.keys() if old[k] != new[k]}
-   ```
-
-3. A method present in both builds is **not** thereby unchanged. Compare its instruction stream between builds (disassemble each from its RVA to the next dumped RVA, then mask absolute addresses and branch targets) and treat any difference as "re-audit". This byte-level comparison is a suggested method, not one the existing audits record **[INFERENCE]**.
-4. Diff `defs.json` and `carddefs.json` per card ID for changed costs, powers, ability definitions, trigger types, stat values and delegate targets. Constant tuning (turn numbers, thresholds, amounts) lives in definitions and in constructors; see the evidence rules.
-5. Record the result as the work list for steps 3 to 5: cards and locations that are new, removed, renamed or whose definition changed, and cited methods that were removed or whose bodies differ.
+Every finding starts with verdict `review` and follows the audit ledger fields below; the tool exits 1 when findings need review, 2 on an input failure, and 0 when none are detected. An unchanged normalized stream is **not** proof of unchanged behavior: relocations and literal contents are not fully checked, and method boundaries are inferred. Check constants, callees and indirect calls manually. This checklist does not regenerate files; run the generators in step 3 after reviewing their version-specific assumptions.
 
 ## Step 3: regenerate derived files
 
