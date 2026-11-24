@@ -182,10 +182,21 @@ fn baxter(game: &mut Game<'_>, lane: usize) -> bool {
 fn castle(game: &Game<'_>, lane: usize, seat: usize) -> i32 {
     i32::from(leader(game, lane) == Some(seat))
 }
+// CentralParkBehavior::AddSquirrel 0x7d471c4 calls ordered players at
+// 0x7d472d0 and enumerates locations inside each player's iteration.
 fn central_park(game: &mut Game<'_>, _: usize) {
-    for lane in 0..3 {
-        for seat in 0..2 {
-            game.add_created("Squirrel", lane, seat);
+    if crate::cards::reference_rules_enabled() {
+        for lane in 0..3 {
+            for seat in 0..2 {
+                game.add_created("Squirrel", lane, seat);
+            }
+        }
+    } else {
+        let first = game.reveal_priority.unwrap_or(0);
+        for seat in [first, 1 - first] {
+            for lane in 0..3 {
+                game.add_created("Squirrel", lane, seat);
+            }
         }
     }
 }
@@ -205,8 +216,15 @@ fn danger(game: &mut Game<'_>, _: usize, card: usize) {
         game.destroy_card(card);
     }
 }
+// EbonshireBehavior::DrawFromBottom 0x7d50098 calls ordered players at
+// 0x7d50144 before drawing each player's card.
 fn ebonshire(game: &mut Game<'_>, _: usize) {
-    for seat in 0..2 {
+    let first = if crate::cards::reference_rules_enabled() {
+        0
+    } else {
+        game.reveal_priority.unwrap_or(0)
+    };
+    for seat in [first, 1 - first] {
         let slot = game.players[seat].deck.iter().rposition(|&id| {
             game.cards[id]
                 .def
@@ -533,5 +551,40 @@ mod tests {
             assert_eq!(game.cards[card].lane.is_none(), roll < 25);
             assert_same_stream(&game, &mut *expected);
         }
+    }
+    #[test]
+    fn central_park_creates_all_initiative_squirrels_first() {
+        let mut rng = PythonRandom::seed(11);
+        let mut game = rng_game(&mut rng);
+        game.reveal_priority = Some(1);
+        super::central_park(&mut game, 0);
+        let one: [usize; 3] = std::array::from_fn(|lane| game.lanes[lane].cards[0]);
+        assert!(one.iter().all(|&id| game.cards[id].owner == 1));
+        assert!(one[0] < one[1] && one[1] < one[2]);
+        assert!(one[2] < game.lanes[0].cards[1]);
+    }
+
+    #[test]
+    fn ebonshire_draws_in_initiative_order() {
+        use crate::cards::CardDef;
+        use crate::game::Event;
+        fn record(game: &mut Game<'_>, _: usize, event: Event) {
+            if let Event::CardDrawn { seat, .. } = event {
+                game.players[0].energy = game.players[0].energy * 10 + seat as i32 + 1;
+            }
+        }
+        static OBSERVER: CardDef = CardDef {
+            on_event: Some(record),
+            ..CardDef::vanilla("DrawOrderObserver")
+        };
+        let mut rng = PythonRandom::seed(11);
+        let mut game = rng_game(&mut rng);
+        game.reveal_priority = Some(1);
+        let observer = game.create_card("Wasp", 0);
+        game.add_card(observer, 0, 0, true);
+        game.cards[observer].override_ability = Some(&OBSERVER);
+        game.players[0].energy = 0;
+        super::ebonshire(&mut game, 0);
+        assert_eq!(game.players[0].energy, 21);
     }
 }

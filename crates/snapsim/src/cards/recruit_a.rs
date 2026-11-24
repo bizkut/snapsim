@@ -219,12 +219,12 @@ fn ironheart(g: &mut Game<'_>, id: usize) {
         }
         return;
     }
-    // IronheartBehavior::BuffCards (0x7ece770): Game::Shuffle (0x4b12f30) of
-    // the revealed allies in resolution order, then Take(2).
+    // IronheartBehavior::BuffCards (0x7ece770) filters revealed allies by
+    // HasPowerAttribute (predicate 0x7eceee0), then shuffles and takes two.
     let mut allies: Vec<_> = g
         .revealed_cards_in_resolution_order()
         .into_iter()
-        .filter(|&other| other != id && g.cards[other].owner == owner)
+        .filter(|&other| other != id && g.cards[other].owner == owner && g.is_character(other))
         .collect();
     for i in 0..allies.len().saturating_sub(1) {
         let j = i + g.rng.borrow_mut().randbelow(allies.len() - i);
@@ -349,6 +349,26 @@ mod tests {
                 before[slot] + if buffed { 3 } else { 0 }
             );
         }
+        assert_eq!(
+            game.rng.borrow_mut().randbelow(10000),
+            control.randbelow(10000)
+        );
+    }
+
+    #[test]
+    fn ironheart_excludes_cards_without_power_attribute_before_shuffle() {
+        let mut rng = PythonRandom::seed(95);
+        let mut game = game_for(&mut rng);
+        let source = game.create_card("Ironheart", 0);
+        let skill = game.create_card("AdamantiumInfusion", 0);
+        let ally = game.create_card("Wasp", 0);
+        game.add_card(source, 0, 0, true);
+        game.add_card(skill, 1, 0, true);
+        game.add_card(ally, 2, 0, true);
+        let before = game.cards[ally].permanent;
+        let mut control = game.rng.borrow().clone_rng();
+        ironheart(&mut game, source);
+        assert_eq!(game.cards[ally].permanent, before + 3);
         assert_eq!(
             game.rng.borrow_mut().randbelow(10000),
             control.randbelow(10000)

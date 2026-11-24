@@ -33,10 +33,11 @@ fn utopia(game: &Game<'_>, _: usize, card: usize, _: i32) -> Option<CostUpdate> 
     matches!(game.cards[card].cost, 3 | 4).then_some(CostUpdate::Add(-1))
 }
 
-// CampLehighBehavior::AddRandomCard @ 0x7d42a84. Random pool is restricted
-// to simulator-implemented cards, as with other generated-card locations.
+// CampLehighBehavior::AddRandomCard 0x7d42a84 calls ordered players at
+// 0x7d42b70. The pool is restricted to simulator-implemented cards.
 fn camp_lehigh(game: &mut Game<'_>, _: usize) {
-    for seat in 0..2 {
+    let first = game.reveal_priority.unwrap_or(0);
+    for seat in [first, 1 - first] {
         if let Some(id) = game.random_card(|row| row.cost == 3) {
             let card = game.create_card(id, seat);
             game.add_hand(seat, card, false);
@@ -186,5 +187,43 @@ mod tests {
             assert_eq!(game.cards[card].cost, 3);
             assert!(game.cards[card].created);
         }
+    }
+
+    #[test]
+    fn camp_lehigh_rolls_in_initiative_order() {
+        let mut rng = PythonRandom::seed(42);
+        let mut oracle_rng = PythonRandom::seed(42);
+        let deck = [
+            "Hawkeye",
+            "Wolfsbane",
+            "Bishop",
+            "Nightcrawler",
+            "AntMan",
+            "Angela",
+            "JessicaJones",
+            "KaZar",
+            "IronMan",
+            "BlueMarvel",
+            "Ultron",
+            "SquirrelGirl",
+        ]
+        .map(str::to_owned);
+        let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &locations, &mut rng).unwrap();
+        let oracle = Game::new([&deck, &deck], &locations, &mut oracle_rng).unwrap();
+        game.reveal_priority = Some(1);
+        let expected = [
+            oracle.random_card(|row| row.cost == 3).unwrap(),
+            oracle.random_card(|row| row.cost == 3).unwrap(),
+        ];
+        camp_lehigh(&mut game, 0);
+        assert_eq!(
+            game.cards[*game.players[1].hand.last().unwrap()].def.id,
+            expected[0]
+        );
+        assert_eq!(
+            game.cards[*game.players[0].hand.last().unwrap()].def.id,
+            expected[1]
+        );
     }
 }

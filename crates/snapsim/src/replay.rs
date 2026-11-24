@@ -14,6 +14,8 @@ pub struct BoardCard {
     pub power: Value,
     pub cost: Value,
     pub flipped: Value,
+    /// Resolution order is public only once the card is revealed.
+    pub latest_resolution_order: Value,
     pub staged: Value,
     pub created_by_location: Value,
     /// Reader ledger is only public after the opponent's card is revealed.
@@ -48,6 +50,8 @@ pub struct Frame {
     pub hand_counts: [Value; 2],
     pub deck_counts: [Value; 2],
     pub out_of_play: Vec<(Value, &'static str)>,
+    /// Local client staging sequence, when the reader could establish it.
+    pub local_staged_order: Value,
 }
 
 impl Frame {
@@ -262,6 +266,11 @@ pub fn matches(
                     } else {
                         Value::Null
                     },
+                    latest_resolution_order: if revealed {
+                        card["latest_resolution_order"].clone()
+                    } else {
+                        Value::Null
+                    },
                     staged: if owner == 0 {
                         card["staged_turn"].clone()
                     } else {
@@ -398,6 +407,7 @@ pub fn matches(
                 zones[1]["deck"]["count"].clone(),
             ],
             out_of_play,
+            local_staged_order: game["history"]["local_staged_order"].clone(),
         });
     }
     if !frames.is_empty() {
@@ -431,6 +441,7 @@ pub struct Staging<'a> {
     pub moves: Vec<(Value, usize, usize)>,
     pub before: &'a Frame,
     pub opponent_count: i64,
+    pub recorded_order_verified: bool,
 }
 
 fn entity<'a>(frame: &'a Frame, id: &Value) -> Option<&'a BoardCard> {
@@ -634,6 +645,7 @@ pub fn staging<'a>(
         moves,
         before: last,
         opponent_count,
+        recorded_order_verified: false,
     })
 }
 
@@ -1056,7 +1068,12 @@ mod tests {
         assert!(rows[1].detail.contains("Ta Lo"));
     }
 
-    fn hidden_power_case(updates: Value, power: i32) -> Vec<super::ResultRow> {
+    fn hidden_power_case_for(
+        id: &str,
+        created_by: Value,
+        updates: Value,
+        power: i32,
+    ) -> Vec<super::ResultRow> {
         let mut start = observation(2, "hidden-power", false);
         start["game"]["locations"][0]["cards"] = json!([{
             "entity_id": 35, "owner_entity_id": 2, "card_id": "Surge",
@@ -1072,9 +1089,9 @@ mod tests {
         }]);
         let mut revealed = submitted.clone();
         revealed["game"]["locations"][1]["cards"] = json!([{
-            "entity_id": 34, "owner_entity_id": 2, "card_id": "Agony",
+            "entity_id": 34, "owner_entity_id": 2, "card_id": id,
             "revealed": true, "power": power, "turn_revealed": 2,
-            "stat_updates": updates
+            "created_by_location_id": created_by, "stat_updates": updates
         }]);
         let mut next = revealed.clone();
         next["game"]["turn"] = json!(3);
@@ -1086,6 +1103,57 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    fn hidden_power_case(updates: Value, power: i32) -> Vec<super::ResultRow> {
+        hidden_power_case_for("Agony", Value::Null, updates, power)
+    }
+
+    #[test]
+    fn pyramid_created_rock_has_proven_initial_power() {
+        let update = json!([{
+            "stat": "Power", "update": "Set", "value": 3,
+            "updater_location_id": "PyramidOfRamaTut"
+        }]);
+        let rows = hidden_power_case_for("Rock", json!("PyramidOfRamaTut"), update.clone(), 3);
+        assert_eq!(rows[0].status, super::Status::Consistent);
+        let rows = hidden_power_case_for("Rock", Value::Null, update, 3);
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("cannot be timed"));
+    }
+
+    fn forge_no_play_case(owner: usize, opponent_hand: u8) -> Vec<super::ResultRow> {
+        let mut start = identified_observation(2);
+        start["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 35, "owner_entity_id": owner + 1, "card_id": "Forge",
+            "revealed": true, "power": 2, "turn_revealed": 1
+        }]);
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(opponent_hand);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        let mut next = submitted.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        check_observations(vec![(1, start), (2, submitted), (3, next)], &[], 1).unwrap()
+    }
+
+    #[test]
+    fn forge_without_an_owner_play_does_not_block_replay() {
+        assert_eq!(
+            forge_no_play_case(0, 0)[0].status,
+            super::Status::Consistent
+        );
+        assert_eq!(
+            forge_no_play_case(1, 0)[0].status,
+            super::Status::Consistent
+        );
+    }
+
+    #[test]
+    fn opponent_forge_with_a_hidden_possible_play_stays_uncheckable() {
+        let rows = forge_no_play_case(1, 1);
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("pending Forge"));
     }
 
     #[test]
@@ -1133,6 +1201,19 @@ mod tests {
                 "updater_card_id": "CaptainAmerica"
             }]
         }]);
+        start["schema_version"] = json!(2);
+        start["game"]["history"] = json!({
+            "actions": [
+                {"owner": "opponent", "turn": 1, "kind": "play", "location_slot": 0,
+                 "card_entity_id": 35, "card_id": "CaptainAmerica", "resolved": true,
+                 "turn_resolved": 1, "resolution_order": 1},
+                {"owner": "opponent", "turn": 1, "kind": "play", "location_slot": 0,
+                 "card_entity_id": 36, "card_id": "Mystique", "resolved": true,
+                 "turn_resolved": 1, "resolution_order": 2}
+            ],
+            "action_completeness": {"local": {}, "opponent": {"1": true}},
+            "own_draws": null
+        });
         start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
         let mut submitted = start.clone();
         submitted["game"]["players"][0]["ended_turn"] = json!(2);
@@ -1178,6 +1259,126 @@ mod tests {
         let rows = copied_ongoing_case(3, 6);
         assert_eq!(rows[0].status, super::Status::Uncheckable);
         assert!(rows[0].detail.contains("copied Ongoing text"));
+    }
+
+    fn delayed_mystique_row_case(
+        ambiguous: bool,
+        missing_ledger: bool,
+        graveyard: bool,
+    ) -> Vec<super::ResultRow> {
+        let mut start = identified_observation(5);
+        start["game"]["players"][0]["zones"]["hand"] = json!({"count": 1, "cards": [{
+            "entity_id": 44, "card_id": "Wasp", "cost": 0, "power": 1
+        }]});
+        start["game"]["locations"][0]["cards"] = json!([
+            {"entity_id": 10, "owner_entity_id": 1, "card_id": "Rock", "zone_position": 0, "revealed": true, "power": 0, "turn_revealed": 1, "stat_updates": []},
+            {"entity_id": 11, "owner_entity_id": 1, "card_id": "Rock", "zone_position": 1, "revealed": true, "power": 0, "turn_revealed": 1, "stat_updates": []},
+            {"entity_id": 12, "owner_entity_id": 1, "card_id": "Rock", "zone_position": 2, "revealed": true, "power": 0, "turn_revealed": 1, "stat_updates": []},
+            {"entity_id": 38, "owner_entity_id": 2, "card_id": "Mystique", "zone_position": 0, "revealed": true, "power": 1, "turn_revealed": 3, "stat_updates": []}
+        ]);
+        start["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 33, "owner_entity_id": 2, "card_id": "Lizard",
+            "zone_position": 0, "revealed": true, "power": 5, "turn_revealed": 2,
+            "stat_updates": []
+        }]);
+        start["schema_version"] = json!(2);
+        start["game"]["history"] = json!({
+            "actions": [
+                {"owner": "opponent", "turn": 2, "kind": "play", "location_slot": 1,
+                 "card_entity_id": 33, "card_id": "Lizard", "resolved": true,
+                 "turn_resolved": 2, "resolution_order": 1},
+                {"owner": "opponent", "turn": 3, "kind": "play", "location_slot": 0,
+                 "card_entity_id": 38, "card_id": "Mystique", "resolved": true,
+                 "turn_resolved": 3, "resolution_order": 1}
+            ],
+            "action_completeness": {"local": {}, "opponent": {"1": true, "2": true, "3": true, "4": true}},
+            "own_draws": null
+        });
+        if graveyard {
+            start["game"]["players"][1]["zones"]["graveyard"] = json!({"cards": [{
+                "entity_id": 32, "card_id": "Lizard"
+            }]});
+            start["game"]["history"]["actions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "owner": "opponent", "turn": 1, "kind": "play", "location_slot": 1,
+                    "card_entity_id": 32, "card_id": "Lizard", "resolved": true,
+                    "turn_resolved": 1, "resolution_order": 1
+                }));
+        }
+        if ambiguous {
+            start["game"]["locations"][1]["cards"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "entity_id": 39, "owner_entity_id": 2, "card_id": "Mystique",
+                    "zone_position": 1, "revealed": true, "power": 1, "turn_revealed": 4,
+                    "stat_updates": []
+                }));
+        }
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(5);
+        submitted["game"]["players"][0]["zones"]["hand"] = json!({"count": 0, "cards": []});
+        submitted["game"]["locations"][0]["cards"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "entity_id": 44, "owner_entity_id": 1, "card_id": "Wasp",
+                "zone_position": 3, "revealed": false, "power": 1, "cost": 0
+            }));
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][0]["cards"][4]["revealed"] = json!(true);
+        revealed["game"]["locations"][0]["cards"][4]["turn_revealed"] = json!(5);
+        revealed["game"]["locations"][0]["cards"][4]["stat_updates"] = json!([]);
+        if missing_ledger {
+            revealed["game"]["locations"][0]["cards"][4]["stat_updates"] = Value::Null;
+        }
+        revealed["game"]["locations"][0]["cards"][3]["power"] = json!(-3);
+        revealed["game"]["locations"][0]["cards"][3]["stat_updates"] = json!([{
+            "stat": "Power", "update": "Add", "value": -4, "updater_card_id": "Mystique"
+        }]);
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(6);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        check_observations(
+            vec![(1, start), (2, submitted), (3, revealed), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mystique_copy_can_be_recovered_from_a_later_ongoing_row() {
+        let rows = delayed_mystique_row_case(false, false, false);
+        assert_eq!(
+            rows[0].status,
+            super::Status::Consistent,
+            "{}",
+            rows[0].detail
+        );
+    }
+
+    #[test]
+    fn multiple_mystiques_make_later_ongoing_row_ambiguous() {
+        let rows = delayed_mystique_row_case(true, false, false);
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("Mystique"));
+    }
+
+    #[test]
+    fn missing_target_ledger_cannot_identify_mystique_copy() {
+        let rows = delayed_mystique_row_case(false, true, false);
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("ledger is missing"));
+    }
+
+    #[test]
+    fn graveyard_ongoing_candidate_leaves_copy_uncheckable() {
+        let rows = delayed_mystique_row_case(false, false, true);
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("complete owner play history"));
     }
 
     /// The opponent's Scarlet Witch replaces her lane's location with `observed`;

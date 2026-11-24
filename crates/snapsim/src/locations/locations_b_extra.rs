@@ -88,8 +88,8 @@ fn sandbar(game: &Game<'_>, _: usize, card: usize, cost: i32) -> Option<CostUpda
         CostUpdate::Set(cost)
     })
 }
-// StarkIslandBehavior::ReduceCardCostInEachHand @ 0x7d83498, per player in resolution order
-// (Game::GetOrderedPlayersForResolution 0x7daa454; the initiative order is not modeled here):
+// StarkIslandBehavior::ReduceCardCostInEachHand 0x7d83498 calls ordered
+// players at 0x7d83620 (Game::GetOrderedPlayersForResolution 0x7daa454):
 // a non-empty hand is copied and shuffled (Game::Shuffle 0x4b12f30), then cards whose Cost is 0
 // or that cannot have their cost reduced (predicate 0x7d83e88) are split off as fallback targets.
 // When reducible cards remain, Game::Roll(0, n) picks one; otherwise the fallback list is
@@ -101,7 +101,8 @@ fn stark_island(game: &mut Game<'_>, _: usize) {
         stark_island_reference(game);
         return;
     }
-    for seat in 0..2 {
+    let first = game.reveal_priority.unwrap_or(0);
+    for seat in [first, 1 - first] {
         let mut hand = game.players[seat].hand.clone();
         if hand.is_empty() {
             continue;
@@ -208,9 +209,10 @@ fn zenn_la(game: &mut Game<'_>, lane: usize) {
         crate::cards::reference_rules::zenn_la(game, lane);
         return;
     }
-    // ZennLaBehavior::RecruitThreeCostCard (0x7d9bcec) takes the first matching
-    // deck card; its predicate (0x7d9c414) compares DefCost, not modified cost.
-    for seat in 0..2 {
+    // ZennLaBehavior::RecruitThreeCostCard (0x7d9bcec) calls the ordered
+    // player helper at 0x7d9bdd8; predicate 0x7d9c414 uses DefCost.
+    let first = game.reveal_priority.unwrap_or(0);
+    for seat in [first, 1 - first] {
         let slot = game.players[seat]
             .deck
             .iter()
@@ -235,9 +237,15 @@ fn put_from_hand(game: &mut Game<'_>, lane: usize, seat: usize, reveal: bool) {
         }
     }
 }
+// SakaarBehavior::PlayCards 0x7d7aab8 calls ordered players at 0x7d7ab74.
 fn sakaar(game: &mut Game<'_>, lane: usize) {
     if game.lanes[lane].revealed_turn == Some(game.turn) {
-        for seat in 0..2 {
+        let first = if crate::cards::reference_rules_enabled() {
+            0
+        } else {
+            game.reveal_priority.unwrap_or(0)
+        };
+        for seat in [first, 1 - first] {
             put_from_hand(game, lane, seat, false);
         }
     }
@@ -623,6 +631,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stark_island_picks_in_initiative_order() {
+        let mut rng = PythonRandom::seed(31);
+        let mut game = rng_game(&mut rng);
+        game.reveal_priority = Some(1);
+        for seat in 0..2 {
+            game.players[seat].hand.clear();
+            for _ in 0..3 {
+                let card = game.create_card("Hulk", seat);
+                game.cards[card].cost = 3;
+                game.add_hand(seat, card, false);
+            }
+        }
+        let mut expected = game.rng.borrow().clone_rng();
+        let mut picked = [0; 2];
+        for seat in [1, 0] {
+            let mut hand = game.players[seat].hand.clone();
+            for i in 0..hand.len() - 1 {
+                let j = i + expected.randbelow(hand.len() - i);
+                hand.swap(i, j);
+            }
+            picked[seat] = hand[expected.randbelow(hand.len())];
+        }
+        super::stark_island(&mut game, 0);
+        for card in picked {
+            assert_eq!(game.card_cost(card), 2);
+        }
+    }
+
+    #[test]
+    fn zenn_la_recruits_in_initiative_order() {
+        let mut rng = PythonRandom::seed(27);
+        let mut game = rng_game(&mut rng);
+        game.reveal_priority = Some(1);
+        for seat in 0..2 {
+            game.players[seat].deck.clear();
+            let card = game.create_card("Bishop", seat);
+            game.push_deck(seat, card);
+        }
+        super::zenn_la(&mut game, 0);
+        assert_eq!(game.cards[game.lanes[0].cards[0]].owner, 1);
+        assert_eq!(game.cards[game.lanes[0].cards[1]].owner, 0);
+    }
+    #[test]
+    fn sakaar_rolls_hands_in_initiative_order() {
+        let mut rng = PythonRandom::seed(27);
+        let mut game = rng_game(&mut rng);
+        game.reveal_priority = Some(1);
+        game.lanes[0].revealed_turn = Some(game.turn);
+        for seat in 0..2 {
+            game.players[seat].hand.clear();
+            for _ in 0..3 {
+                let card = game.create_card("Wasp", seat);
+                game.add_hand(seat, card, false);
+            }
+        }
+        let mut control = game.rng.borrow().clone_rng();
+        let selected = [
+            game.players[1].hand[control.randbelow(3)],
+            game.players[0].hand[control.randbelow(3)],
+        ];
+        super::sakaar(&mut game, 0);
+        assert!(selected.iter().all(|id| game.lanes[0].cards.contains(id)));
+    }
     // TheIceBoxBehavior::FreezeHands (0x7d8a800) only picks among cards with Cost < 6.
     #[test]
     fn ice_box_prefers_cards_costing_under_six() {

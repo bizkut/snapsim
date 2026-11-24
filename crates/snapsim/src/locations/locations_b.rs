@@ -137,8 +137,15 @@ fn throne_room(game: &mut Game<'_>, lane: usize) -> bool {
     }
     true
 }
+// MonsterIsland 0x7d66b14 calls 0x7daa454 at 0x7d66be8, Shadowland
+// 0x7d7f510 at 0x7d7f5d4 and SavageLand 0x7d7e638 at 0x7d7e718.
 fn tokens(game: &mut Game<'_>, lane: usize, id: &str, count: usize) {
-    for seat in 0..2 {
+    let first = if crate::cards::reference_rules_enabled() {
+        0
+    } else {
+        game.reveal_priority.unwrap_or(0)
+    };
+    for seat in [first, 1 - first] {
         for _ in 0..count {
             if !game.add_created(id, lane, seat) {
                 break;
@@ -303,4 +310,28 @@ fn vault(game: &Game<'_>, _: usize, _: usize, _: usize, _: usize) -> bool {
 }
 fn big_house(game: &Game<'_>, _: usize, card: usize, _: usize, _: usize) -> bool {
     game.card_cost(card) < 4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::locations::test_support::rng_game;
+    use crate::random::PythonRandom;
+
+    #[test]
+    fn token_locations_create_for_initiative_player_first() {
+        for hook in [monster_island, shadowland, savage_land] {
+            let mut rng = PythonRandom::seed(7);
+            let mut game = rng_game(&mut rng);
+            game.reveal_priority = Some(1);
+            hook(&mut game, 0);
+            let owners: Vec<_> = game.lanes[0]
+                .cards
+                .iter()
+                .map(|&id| game.cards[id].owner)
+                .collect();
+            assert_eq!(owners.first(), Some(&1));
+            assert_eq!(owners.last(), Some(&0));
+        }
+    }
 }

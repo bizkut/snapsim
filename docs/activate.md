@@ -18,6 +18,35 @@ The following 39 definitions contain literal Activate text in the extracted card
 
 Verdicts compare the activation effect with static client evidence and simulator source, not runtime parity. For every entry below, the handler's instruction range (from the metadata RVA to the next dumped method) was checked with `llvm-objdump`: its direct calls agree with the cited effect, and none has an unconditional tail branch outside that range. This confirms entry control flow, not every indirect call or predicate. **Match** means entry control flow confirmed; **Fixed** means changed after comparison; **Unverified** means the client comparison could not be completed. The shared staging gates and undo limitation above apply independently.
 
+Follow-up instruction check: in `Card::Merge` 0x7cbbf50, the unresolved
+interface call at 0x7cbc388 returns an integer tested against 1 at
+0x7cbc38c–0x7cbc390; a positive result passes the same list to
+`AugmentSystem::ApplyAugments` 0x7c98eb4 at 0x7cbc3c0. This narrows the
+unknown to the interface binding and list contents, not a missing unconditional
+augment application. The other indirect dispatch sites below likewise remain
+unresolved; no full-equivalence verdict follows merely from this check.
+
+`AbilitySystem::ActivateTriggerAbility` 0x7c954f8 dispatches trinkets and
+faction abilities, then loads `Game._players` at 0x7c95614. Its interface
+calls at 0x7c956a8, 0x7c95714 and 0x7c95778 are the list enumerator,
+`MoveNext` and current-player retrieval respectively; the resulting player
+is passed to `Player::ActivateTriggerAbility` 0x7de7d94 at 0x7c95788.
+The latter tail-calls `ActivateTriggerAbilities` 0x7c8c62c, whose optional
+predicate uses `blr x8` at 0x7c8c714 before `TriggerAbility::Activate`
+0x7c93fd8. Locations and cards are then iterated separately at
+0x7c95820–0x7c958dc. The player-loop call is resolved; equivalence of all
+invoked interception handlers is a separate question.
+
+For modifier dispatch, IL2CPP metadata 31 method rows 54298/54300
+(`CardCostModifier`) and 54304/54307 (`CardPowerModifier`) identify `Run`
+and `AddChange` as virtual slots 6 and 8 respectively. `InsertModifier`
+loads slots 6 and 8 at class offsets 0x198 and 0x1b8 and calls them at
+0x7cb3f64 and 0x7cb3f80. Cost `Run` 0x7de29ac tail-calls `Card::AddCost`
+0x7cb6c34 for an Add; cost `AddChange` 0x7de2acc calls
+`CheckAndAddCardCostChange` 0x7cb4490. The power counterparts are 0x7de2bf0
+and 0x7de2e78. Metadata SHA-256:
+`c9a5cfa443e043db87caa0fcdddd1fa8b0a69b09721b72c38aec302adba3df41`.
+
 | Definition | Verdict | Evidence or remaining uncertainty |
 | --- | --- | --- |
 | Arana | Fixed | `CreateMoveCardTrigger` 0x7e68eb8 calls `NextCardPlayedAbilityDef::AddAbilityToPlayer` 0x7e0cfa4, which reuses the owner's matching trigger definition; it then overwrites source context. `BuffAndMoveCard` 0x7e68fa4 checks the player, adds +1 and attempts movement right. Client rules now reuse the pending trigger on repeated activation; reference rules retain separate effects. |
@@ -40,7 +69,7 @@ Verdicts compare the activation effect with static client evidence and simulator
 | Jocasta | Full-match | `ActivateActivateAbilities` 0x7ed5518 filters revealed local allies with delegates 0x7ed5c2c (not self) and 0x7ed5c10 → `Card::HasActivateAbility` 0x7cb36b8 (`includeHidden=false`). It snapshots the list and calls `Card::ActivateTriggerAbility` 0x7cb2784 with the original trigger, no specific ability and `isRepeat=false`; this dispatch does not consume the target's activation. The simulator uses the corresponding visible-target check and activation dispatch. |
 | KarimaShapandar | Full-match | `AfflictCard` 0x7edab44 gets revealed opponents, calls virtual `Game::GetHighestPowerCards` 0x7dae088 at 0x7edaca8, rolls the tied candidates and afflicts the selected card by 7. Its predicate 0x7dc6ecc checks `HasPowerAttribute`, which `Card::LoadCardDef` 0x7caf274–0x7caf288 derives from `CardDef::HasPowerAttribute` 0x7c1b9b0. `CardTypeRules` 0x6fc361c grants it only to Character, matching `is_character`. |
 | KidOmega | Fixed | `AddDestroyTrigger` 0x7ede1b4 calls `NextCardPlayedAbilityDef::AddAbilityToPlayer` 0x7e0cfa4 and updates source and activation-turn context. `DestroyCard` 0x7ede2f4 checks player and turn, snapshots target power and adds it to the source only after successful destruction. Client rules now reuse the pending trigger on repeated activation; reference rules retain separate effects. |
-| KingEitri | Unverified | `DrawCreatedCard` 0x7edf338 selects and rolls before `Player::DrawCard` 0x7de7abc constructs a pre-draw trigger; it then tail-calls `DrawCardInternal` 0x7de7bb4, which attempts `MoveCardToZone` before recording the draw. The pre-draw dispatch reaches `AbilitySystem::ActivateTriggerAbility` 0x7c954f8; the interface dispatch `blr x8` at 0x7c956a8 remains unresolved, so full interception equivalence is not established. Created-card provenance in restored positions is independently constrained. |
+| KingEitri | Unverified | `DrawCreatedCard` 0x7edf338 selects and rolls before `Player::DrawCard` 0x7de7abc constructs a pre-draw trigger; it then tail-calls `DrawCardInternal` 0x7de7bb4, which attempts `MoveCardToZone` before recording the draw. The pre-draw dispatch reaches `AbilitySystem::ActivateTriggerAbility` 0x7c954f8; its player enumeration at 0x7c956a8 is resolved above, but full equivalence of the invoked pre-draw interception handlers at 0x7c8c62c remains unverified. Created-card provenance in restored positions is independently constrained. |
 | Lasher | Full-match | `AfflictEnemy` 0x7ee61fc obtains the opponent via 0x7ddc438, enumerates that player's location slots via `GetAllCards` 0x7ddc2a4, filters by revealed predicate 0x7de263c, rolls even at nonpositive source power, then applies a permanent reduction only when power is positive. |
 | Lockjaw | Fixed | `SwapCard` 0x7ee9cfc consumes the trigger without swapping if `Card::IsInPlay` 0x7cbd704 fails because the resolved character is no longer revealed. The deck predicate 0x7eea478 accepts characters; selection precedes the two moves and shuffle. |
 | Magus | Full-match | `CopyForUnspentEnergy` 0x7eef1d4 chooses the first deck character whose definition cost equals nonnegative current energy (predicate 0x7eef634), reveals it to all and copies its text without activating it. Env does not expose opposing deck cards revealed this way. |
@@ -56,9 +85,9 @@ Verdicts compare the activation effect with static client evidence and simulator
 | SpiderHam | Fixed | `ReplaceText` 0x7f4af20 rolls an opposing hand character (predicate 0x7f4b538), reveals it, creates Pig in the set-aside zone, copies Pig's text and marks it removed. The simulator now retains Pig as the removed-text identity; Env does not expose the revealed opposing hand card. |
 | SymbioteSpiderMan | Unverified | `MergeLowestCostIntoSelf` 0x7cd1b78 rolls among lowest-current-cost revealed local allies, then calls `Merge` 0x7cbbf50, `CopyText` 0x7cbadb4, `CloneExternalAbilities` 0x7cb244c and `ActivateTextResolveAbility` 0x7cbb424. Merge adds modifier-only power and moves the absorbed card before its post-merge trigger; its interface call `blr x8` at 0x7cbc388, which gates augment propagation, remains unresolved. |
 | SymbioteSpiderManWebSlingers | Unverified | `MergeWebSlingerIntoSelf` 0x7cd23b0 rolls a revealed local ally, calls `Merge` 0x7cbbf50, then selects a Web Slingers deck card and calls `MoveCardToZone` 0x7dabdc4. Merge's augment-list interface call `blr x8` at 0x7cbc388 remains unresolved; the subsequent move's changed-zone and resolve triggers also depend on general dispatch. |
-| Warlock | Unverified | `ReduceCosts` 0x7cedb5c rebuilds positive-current-cost hand candidates once per unspent energy. `AddCostPermanently` 0x7cb7ce8 checks reduction/increase guards and constructs a cost modifier; `InsertModifier` 0x7cb3ee0 invokes its virtual methods at `blr x9` 0x7cb3f64 and 0x7cb3f80. `CardCostModifier::Run` 0x7de29ac applies the addition, but the exact slot bindings and all resulting modifier side effects remain unverified. |
-| ZombieCaptainMarvel | Unverified | `DestroyAndMove` 0x7cfa964 destroys other revealed local allies, buffs per successful destruction, then rolls a losing other location. `Game::DestroyCard` 0x7daba34 and `MoveCardLocationToLocation` 0x7db0234 lead to `MoveCardToZoneInternal` 0x7db02b8 and its changed-zone and resolution triggers; downstream `AbilitySystem::ActivateTriggerAbility` contains unresolved interface dispatch `blr x8` at 0x7c956a8. |
-| ZombieMisterFantastic | Unverified | `BuffCreated` 0x7cfcc38 filters revealed created allies, calls shuffle 0x4b12f30, takes the definition count and applies `AddPowerPermanently` 0x7cb7210. Its `Take` enumerator uses interface calls at 0x7cfcf54, 0x7cfcfd8, 0x7cfd03c and 0x7cfd0e8; the metadata identifies IEnumerable, IEnumerator and IDisposable interfaces, but their concrete slots remain unresolved. The power modifier subsequently dispatches through `InsertModifier` at 0x7cb3f64 and 0x7cb3f80. |
+| Warlock | Full-match | `ReduceCosts` 0x7cedb5c rebuilds positive-current-cost hand candidates once per unspent energy, rolls and calls `AddCostPermanently` 0x7cb7ce8. That checks the reduction/increase guards and constructs a cost modifier; `InsertModifier` dispatches its `Run` and `AddChange` slots as established above. The former applies the addition; the latter records the visual cost change. The simulator rebuilds, rolls, and applies its guarded permanent cost change in the same order. |
+| ZombieCaptainMarvel | Unverified | `DestroyAndMove` 0x7cfa964 destroys other revealed local allies, buffs per successful destruction, then rolls a losing other location. `Game::DestroyCard` 0x7daba34 and `MoveCardLocationToLocation` 0x7db0234 lead to `MoveCardToZoneInternal` 0x7db02b8 and its changed-zone and resolution triggers. The downstream player enumeration at 0x7c956a8 is resolved above; full equivalence of its dynamically invoked trigger handlers at 0x7c8c62c remains unverified. |
+| ZombieMisterFantastic | Unverified | `BuffCreated` 0x7cfcc38 filters revealed created allies, calls shuffle 0x4b12f30, takes the definition count and applies `AddPowerPermanently` 0x7cb7210. Its `Take` enumerator uses interface calls at 0x7cfcf54, 0x7cfcfd8, 0x7cfd03c and 0x7cfd0e8; the metadata identifies IEnumerable, IEnumerator and IDisposable interfaces, but their concrete bindings remain unresolved. The subsequent power modifier slots at 0x7cb3f64 and 0x7cb3f80 are resolved above. |
 
 ## Undo and return
 

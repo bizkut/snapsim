@@ -47,6 +47,17 @@ fn hidden_preplay_power(
     };
     let prior = |update: &Value| {
         let source = update["updater_card_id"].as_str();
+        // PyramidOfRamaTutBehavior::AddRock (0x7d75c10) creates this
+        // particular Rock in hand and sets its power before it can be staged.
+        // Its creation provenance, not merely the updater name, is required.
+        if play.id == "Rock"
+            && visible.created_by_location == "PyramidOfRamaTut"
+            && update["updater_location_id"] == "PyramidOfRamaTut"
+            && update["update"] == "Set"
+            && update["value"] == 3
+        {
+            return true;
+        }
         matches!(
             source,
             Some("Surge" | "AmericaChavez" | "MrFantasticFirstSteps")
@@ -191,6 +202,7 @@ fn ongoing_rows(game: &Game<'_>, source: usize) -> Vec<UpdateRow> {
 fn restore_copied_ongoing(
     game: &mut Game<'_>,
     start: &Frame,
+    target: &Frame,
     cards: &[(Value, usize)],
 ) -> Result<(), String> {
     let mut observed: Vec<UpdateRow> = Vec::new();
@@ -219,24 +231,158 @@ fn restore_copied_ongoing(
             observed.push((*index, stat, operation, value));
         }
     }
-    if observed.is_empty() {
-        return Ok(());
-    }
-    observed.sort_unstable();
     let mut holders = cards
         .iter()
-        .map(|&(_, index)| index)
-        .filter(|&index| game.cards[index].def.id == "Mystique");
-    let (Some(holder), None) = (holders.next(), holders.next()) else {
-        return Err("Mystique's recorded Ongoing updates cannot be attributed to one card".into());
+        .filter(|(_, index)| game.cards[*index].def.id == "Mystique");
+    let Some((holder_entity, holder)) = holders.next() else {
+        return if observed.is_empty() {
+            Ok(())
+        } else {
+            Err("Mystique's recorded Ongoing updates have no visible holder".into())
+        };
     };
+    if holders.next().is_some() {
+        return Err("Mystique's copied Ongoing text has multiple possible holders".into());
+    }
+    let holder = *holder;
+    let actions = start
+        .complete_past_actions(game.cards[holder].owner)
+        .ok_or("Mystique copied Ongoing text requires complete owner play history")?;
+    let holder_position = actions
+        .iter()
+        .position(|action| {
+            action.kind == "play" && Some(action.card_entity_id) == holder_entity.as_i64()
+        })
+        .ok_or("Mystique copied Ongoing text requires its recorded play")?;
+    let prior = actions[..holder_position]
+        .iter()
+        .rev()
+        .find(|action| action.kind == "play")
+        .ok_or("Mystique copied Ongoing text has no recorded previous play")?;
+    let source_from_history = cards
+        .iter()
+        .find(|(id, _)| id.as_i64() == Some(prior.card_entity_id))
+        .map(|(_, index)| *index)
+        .ok_or("Mystique copied Ongoing source is no longer identifiable on the board")?;
+    if observed.is_empty() {
+        if start.locations != target.locations {
+            return Err("Mystique copied Ongoing text is not identifiable at the target".into());
+        }
+        let mut rng = game.fork_rng();
+        let mut snapshot = game.fork(rng.as_mut());
+        for lane in &mut snapshot.lanes {
+            lane.cards.clear();
+        }
+        for &(_, index) in cards {
+            snapshot.cards[index].lane = None;
+            snapshot.cards[index].zone = None;
+        }
+        let mut target_cards = Vec::new();
+        for card in &target.board {
+            if !card.revealed {
+                return Err("Mystique target contains an unrevealed card".into());
+            }
+            let id = card
+                .id
+                .as_str()
+                .ok_or("Mystique target card identity is missing")?;
+            let index = if let Some((_, index)) = cards.iter().find(|(id, _)| *id == card.entity) {
+                if snapshot.cards[*index].def.id != id || snapshot.cards[*index].owner != card.owner
+                {
+                    return Err("Mystique target card changed identity or owner".into());
+                }
+                *index
+            } else {
+                push(&mut snapshot, id, card.owner, &card.cost, &Value::Null)?
+            };
+            snapshot.cards[index].lane = Some(card.lane);
+            snapshot.cards[index].zone = Some(CardZone::Location(card.lane));
+            snapshot.cards[index].revealed = true;
+            snapshot.push_location(card.lane, index);
+            target_cards.push((&card.entity, index));
+        }
+        let mut target_rows = Vec::new();
+        for (entity_id, index) in &target_cards {
+            let card = entity(target, entity_id).unwrap();
+            let updates = card
+                .stat_updates
+                .as_array()
+                .ok_or("Mystique target stat-update ledger is missing")?;
+            for entry in updates {
+                if entry["updater_card_id"] != "Mystique" {
+                    continue;
+                }
+                let stat = match entry["stat"].as_str() {
+                    Some("Power") => "Power",
+                    Some("Cost") => "Cost",
+                    _ => return Err("Mystique target stat update has an unknown stat".into()),
+                };
+                let operation = match entry["update"].as_str() {
+                    Some("Add") => "Add",
+                    Some("Multiply") => "Multiply",
+                    Some("Set") => "Set",
+                    _ => return Err("Mystique target stat update has an unknown operation".into()),
+                };
+                target_rows.push((
+                    *index,
+                    stat,
+                    operation,
+                    entry["value"]
+                        .as_i64()
+                        .ok_or("Mystique target stat update has no value")?,
+                ));
+            }
+        }
+        if target_rows.is_empty() {
+            return Err("Mystique copied Ongoing text is not identified by target updates".into());
+        }
+        target_rows.sort_unstable();
+        let mut tried = Vec::new();
+        let mut matched = Vec::new();
+        for &(_, source) in cards {
+            let card = &game.cards[source];
+            if source != source_from_history
+                || card.owner != game.cards[holder].owner
+                || !card.revealed
+                || !card.has_ongoing(false)
+                || (card.turn_played != 0
+                    && game.cards[holder].turn_played != 0
+                    && card.turn_played > game.cards[holder].turn_played)
+                || snapshot.cards[source].lane.is_none()
+            {
+                continue;
+            }
+            let def = card.default_ability().id;
+            if tried.contains(&def) {
+                continue;
+            }
+            tried.push(def);
+            let mut rng = snapshot.fork_rng();
+            let mut trial = snapshot.fork(rng.as_mut());
+            trial.is_wait_for_staging = false;
+            if trial.copy_text(holder, source, false) && ongoing_rows(&trial, holder) == target_rows
+            {
+                matched.push(source);
+            }
+        }
+        return match matched[..] {
+            [source] => {
+                game.copy_text(holder, source, false);
+                Ok(())
+            }
+            _ => Err(
+                "Mystique copied Ongoing text is not uniquely identified by target updates".into(),
+            ),
+        };
+    }
+    observed.sort_unstable();
     let owner = game.cards[holder].owner;
     let played = game.cards[holder].turn_played;
     let mut tried: Vec<&str> = Vec::new();
     let mut matched: Vec<usize> = Vec::new();
     for &(_, source) in cards {
         let card = &game.cards[source];
-        if source == holder
+        if source != source_from_history
             || card.owner != owner
             || !card.revealed
             || card.lane.is_none()
@@ -274,6 +420,33 @@ fn restore_copied_ongoing(
 }
 fn diff(item: String, cards: Vec<String>, lanes: Vec<usize>) -> Difference {
     Difference { item, cards, lanes }
+}
+
+type StagingOrderItem = (usize, usize, usize, usize, i64, usize);
+
+fn sort_staging_edges(
+    moves: usize,
+    count: usize,
+    edges: &[(usize, usize)],
+    order: &mut Vec<StagingOrderItem>,
+) -> Result<(), String> {
+    let mut emitted = vec![false; count];
+    order.clear();
+    for rank in 0..count {
+        let node = (0..count)
+            .find(|&node| {
+                !emitted[node] && edges.iter().all(|&(from, to)| to != node || emitted[from])
+            })
+            .ok_or("recorded staging order conflicts with this order variant")?;
+        emitted[node] = true;
+        let (kind, index) = if node < moves {
+            (0, node)
+        } else {
+            (1, node - moves)
+        };
+        order.push((rank, 0, kind, 0, 0, index));
+    }
+    Ok(())
 }
 
 pub(super) fn simulate(
@@ -592,7 +765,7 @@ pub(super) fn simulate(
         }
     }
     if !crate::cards::reference_rules_enabled() {
-        restore_copied_ongoing(&mut game, start, &cards)?;
+        restore_copied_ongoing(&mut game, start, target, &cards)?;
     }
     for &(_, index) in &cards {
         if matches!(game.cards[index].def.id, "Hawkeye" | "JessicaJones")
@@ -777,12 +950,18 @@ pub(super) fn simulate(
     // Staged cards can already be present when a later manual move fires.
     // Preserve the observed order rather than always applying moves first.
     let reference = crate::cards::reference_rules_enabled();
-    // One bit of `order_mask` per tied (move, play) pair, in move-major order;
-    // a set bit puts that play before the move. A move is placed after as many
-    // of the line's plays (sorted by lane and slot) as it has set bits.
+    // Complete local action history can constrain some same-snapshot pairs.
+    // Keep the frozen and legacy paths byte-for-byte equivalent in their order.
+    let has_recorded_order =
+        !reference
+            && staged.moves.iter().enumerate().any(|(m, (_, _, line))| {
+                staged.plays.iter().enumerate().any(|(p, play)| {
+                    play.stage_line == *line && staged.recorded_order(m, p).is_some()
+                })
+            });
     let mut next_bit = 0;
     let mut plays_before = vec![0usize; staged.moves.len()];
-    if !reference {
+    if !reference && !has_recorded_order {
         for (index, (_, _, line)) in staged.moves.iter().enumerate() {
             for _ in staged.plays.iter().filter(|play| play.stage_line == *line) {
                 plays_before[index] += order_mask >> next_bit & 1;
@@ -819,6 +998,64 @@ pub(super) fn simulate(
             play.card.slot.as_i64().unwrap_or(0),
             index,
         ));
+    }
+    if has_recorded_order {
+        // Model each independently observed pair as an edge. Counting how many
+        // plays precede a move is insufficient when an opponent play can be on
+        // either side of a locally ordered play.
+        let moves = staged.moves.len();
+        let count = moves + staged.plays.len();
+        let mut edges = Vec::new();
+        for a in 0..count {
+            for b in a + 1..count {
+                let line_a = if a < moves {
+                    staged.moves[a].2
+                } else {
+                    staged.plays[a - moves].stage_line
+                };
+                let line_b = if b < moves {
+                    staged.moves[b].2
+                } else {
+                    staged.plays[b - moves].stage_line
+                };
+                if line_a != line_b {
+                    edges.push(if line_a < line_b { (a, b) } else { (b, a) });
+                } else if b < moves {
+                    edges.push((a, b));
+                } else if a >= moves
+                    && let Some(cmp) = staged.recorded_play_order(a - moves, b - moves)
+                {
+                    match cmp {
+                        std::cmp::Ordering::Less => edges.push((a, b)),
+                        std::cmp::Ordering::Greater => edges.push((b, a)),
+                        std::cmp::Ordering::Equal => {}
+                    }
+                }
+            }
+        }
+        next_bit = 0;
+        for (m, (_, _, line)) in staged.moves.iter().enumerate() {
+            for (p, _) in staged
+                .plays
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.stage_line == *line)
+            {
+                let before = if let Some(before) = staged.recorded_order(m, p) {
+                    before
+                } else {
+                    let before = order_mask >> next_bit & 1 != 0;
+                    next_bit += 1;
+                    before
+                };
+                edges.push(if before {
+                    (moves + p, m)
+                } else {
+                    (m, moves + p)
+                });
+            }
+        }
+        sort_staging_edges(moves, count, &edges, &mut order)?;
     }
     order.sort_unstable();
     for (_, _, kind, _, _, index) in order {
@@ -1439,4 +1676,32 @@ fn compare(game: &Game<'_>, target: &Frame, cards: &[(Value, usize)]) -> Vec<Dif
 }
 fn label_value(value: &Value) -> String {
     label(value)
+}
+#[cfg(test)]
+mod staging_order_tests {
+    use super::sort_staging_edges;
+
+    #[test]
+    fn mixed_owner_constraints_are_applied_independently() {
+        // Node 0 is a move, 1 a local play, and 2 an opponent play.
+        // Local play is proven after the move, opponent play before it.
+        let mut order = Vec::new();
+        sort_staging_edges(1, 3, &[(0, 1), (2, 0)], &mut order).unwrap();
+        assert_eq!(
+            order
+                .iter()
+                .map(|item| (item.2, item.5))
+                .collect::<Vec<_>>(),
+            [(1, 1), (0, 0), (1, 0)]
+        );
+        // The other opponent ordering remains possible.
+        sort_staging_edges(1, 3, &[(0, 1), (0, 2)], &mut order).unwrap();
+        assert_eq!(order[0].2, 0);
+    }
+
+    #[test]
+    fn contradictory_staging_constraints_are_not_simulated() {
+        let mut order = Vec::new();
+        assert!(sort_staging_edges(1, 3, &[(0, 1), (1, 2), (2, 0)], &mut order).is_err());
+    }
 }

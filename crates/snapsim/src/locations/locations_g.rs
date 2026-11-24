@@ -299,10 +299,11 @@ fn essexs_lab(game: &mut Game<'_>, lane: usize) {
     }
 }
 
-// TriggerBuff 0x7d48b98 uses separate per-player given flags and buffs
-// revealed allies elsewhere once; location predicate 0x7d49ccc.
+// ClubhouseBehavior::TriggerBuff 0x7d48b98 calls ordered players at 0x7d48e00.
+// It uses separate per-player given flags; location predicate 0x7d49ccc.
 fn clubhouse(game: &mut Game<'_>, lane: usize) {
-    for seat in 0..2 {
+    let first = game.reveal_priority.unwrap_or(0);
+    for seat in [first, 1 - first] {
         let spent = game.lanes[lane]
             .state
             .as_deref()
@@ -669,6 +670,31 @@ mod tests {
         clubhouse(&mut game, 0);
         clubhouse(&mut game, 0);
         assert_eq!(game.cards[target].power(), original + 1);
+    }
+
+    #[test]
+    fn clubhouse_buffs_both_players_with_seat_one_initiative() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = crate::locations::test_support::rng_game(&mut rng);
+        game.lanes[0].def = crate::locations::get("Clubhouse").unwrap();
+        game.lanes[0].state = Some(Box::new([false; 2]));
+        game.reveal_priority = Some(1);
+        let mut targets = [0; 2];
+        for (seat, target) in targets.iter_mut().enumerate() {
+            *target = game.create_card("Wasp", seat);
+            game.add_card(*target, 1, seat, false);
+            for _ in 0..4 {
+                let card = game.create_card("Wasp", seat);
+                game.add_card(card, 0, seat, false);
+            }
+        }
+        game.lanes[0].state = Some(Box::new([false; 2]));
+        let before = targets.map(|id| game.cards[id].permanent);
+        clubhouse(&mut game, 0);
+        assert_eq!(
+            targets.map(|id| game.cards[id].permanent),
+            before.map(|power| power + 1)
+        );
     }
     #[test]
     fn essexs_lab_distributes_destroyed_power_to_surviving_allies() {

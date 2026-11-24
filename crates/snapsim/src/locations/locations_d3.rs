@@ -164,10 +164,12 @@ fn klyntar(game: &mut Game<'_>, lane: usize) {
     }
 }
 
-// TaLoBehavior::PlayCards 0x7d87688; predicate 0x7d87e7c selects
-// characters only and rolls once per nonempty eligible hand.
+// TaLoBehavior::PlayCards 0x7d87688 calls ordered players at 0x7d877b0;
+// GetOrderedPlayersForResolution 0x7daa454 uses the initiative player first.
+// Predicate 0x7d87e7c selects characters; each nonempty hand consumes a roll.
 fn ta_lo(game: &mut Game<'_>, _: usize) {
-    for seat in 0..2 {
+    let first = game.reveal_priority.unwrap_or(0);
+    for seat in [first, 1 - first] {
         let choices: Vec<_> = game.players[seat]
             .hand
             .iter()
@@ -330,6 +332,31 @@ mod tests {
         assert_eq!(
             [g.cards[ids[0]].permanent, g.cards[ids[1]].permanent],
             [before[0] + 1, before[1] + 1]
+        );
+    }
+
+    #[test]
+    fn ta_lo_rolls_in_initiative_order() {
+        let mut rng = PythonRandom::seed(29);
+        let mut g = game(&mut rng);
+        g.reveal_priority = Some(1);
+        for seat in 0..2 {
+            g.players[seat].hand.clear();
+            for _ in 0..3 {
+                let id = g.create_card("Hawkeye", seat);
+                g.players[seat].hand.push(id);
+            }
+        }
+        let mut expected = g.rng.borrow().clone_rng();
+        let picked = [
+            g.players[1].hand[expected.randbelow(3)],
+            g.players[0].hand[expected.randbelow(3)],
+        ];
+        let before = picked.map(|id| g.cards[id].permanent);
+        ta_lo(&mut g, 0);
+        assert_eq!(
+            picked.map(|id| g.cards[id].permanent),
+            before.map(|p| p + 1)
         );
     }
 

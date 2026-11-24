@@ -3676,9 +3676,11 @@ impl<'a> Game<'a> {
     // pool weighted by rarity (`LocationRarityDefList::.cctor` 0x7ac3c60 stores
     // weights 200/125/75/15 for rarity ids 1..4, read by `FindWeight` 0x7c67e94 and
     // `<.cctor>b__5_0` 0x7c68250), skipping the definition of `excluded`.
-    // [INFERENCE] ids 1..4 are common, uncommon, rare, ultra rare. Cumulative
-    // order follows `location_pool`; the client's own order (WeightedTable at
-    // 0x60708f0, generic code) is not decoded, so only the distribution is exact.
+    // [INFERENCE] ids 1..4 are common, uncommon, rare, ultra rare.
+    // WeightedTable::Pick 0x6071584 subtracts weights in entry order at
+    // 0x6071624–0x607162c; set_Entries 0x6070704 preserves its input order.
+    // Client GetLocationPool ordering and configuration are not established,
+    // so the simulator's location_pool is not an exact RNG-to-location mapping.
     fn location_def_drawable(&self, id: &str, excluded: Option<&str>) -> bool {
         Some(id) != excluded && !self.starting_location_ids.contains(&id)
     }

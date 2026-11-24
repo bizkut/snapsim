@@ -138,9 +138,9 @@ fn doctor_octopus_fractured(game: &mut Game<'_>, card: usize) {
     }
 }
 
-// TransformCard 0x7f37018 snapshots the other revealed allied characters,
-// then morphs each into a random character costing one more; the client
-// static exclusion list contains Sersi and Morph.
+// TransformCard 0x7f37018 snapshots other revealed allied characters.
+// Predicate 0x7f37b94 compares each candidate's printed cost to the target's
+// DefCost + 1 and requires a character; the static exclusions are Sersi and Morph.
 fn sersi(game: &mut Game<'_>, card: usize) {
     let Some(lane) = game.cards[card].lane else {
         return;
@@ -158,7 +158,7 @@ fn sersi(game: &mut Game<'_>, card: usize) {
         })
         .collect();
     for target in targets {
-        let cost = game.card_cost(target) + 1;
+        let cost = game.printed_cost(target) + 1;
         if let Some(id) = game.random_card(|row| {
             row.cost == cost
                 && row.card_type == "Character"
@@ -594,5 +594,34 @@ mod tests {
         assert_eq!(game.cards[source].def.id, "Sersi");
         assert_eq!(game.card_cost(target), 1);
         assert_ne!(game.cards[target].def.id, "Wasp");
+    }
+
+    #[test]
+    fn sersi_uses_target_definition_cost_not_modified_cost() {
+        let mut rng = PythonRandom::seed(9);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let source = game.create_card("Sersi", 0);
+        let target = game.create_card("Wasp", 0);
+        game.add_card(source, 0, 0, true);
+        game.add_card(target, 0, 0, true);
+        game.cards[target].cost = 4;
+        sersi(&mut game, source);
+        assert_eq!(game.printed_cost(target), 1);
     }
 }
