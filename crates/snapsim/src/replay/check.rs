@@ -263,11 +263,7 @@ fn check_file_impl(
         if row.get("heartbeat").is_some() {
             continue;
         }
-        let observation = if row.get("envelope").is_some() {
-            row["envelope"]["observation"].clone()
-        } else {
-            row
-        };
+        let observation = row.get("envelope").cloned().unwrap_or(row);
         observations.push((i + 1, observation));
     }
     check_observations_impl(observations, &deck, seeds, collect_hooks)
@@ -292,6 +288,22 @@ fn check_observations_impl(
         return Err("--seeds must be positive".into());
     }
     let mut output = Vec::new();
+    let mut sequences = Vec::new();
+    let observations = observations
+        .into_iter()
+        .map(|(line, value)| {
+            if let (Some(stream), Some(sequence)) =
+                (value["stream_id"].as_str(), value["sequence"].as_u64())
+            {
+                sequences.push((line, stream.to_owned(), sequence));
+            }
+            if value.get("schema_version").is_none() && value.get("observation").is_some() {
+                (line, value["observation"].clone())
+            } else {
+                (line, value)
+            }
+        })
+        .collect::<Vec<_>>();
     for (index, frames) in matches(observations)?.iter().enumerate() {
         let mut history = History::default();
         let groups = turns(frames);
@@ -337,6 +349,14 @@ fn check_observations_impl(
                         "no settled next-turn or completed final frame"
                     }
                 })?;
+                let first = sequences.partition_point(|entry| entry.0 < start.line);
+                let last = sequences.partition_point(|entry| entry.0 <= target.line);
+                if sequences[first..last]
+                    .windows(2)
+                    .any(|pair| pair[0].1 == pair[1].1 && pair[1].2 > pair[0].2.saturating_add(1))
+                {
+                    return Err("frames missing (sequence gap)".into());
+                }
                 if !crate::cards::reference_rules_enabled() && turn > 1 {
                     match &start.previous_turn_locations {
                         None => {

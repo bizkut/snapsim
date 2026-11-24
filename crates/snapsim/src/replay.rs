@@ -738,6 +738,40 @@ mod tests {
     }
 
     #[test]
+    fn sequence_gaps_only_taint_the_window_that_contains_them() {
+        let start = identified_observation(4);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        let mut next = identified_observation(5);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        let envelope = |sequence, observation| {
+            json!({
+                "stream_id": "reader", "sequence": sequence, "observation": observation
+            })
+        };
+        let run = |sequences: [u64; 4]| {
+            check_observations(
+                vec![
+                    (1, envelope(sequences[0], start.clone())),
+                    (2, envelope(sequences[1], submitted.clone())),
+                    (3, envelope(sequences[2], next.clone())),
+                    (4, envelope(sequences[3], next.clone())),
+                ],
+                &[],
+                1,
+            )
+            .unwrap()
+        };
+        let continuous = run([1, 2, 3, 4]);
+        let gap = run([1, 3, 4, 5]);
+        assert_eq!(gap[0].status, super::Status::Uncheckable);
+        assert!(gap[0].detail.ends_with("frames missing (sequence gap)"));
+        let after_window = run([1, 2, 3, 5]);
+        assert_eq!(continuous[0].status, after_window[0].status);
+        assert_eq!(continuous[0].detail, after_window[0].detail);
+    }
+
+    #[test]
     fn missing_location_preserves_physical_lane_and_survivor_card() {
         let start = identified_observation(3);
         let mut destroyed = identified_observation(4);
