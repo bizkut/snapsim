@@ -513,6 +513,18 @@ mod tests {
     }
 
     #[test]
+    fn best_reply_can_rank_plans_while_keeping_the_ordinary_estimate() {
+        let position = flip_position();
+        let ordinary = run(&position, &options(json!(false)));
+        let mut plans_only = options(json!(true));
+        plans_only["best_reply_estimate"] = json!(false);
+        let reply = run(&position, &plans_only);
+        // Plans are ranked against the best reply; the board estimate is the ordinary one.
+        assert!(win_of(&reply, &[("TheThing", 0)]) <= 0.1);
+        assert_eq!(reply["position"], ordinary["position"]);
+    }
+
+    #[test]
     fn best_reply_only_applies_inside_its_window() {
         let mut position = flip_position();
         position["turn"] = json!(5);

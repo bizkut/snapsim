@@ -77,7 +77,15 @@ pub struct AdviseOptions {
     /// `best_reply`. Off by default: the opponent plays the playout policy.
     #[serde(default, deserialize_with = "best_reply::deserialize_option")]
     pub best_reply: Option<BestReplyConfig>,
+    /// Also use `best_reply` for the policy-vs-policy position estimate. Set
+    /// false to rank plans with it while keeping the ordinary board estimate.
+    #[serde(default = "default_true")]
+    pub best_reply_estimate: bool,
     pub workers: usize,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_stake_policy_rollouts() -> usize {
@@ -733,7 +741,7 @@ pub(crate) fn advise_with_game(
                 Some("opponent") => Some(1),
                 _ => None,
             };
-            let reply = match options.best_reply {
+            let reply = match options.best_reply.filter(|_| options.best_reply_estimate) {
                 Some(config) => best_reply::resolve_position(
                     &mut game,
                     policy,

@@ -285,6 +285,7 @@ fn search_plan_with_stop(
             .and_then(Value::as_bool)
             .unwrap_or(false),
         best_reply,
+        best_reply_estimate: true,
     };
     // Release builds contain no probe. In debug builds the environment variable
     // is read once; only enabled runs allocate or start a watchdog.
@@ -767,6 +768,7 @@ fn stake_estimate(
         workers: 1,
         plays_only: false,
         best_reply: None,
+        best_reply_estimate: true,
     };
     let result = advise::advise_with_game(
         &position,

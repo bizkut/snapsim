@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers: 1,
         plays_only: true,
         best_reply: None,
+        best_reply_estimate: true,
     };
     for (index, line) in io::stdin().lock().lines().enumerate() {
         let line = line?;

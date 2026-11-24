@@ -304,6 +304,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 workers: 1,
                 plays_only: a.plays_only,
                 best_reply,
+                best_reply_estimate: true,
             };
             snapsim::advise::advise(&p, &options, &|| false)?
         }
