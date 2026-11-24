@@ -34,8 +34,6 @@ fn spider_man(game: &mut Game<'_>, card: usize) {
     let Some(origin) = game.cards[card].lane else {
         return;
     };
-    // Card::ResolveForPlay (0x7cb9d90) sets revealed before its trigger.
-    game.cards[card].revealed = true;
     let owner = game.cards[card].owner;
     let enemies: Vec<_> = game.lanes[origin]
         .cards

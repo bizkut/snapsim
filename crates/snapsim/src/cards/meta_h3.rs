@@ -134,7 +134,7 @@ fn vampire_enchantress(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let mut costs = Vec::new();
     for id in game.lanes.iter().flat_map(|l| l.cards.iter().copied()) {
-        if game.cards[id].owner == owner && (game.cards[id].revealed || id == card) {
+        if game.cards[id].owner == owner && game.cards[id].revealed {
             let cost = game.printed_cost(id);
             if !costs.contains(&cost) {
                 costs.push(cost);
@@ -281,8 +281,7 @@ mod tests {
         let mut rng = PythonRandom::seed(1);
         let mut game = game(&mut rng);
         let vampire = place(&mut game, "VampireEnchantress", 0, 0);
-        // A created card's reveal hook runs before the engine flips its flag.
-        game.cards[vampire].revealed = false;
+        // ResolveForPlay (0x7cb9d90) reveals the source before this hook.
         let ally = place(&mut game, "Wasp", 0, 1);
         place(&mut game, "Wasp", 0, 2);
         game.cards[ally].cost = 5;

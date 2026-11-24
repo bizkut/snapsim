@@ -77,6 +77,39 @@ fn move_watch_and_destroy_hooks() {
 }
 
 #[test]
+fn carnage_is_revealed_when_destroyed_nova_buffs_allies() {
+    for spawned in [false, true] {
+        let mut rng = PythonRandom::seed(1);
+        let mut g = game(&mut rng);
+        let nova = play(&mut g, "Nova", 1, 0);
+        let hidden = g.create_card("Wasp", 1);
+        g.cards[hidden].lane = Some(1);
+        g.lanes[1].cards.push(hidden);
+        let carnage = if spawned {
+            let card = g.create_card("Carnage", 1);
+            assert!(g.add_card(card, 0, 1, true));
+            card
+        } else {
+            play(&mut g, "Carnage", 1, 0)
+        };
+        assert_eq!(g.cards[nova].lane, None);
+        assert_eq!(g.cards[carnage].power(), 5);
+        assert_eq!(g.cards[hidden].power(), 1);
+        assert!(!g.cards[hidden].revealed);
+    }
+}
+
+#[test]
+fn deathlok_is_visible_to_novas_destroy_trigger_during_its_reveal() {
+    let mut rng = PythonRandom::seed(2);
+    let mut g = game(&mut rng);
+    let nova = play(&mut g, "Nova", 0, 0);
+    let deathlok = play(&mut g, "Deathlok", 0, 0);
+    assert_eq!(g.cards[nova].lane, None);
+    assert_eq!(g.cards[deathlok].power(), 7);
+}
+
+#[test]
 fn stat_updates_and_reset() {
     let mut rng = PythonRandom::seed(3);
     let mut g = game(&mut rng);

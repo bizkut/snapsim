@@ -6156,6 +6156,14 @@ impl<'a> Game<'a> {
         let post_resolve_start = self.post_resolve_plays.len();
         self.cards[id].latest_resolution_order = self.next_resolution_order;
         self.next_resolution_order += 1;
+        // Card::ResolveForPlay (0x7cb9d90) calls SetRevealed at 0x7cba010
+        // and refreshes ongoing before activating its resolve triggers. Spawn
+        // at a location also enters ResolveForPlay (ResolveForSpawn 0x7cbaae8).
+        if !cards::reference_rules_enabled() {
+            self.cards[id].revealed = true;
+            self.cards[id].turn_revealed = Some(self.turn);
+            self.ongoing();
+        }
         self.trigger_reveal_abilities(id, true);
         // Card::ResolveForPlay 0x7cb9d90 calls TrackCardsPlayedStats
         // 0x7cba364 after the reveal, even when the card left its location.

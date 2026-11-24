@@ -59,7 +59,7 @@ fn space(game: &mut Game<'_>, card: usize) {
         .flat_map(|lane| lane.cards.iter().copied())
         .filter(|&id| {
             game.cards[id].owner == owner
-                && (game.cards[id].revealed || id == card)
+                && game.cards[id].revealed
                 && game.cards[id].def.id == "ThanosFracturedFrontier"
         })
         .collect();

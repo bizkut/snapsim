@@ -103,7 +103,7 @@ fn kluh(game: &mut Game<'_>, card: usize) {
         let mut costs = Vec::new();
         for lane in &game.lanes {
             for &id in &lane.cards {
-                if game.cards[id].owner == seat && (game.cards[id].revealed || id == card) {
+                if game.cards[id].owner == seat && game.cards[id].revealed {
                     let cost = game.printed_cost(id);
                     if !costs.contains(&cost) {
                         costs.push(cost);

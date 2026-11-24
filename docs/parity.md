@@ -93,7 +93,7 @@ Two kinds of record are reported rather than compared:
   * A card whose text was removed no longer reacts to events.
   * Start-of-turn, game-start, draw and Empower events also reach on-event hooks of cards in hand and deck.
   * `Game::top_card` is the literal top card (`Deck::GetTopCard`), not the next card `draw` would take.
-  * A resolving card is marked revealed and Ongoing effects are refreshed before its On Reveal and the play observers run (`Card::ResolveForPlay`).
+  * A resolving card is marked revealed and Ongoing effects are refreshed before its On Reveal and the play observers run (`Card::ResolveForPlay`, `0x7cb9d90`, calls `SetRevealed` at `0x7cba010`). This includes location spawns via `ResolveForSpawn` (`0x7cbaae8`): e.g. a resolving Carnage receives its destroyed Nova's buff. Reference rules retain the earlier post-On-Reveal flip.
   * Plans may move and activate cards; the parity gates plan with plays only.
 
 `parity/gates.sh` runs every gate in order and stops at the first failure (inputs: the recorder outputs listed in its header).
