@@ -5,8 +5,8 @@ and replay checker. Its Rust library, CLI and Python binding implement behavior
 from the Android 59.15.1 client, supported by cited client methods and recorded
 matches. The original Python simulator is frozen and retained as a parity oracle.
 
-The registry contains 698 card IDs and 187 location IDs, including every released
-character and location with an ID in the November 23, 2026 catalog. Registration
+The registry contains 696 card IDs and 187 location IDs (`snapsim coverage`, November 24, 2026),
+including every released card and location with an ID in the November 23, 2026 catalog. Registration
 is not a guarantee that every restored position is exact: strict advice declines
 when required state is unavailable. See the [coverage audit](docs/coverage-audit.md)
 and [parity notes](docs/parity.md) for evidence, limitations and divergences.
