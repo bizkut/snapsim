@@ -475,6 +475,7 @@ Two kinds of record are reported rather than compared:
   * Yondu banishes a randomly chosen lowest-current-cost card from the opponent's deck (`YonduBehavior::BanishLowestCostInDeck`, `0x7cf8068`); the reference drops it without recording a zone transition. Reference rules: `cards/reference_rules.rs`.
   * Zenn-La recruits the first card in deck order with printed cost 3 and reveals it (`ZennLaBehavior::RecruitThreeCostCard`, predicate `0x7d9c414`); the reference checks effective cost and skips On Reveal. Reference rules: `cards/reference_rules.rs`.
   * Shuri's Lab doubles a card played there at PostCardResolved, even if it moved away; cards played elsewhere and moved into the Lab are not doubled (`ShurisLabBehavior::DoublePower`). Reference rules retain the original current-location behavior.
+  * Stark Industries makes eight independent picks with replacement over its revealed cards and gives each picked card +1 Power per pick, in card order (`StarkIndustriesBehavior::BuffCards`, `0x7d82ee8`, `Game::Roll` `0x7dab62c`); the reference gives every card `8 / n` and draws the remainder without replacement. Reference rules retain that split.
   * A card whose text was removed no longer reacts to events.
   * Start-of-turn, game-start, draw and Empower events also reach on-event hooks of cards in hand and deck.
   * `Game::top_card` is the literal top card (`Deck::GetTopCard`), not the next card `draw` would take.

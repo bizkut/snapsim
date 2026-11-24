@@ -204,9 +204,43 @@ fn rocket_pad(game: &mut Game<'_>, lane: usize) {
         }
     }
 }
+// StarkIndustriesBehavior::BuffCards @ 0x7d82ee8: on the trigger turn it takes
+// Location::GetAllRevealedCards (0x7ddea48), makes eight independent
+// Game::Roll(0, n) picks (0x7dab62c) with replacement, counting them per card,
+// then calls Card::AddPowerPermanently(count) in list order for each card that
+// was picked. Face-down cards are excluded. The frozen reference gives every
+// card 8 / n and draws the remainder without replacement.
 fn stark_industries(game: &mut Game<'_>, lane: usize) {
+    if game.turn != 4 {
+        return;
+    }
+    if crate::cards::reference_rules_enabled() {
+        stark_industries_reference(game, lane);
+        return;
+    }
+    let revealed: Vec<usize> = game.lanes[lane]
+        .cards
+        .iter()
+        .copied()
+        .filter(|&id| game.cards[id].revealed)
+        .collect();
+    if revealed.is_empty() {
+        return;
+    }
+    let mut picks = vec![0i32; revealed.len()];
+    for _ in 0..8 {
+        let index = game.rng.borrow_mut().randbelow(revealed.len());
+        picks[index] += 1;
+    }
+    for (&id, &amount) in revealed.iter().zip(&picks) {
+        if amount > 0 {
+            game.add_power(id, amount, game.cards[id].owner);
+        }
+    }
+}
+fn stark_industries_reference(game: &mut Game<'_>, lane: usize) {
     let n = game.lanes[lane].cards.len();
-    if game.turn != 4 || n == 0 {
+    if n == 0 {
         return;
     }
     for index in 0..game.lanes[lane].cards.len() {

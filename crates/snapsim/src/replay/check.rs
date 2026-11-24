@@ -11,16 +11,28 @@ fn quantum_unknown(reveal: Option<i64>, played: Option<i64>, turn: i64) -> bool 
     played.is_none_or(|played| played < turn && reveal.is_none_or(|r| played >= r))
 }
 
-fn order_variants(moves: &[usize], plays: &[usize]) -> Result<usize, String> {
-    let ties = moves
+/// Largest number of tied move/play pairs whose relative order is enumerated
+/// (2^3 = 8 orders).
+const MAX_ORDER_TIES: usize = 3;
+
+/// Count move/play pairs recorded on the same history line, so their relative
+/// order is unknown.
+pub(super) fn order_ties(moves: &[usize], plays: &[usize]) -> usize {
+    moves
         .iter()
         .map(|line| plays.iter().filter(|play| *play == line).count())
-        .sum::<usize>();
-    match ties {
-        0 => Ok(1),
-        1 => Ok(2),
-        _ => Err("multiple simultaneous play/move order ambiguities cannot be enumerated".into()),
+        .sum()
+}
+
+/// Number of orders to try: 2^ties, one bit per tied pair (see `simulate`).
+fn order_variants(moves: &[usize], plays: &[usize]) -> Result<usize, String> {
+    let ties = order_ties(moves, plays);
+    if ties > MAX_ORDER_TIES {
+        return Err(format!(
+            "{ties} simultaneous play/move order ties exceed the enumeration limit of {MAX_ORDER_TIES}"
+        ));
     }
+    Ok(1 << ties)
 }
 
 fn io_error(path: &Path, error: std::io::Error) -> String {
@@ -585,7 +597,7 @@ fn check_observations_impl(
                             frames,
                             &history,
                             deck,
-                            (seed, order == 1, collect_hooks),
+                            (seed, order, collect_hooks),
                         ) {
                             Ok(result) => result,
                             Err(error) => {
@@ -605,13 +617,8 @@ fn check_observations_impl(
                             row.hooks = hooks;
                             if variants > 1 {
                                 row.order_enumerated = true;
-                                let selected = if order == 0 {
-                                    "move first"
-                                } else {
-                                    "play first"
-                                };
                                 row.detail.push_str(&format!(
-                                    "; play/move order unknown, matched with {selected}"
+                                    "; play/move order unknown, matched 1 of {variants} orders (mask {order:#b})"
                                 ));
                             }
                             return Ok(row);
@@ -825,8 +832,17 @@ mod location_state_tests {
         assert_eq!(order_variants(&[89], &[85]), Ok(1));
         assert_eq!(order_variants(&[89], &[89]), Ok(2));
         assert_eq!(order_variants(&[89, 92], &[89]), Ok(2));
-        assert!(order_variants(&[89, 89], &[89]).is_err());
-        assert!(order_variants(&[89], &[89, 89]).is_err());
+        assert_eq!(order_variants(&[89, 89], &[89]), Ok(4));
+        assert_eq!(order_variants(&[89], &[89, 89]), Ok(4));
+        assert_eq!(order_variants(&[89, 92], &[89, 92]), Ok(4));
+        assert_eq!(order_variants(&[1, 2, 3], &[3, 2, 1]), Ok(8));
+        let error = order_variants(&[1, 2, 3, 4], &[1, 2, 3, 4]).unwrap_err();
+        assert!(error.contains("4 simultaneous"), "{error}");
+        let error = order_variants(&[7, 7], &[7, 7]).unwrap_err();
+        assert!(
+            error.contains("4 simultaneous") && error.contains("limit of 3"),
+            "{error}"
+        );
     }
 
     #[test]

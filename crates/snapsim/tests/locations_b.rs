@@ -152,3 +152,30 @@ fn washington_dc_only_buffs_cards_without_text() {
     assert_eq!(g.cards[vanilla].power(), 6);
     assert_eq!(g.cards[ability].power(), 1);
 }
+// StarkIndustriesBehavior::BuffCards (0x7d82ee8): eight independent picks with
+// replacement over revealed cards only; the reference splits 8 / n evenly.
+#[test]
+fn stark_industries_makes_eight_independent_picks_over_revealed_cards() {
+    let (mut saw_none, mut saw_many) = (false, false);
+    for seed in 0..60 {
+        let mut rng = PythonRandom::seed(seed);
+        let mut g = game(&mut rng, "StarkIndustries");
+        g.turn = 4;
+        let cards: Vec<_> = (0..3).map(|_| play(&mut g, "MistyKnight", 0)).collect();
+        let hidden = play(&mut g, "MistyKnight", 1);
+        g.cards[hidden].revealed = false;
+        let before: Vec<_> = cards.iter().map(|&id| g.cards[id].permanent).collect();
+        let hidden_before = g.cards[hidden].permanent;
+        (g.lanes[0].def.on_turn_end.unwrap())(&mut g, 0);
+        let gains: Vec<_> = cards
+            .iter()
+            .zip(&before)
+            .map(|(&id, &b)| g.cards[id].permanent - b)
+            .collect();
+        assert_eq!(gains.iter().sum::<i32>(), 8);
+        assert_eq!(g.cards[hidden].permanent, hidden_before);
+        saw_none |= gains.contains(&0);
+        saw_many |= gains.iter().any(|&x| x >= 4);
+    }
+    assert!(saw_none && saw_many);
+}

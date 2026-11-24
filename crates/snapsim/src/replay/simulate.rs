@@ -157,9 +157,9 @@ pub(super) fn simulate(
     frames: &[Frame],
     history: &History,
     local_deck: &[String],
-    trial: (usize, bool, bool),
+    trial: (usize, usize, bool),
 ) -> Result<(Vec<Difference>, Option<crate::game::ReplayHooks>), String> {
-    let (seed, plays_before_tied_move, collect_hooks) = trial;
+    let (seed, order_mask, collect_hooks) = trial;
     let mut hidden_rng = PythonRandom::seed(seed as i128);
     let mut game_rng = PythonRandom::seed(seed as i128);
     let mut known = history.seen.clone();
@@ -646,32 +646,51 @@ pub(super) fn simulate(
     // Staged cards can already be present when a later manual move fires.
     // Preserve the observed order rather than always applying moves first.
     let reference = crate::cards::reference_rules_enabled();
+    // One bit of `order_mask` per tied (move, play) pair, in move-major order;
+    // a set bit puts that play before the move. A move is placed after as many
+    // of the line's plays (sorted by lane and slot) as it has set bits.
+    let mut next_bit = 0;
+    let mut plays_before = vec![0usize; staged.moves.len()];
+    if !reference {
+        for (index, (_, _, line)) in staged.moves.iter().enumerate() {
+            for _ in staged.plays.iter().filter(|play| play.stage_line == *line) {
+                plays_before[index] += order_mask >> next_bit & 1;
+                next_bit += 1;
+            }
+        }
+    }
     let mut order = Vec::with_capacity(staged.moves.len() + staged.plays.len());
     for (index, (_, _, line)) in staged.moves.iter().enumerate() {
         order.push((
             if reference { 0 } else { *line },
-            usize::from(plays_before_tied_move && !reference),
+            2 * plays_before[index],
+            0,
             0,
             0,
             index,
         ));
     }
     for (index, play) in staged.plays.iter().enumerate() {
+        let rank = staged
+            .plays
+            .iter()
+            .filter(|other| {
+                other.stage_line == play.stage_line
+                    && (other.card.lane, other.card.slot.as_i64().unwrap_or(0))
+                        < (play.card.lane, play.card.slot.as_i64().unwrap_or(0))
+            })
+            .count();
         order.push((
             if reference { 1 } else { play.stage_line },
-            usize::from(!plays_before_tied_move || reference),
+            if reference { 1 } else { 2 * rank + 1 },
+            1,
             play.card.lane,
             play.card.slot.as_i64().unwrap_or(0),
             index,
         ));
     }
     order.sort_unstable();
-    for (_, sort_kind, _, _, index) in order {
-        let kind = if plays_before_tied_move && !reference {
-            1 - sort_kind
-        } else {
-            sort_kind
-        };
+    for (_, _, kind, _, _, index) in order {
         if kind == 0 {
             let (entity_id, lane, _) = &staged.moves[index];
             let card = cards.iter().find(|(id, _)| id == entity_id).unwrap().1;
