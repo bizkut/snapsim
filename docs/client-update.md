@@ -33,7 +33,16 @@ Order matters: derived files (step 3) and the catalog (step 4) change which card
 
 ## Step 1: capture the client
 
-The tooling that produced the 59.15.1 corpus lives outside this repository: an IL2CPP metadata inspector, a read-only runtime capture of the client's definition lists, and a headless decompiler session. This repository's scripts only consume its outputs. Use whatever equivalent tooling you have, but produce the same files.
+The tooling that produced the 59.15.1 corpus lives outside this repository; this repository's scripts only consume its outputs. For 59.15.1 it was:
+
+| Output | Tool (59.15.1) |
+|---|---|
+| `rules/metadata.json` (method names, signatures, RVAs) | Il2CppInspectorRedux 2026.2, run statically over `libil2cpp.so` + `global-metadata.dat` |
+| `rules/defs.json`, `carddefs.json`, `pools.json` (runtime definitions) | a read-only Frida script built on [frida-il2cpp-bridge](https://github.com/vfsfitvnm/frida-il2cpp-bridge) 0.14.0 with Frida 17.26.4, attached to the running client on a menu screen; it uses static definition getters and reflection only |
+| C#-style class dump (`dump/<package>/<version>/…`) | captured from the running client on the same day; **[INFERENCE]** produced through frida-il2cpp-bridge, whose dump layout (`<package>/<version>`) it matches, but the exact command was not recorded |
+| pseudocode | Ghidra 12.1.4 headless, used as navigation only |
+
+frida-il2cpp-bridge reads the runtime's own type and definition tables; it does not decompile native code. Behaviour evidence comes from `objdump` of `libil2cpp.so` (see the evidence rules). After a game update, check that the pinned frida-il2cpp-bridge supports the new client's Unity/IL2CPP version before capturing: an unsupported version fails at attach or returns wrong offsets. Use whatever equivalent tooling you have, but produce the same files.
 
 1. Obtain the base APK and the `arm64-v8a` split from the owned device. The two artifacts are `lib/arm64-v8a/libil2cpp.so` and `assets/bin/Data/Managed/Metadata/global-metadata.dat`. Record the SHA-256 of both, the ELF GNU build ID, the IL2CPP metadata version, and the application version.
 2. Generate `rules/metadata.json` with an IL2CPP metadata inspector run over both files. The scripts and this guide rely on the `addressMap.methodDefinitions[]` records, each with `virtualAddress`, `name`, `signature`, `dotNetSignature` and `group` (assembly, namespace and class). For 59.15.1 the `virtualAddress` of a method equals the RVA used in `objdump` addresses throughout this repository (for example `Card::IsMovableByPlayer` is `0x7cb0cac` in both). Confirm that equality again on the new build before trusting any lookup (**[INFERENCE]** that it holds across builds).
