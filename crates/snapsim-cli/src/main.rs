@@ -88,6 +88,13 @@ struct Position {
     approximate: bool,
     #[arg(long)]
     plays_only: bool,
+    /// The opponent plays its best reply to each plan on the final turn(s).
+    #[arg(long)]
+    best_reply: bool,
+    #[arg(long, default_value_t = snapsim::best_reply::DEFAULT_PLANS)]
+    best_reply_plans: usize,
+    #[arg(long, default_value_t = 1)]
+    best_reply_turns: u8,
 }
 #[derive(Args)]
 struct Compare {
@@ -121,6 +128,17 @@ struct Compare {
     b_playout: String,
     #[arg(long, default_value = "default")]
     b_prior: String,
+    /// Side A (B) searches assuming its opponent plays its best reply to each plan on the final turn(s).
+    #[arg(long)]
+    a_best_reply: bool,
+    #[arg(long)]
+    b_best_reply: bool,
+    /// Opponent plans evaluated per sampled state, policy plan included.
+    #[arg(long, default_value_t = snapsim::best_reply::DEFAULT_PLANS)]
+    best_reply_plans: usize,
+    /// Final turns covered by best reply: 1 or 2.
+    #[arg(long, default_value_t = 1)]
+    best_reply_turns: u8,
     #[arg(long)]
     stakes: bool,
     #[arg(long)]
@@ -267,6 +285,12 @@ fn run(cli: Cli) -> Result<(), String> {
                 data["mode"] = json!(mode);
             }
             let p = snapsim::position::Position::from_json(&data.to_string())?;
+            let best_reply = snapsim::best_reply::deserialize_option(if a.best_reply {
+                json!({"plans": a.best_reply_plans, "turns": a.best_reply_turns})
+            } else {
+                Value::Null
+            })
+            .map_err(|error| error.to_string())?;
             let options = snapsim::advise::AdviseOptions {
                 rollouts: a.rollouts,
                 seed: a.seed as i128,
@@ -279,11 +303,12 @@ fn run(cli: Cli) -> Result<(), String> {
                 playout: "spread".into(),
                 workers: 1,
                 plays_only: a.plays_only,
+                best_reply,
             };
             snapsim::advise::advise(&p, &options, &|| false)?
         }
         Command::Compare(a) => snapsim::compare::compare(
-            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"plays_only":a.plays_only,"stakes":a.stakes,"a_snap_threshold":a.a_snap_threshold,"b_snap_threshold":a.b_snap_threshold,"a_retreat_threshold":a.a_retreat_threshold,"b_retreat_threshold":a.b_retreat_threshold,"a_snap_probability":a.a_snap_probability,"b_snap_probability":a.b_snap_probability,"a_retreat_probability":a.a_retreat_probability,"b_retreat_probability":a.b_retreat_probability,"stake_initial":a.stake_initial,"stake_initial_next":a.stake_initial_next,"stake_prevent_raise":a.stake_prevent_raise,"stake_maximum":a.stake_maximum,"stake_final_multiplier":a.stake_final_multiplier}),
+            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"a_best_reply":a.a_best_reply,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"b_best_reply":a.b_best_reply,"best_reply_plans":a.best_reply_plans,"best_reply_turns":a.best_reply_turns,"plays_only":a.plays_only,"stakes":a.stakes,"a_snap_threshold":a.a_snap_threshold,"b_snap_threshold":a.b_snap_threshold,"a_retreat_threshold":a.a_retreat_threshold,"b_retreat_threshold":a.b_retreat_threshold,"a_snap_probability":a.a_snap_probability,"b_snap_probability":a.b_snap_probability,"a_retreat_probability":a.a_retreat_probability,"b_retreat_probability":a.b_retreat_probability,"stake_initial":a.stake_initial,"stake_initial_next":a.stake_initial_next,"stake_prevent_raise":a.stake_prevent_raise,"stake_maximum":a.stake_maximum,"stake_final_multiplier":a.stake_final_multiplier}),
         )?,
         Command::Benchmark(a) => snapsim::compare::benchmark(
             &json!({"deck_file":a.deck_file,"mode":a.mode,"games":a.games,"seed":a.seed,"rollouts":a.rollouts,"opponent":a.opponent,"plays_only":a.plays_only}),

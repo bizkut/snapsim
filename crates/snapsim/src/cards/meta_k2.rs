@@ -311,14 +311,12 @@ fn destroyer(game: &mut Game<'_>, card: usize) {
 
 // ModokBehavior::DiscardHand 0x7efd284 delegates to Player::DiscardHand
 // 0x7de78cc, which snapshots the hand before discarding. Game::DiscardCard
-// 0x7dabe68 skips targets no longer in hand after an earlier discard trigger.
+// 0x7dabe68 fails for targets no longer in hand after an earlier discard trigger.
 fn modok(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let targets = game.players[owner].hand.clone();
     for target in targets {
-        if game.players[owner].hand.contains(&target) {
-            game.discard_card(owner, target);
-        }
+        game.discard_card(owner, target);
     }
 }
 

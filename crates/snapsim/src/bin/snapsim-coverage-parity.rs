@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         playout: "spread".into(),
         workers: 1,
         plays_only: true,
+        best_reply: None,
     };
     for (index, line) in io::stdin().lock().lines().enumerate() {
         let line = line?;

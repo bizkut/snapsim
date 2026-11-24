@@ -150,7 +150,7 @@ fn red_hulk_fractured_frontier(game: &mut Game<'_>, card: usize) {
 
 // DiscardHand 0x7e78874 snapshots current-cost <=1 cards, discards each,
 // shuffles all revealed enemies and afflicts one per successful discard.
-// Game::DiscardCard 0x7dabe68 skips targets no longer in hand.
+// Game::DiscardCard 0x7dabe68 fails for targets no longer in hand.
 fn bullseye(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let hand: Vec<_> = game.players[owner]
@@ -164,7 +164,7 @@ fn bullseye(game: &mut Game<'_>, card: usize) {
     }
     let discarded = hand
         .into_iter()
-        .filter(|&id| game.players[owner].hand.contains(&id) && game.discard_card(owner, id))
+        .filter(|&id| game.discard_card(owner, id))
         .count();
     let mut targets = game.revealed_cards_in_resolution_order();
     targets.retain(|&id| game.cards[id].owner != owner);

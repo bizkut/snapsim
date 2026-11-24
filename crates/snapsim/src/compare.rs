@@ -258,6 +258,10 @@ fn search_plan_with_stop(
         .and_then(Value::as_str)
         .filter(|s| *s != "default");
     let position = search_position(game, seat, priority, mode, prior);
+    let best_reply = crate::best_reply::deserialize_option(
+        options.get("best_reply").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(|error| error.to_string())?;
     let options = AdviseOptions {
         rollouts: options
             .get("rollouts")
@@ -280,6 +284,7 @@ fn search_plan_with_stop(
             .get("plays_only")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        best_reply,
     };
     // Release builds contain no probe. In debug builds the environment variable
     // is read once; only enabled runs allocate or start a watchdog.
@@ -600,8 +605,21 @@ fn side(args: &Value, name: &str) -> Value {
         .and_then(Value::as_u64)
         .or_else(|| args.get("rollouts").and_then(Value::as_u64))
         .unwrap_or(32);
-    json!({"rollouts": rollouts, "playout": args.get(format!("{name}_playout")).and_then(Value::as_str).unwrap_or("spread"),
-        "prior": args.get(format!("{name}_prior")).and_then(Value::as_str).unwrap_or("default"), "engine": "rust"})
+    let mut side = json!({"rollouts": rollouts, "playout": args.get(format!("{name}_playout")).and_then(Value::as_str).unwrap_or("spread"),
+        "prior": args.get(format!("{name}_prior")).and_then(Value::as_str).unwrap_or("default"), "engine": "rust"});
+    // Absent unless enabled, so existing configs and their parity oracle are unchanged.
+    if args
+        .get(format!("{name}_best_reply"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        side["best_reply"] = json!({
+            "plans": args.get("best_reply_plans").and_then(Value::as_u64)
+                .unwrap_or(crate::best_reply::DEFAULT_PLANS as u64),
+            "turns": args.get("best_reply_turns").and_then(Value::as_u64).unwrap_or(1),
+        });
+    }
+    side
 }
 
 fn counts(outcomes: [usize; 3]) -> Value {
@@ -748,6 +766,7 @@ fn stake_estimate(
         playout: "spread".into(),
         workers: 1,
         plays_only: false,
+        best_reply: None,
     };
     let result = advise::advise_with_game(
         &position,

@@ -204,8 +204,10 @@ fn skaar(game: &mut Game<'_>, card: usize) -> bool {
     true
 }
 
-// DiscardCardsToGainEnergy (0x7e83c18) shuffles a hand snapshot, attempts
-// up to two discards, and grants energy only when two cards were selected.
+// DiscardCardsToGainEnergy (0x7e83c18) shuffles a hand snapshot and calls
+// Game::DiscardCard (0x7dabe68) on up to two entries, counting each attempt
+// whatever it returns, and grants energy only when two were attempted. A target
+// an earlier discard trigger already moved (Zombie Black Cat) just fails.
 fn corvus_glaive(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     let mut targets = game.players[owner].hand.clone();
@@ -1113,6 +1115,46 @@ mod tests {
         corvus_glaive(&mut game, source);
         assert!(game.players[0].hand.is_empty());
         assert_eq!(game.players[0].permanent_energy, 1);
+    }
+
+    /// Compare seed 1014 on SnapComplete decks 8 and 9: Zombie Black Cat's discard
+    /// trigger discards the Wolverine Corvus Glaive had also selected. Game::DiscardCard
+    /// 0x7dabe68 returns false for it, and the two attempts still grant the energy.
+    #[test]
+    fn corvus_skips_target_discarded_by_an_earlier_discard_trigger() {
+        let deck = test_deck();
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut chained = 0;
+        for seed in 0..64 {
+            let mut rng = PythonRandom::seed(seed);
+            let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+            let source = game.create_card("CorvusGlaive", 0);
+            let cat = game.create_card("ZombieBlackCat", 0);
+            let wolverine = game.create_card("Wolverine", 0);
+            let dazzler = game.create_card("Dazzler", 0);
+            game.players[0].hand = vec![cat, wolverine, dazzler];
+            corvus_glaive(&mut game, source);
+            assert_eq!(game.players[0].permanent_energy, 1);
+            if game.players[0].hand == [dazzler] {
+                chained += 1;
+            }
+        }
+        assert!(chained > 0);
+    }
+
+    #[test]
+    fn discard_card_fails_for_a_card_not_in_hand() {
+        let mut rng = PythonRandom::seed(1);
+        let deck = test_deck();
+        let lanes = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        let card = game.create_card("Wasp", 0);
+        game.players[0].hand.clear();
+        assert!(!game.discard_card(0, card));
+        game.players[0].hand.push(card);
+        assert!(game.discard_card(0, card));
+        assert!(!game.discard_card(0, card));
+        assert!(game.players[0].discard.contains(&card));
     }
 
     #[test]

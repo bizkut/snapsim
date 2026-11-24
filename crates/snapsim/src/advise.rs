@@ -2,6 +2,7 @@
 #[cfg(test)]
 use crate::position::build_game;
 use crate::{
+    best_reply::{self, BestReplyConfig, BestReplyStats},
     coverage::{coverage, sampling_priors},
     game::{Action, Game},
     policy::Policy,
@@ -71,6 +72,11 @@ pub struct AdviseOptions {
     /// Disable player-chosen moves and activations for frozen-reference comparisons.
     #[serde(default)]
     pub plays_only: bool,
+    /// Let the opponent of every sampled hidden state pick its best reply to our
+    /// plan on the final turn (`true`, or `{"plans": N, "turns": 1|2}`); see
+    /// `best_reply`. Off by default: the opponent plays the playout policy.
+    #[serde(default, deserialize_with = "best_reply::deserialize_option")]
+    pub best_reply: Option<BestReplyConfig>,
     pub workers: usize,
 }
 
@@ -338,12 +344,27 @@ fn play_out(
     plays: &[PlanStep],
     policy: Policy,
     plays_only: bool,
+    reply: Option<(BestReplyConfig, &BestReplyStats)>,
 ) -> Result<i32, String> {
     let priority = match position.priority.as_deref() {
         Some("me") => Some(0),
         Some("opponent") => Some(1),
         _ => None,
     };
+    if let Some((config, stats)) = reply {
+        let actions: Vec<_> = plays.iter().map(|step| step.action(game)).collect();
+        if let Some(winner) = best_reply::resolve_position(
+            game,
+            policy,
+            priority,
+            plays_only,
+            Some(&actions),
+            config,
+            stats,
+        )? {
+            return Ok(winner);
+        }
+    }
     if plays_only {
         let plan: Vec<_> = plays
             .iter()
@@ -517,6 +538,8 @@ pub(crate) fn advise_with_game(
     let position_stopped =
         || cancel() || position_deadline.is_some_and(|end| Instant::now() >= end);
     let stake_stopped = || cancel() || deadline.is_some_and(|end| Instant::now() >= end);
+    let best_reply_stats = BestReplyStats::default();
+    let reply = options.best_reply.map(|config| (config, &best_reply_stats));
     let mut rng = PythonRandom::seed(options.seed);
     let mut sample_seed = rng.getrandbits(64) as u64;
     let mut first_rng = PythonRandom::seed(sample_seed as i128);
@@ -601,6 +624,7 @@ pub(crate) fn advise_with_game(
                     &active[0].plays,
                     policy,
                     options.plays_only,
+                    reply,
                 )?;
                 active[0].record(winner);
                 remaining -= 1;
@@ -622,6 +646,7 @@ pub(crate) fn advise_with_game(
                         &active[index].plays,
                         policy,
                         options.plays_only,
+                        reply,
                     )?,
                 )))
             };
@@ -662,7 +687,14 @@ pub(crate) fn advise_with_game(
                 &mut sample_rng,
                 Some(&*frozen_generated.lock().map_err(|e| e.to_string())?),
             )?;
-            let winner = play_out(&mut game, position, &best.plays, policy, options.plays_only)?;
+            let winner = play_out(
+                &mut game,
+                position,
+                &best.plays,
+                policy,
+                options.plays_only,
+                reply,
+            )?;
             best.record(winner);
             extra_samples += 1;
         }
@@ -701,15 +733,32 @@ pub(crate) fn advise_with_game(
                 Some("opponent") => Some(1),
                 _ => None,
             };
-            game.play_position_policy_turn(policy, priority, options.plays_only)?;
-            while game.turn <= game.total_turns {
-                if options.plays_only {
-                    game.play_turn_plays_only(policy);
-                } else {
-                    game.play_turn_actions(policy)?;
+            let reply = match options.best_reply {
+                Some(config) => best_reply::resolve_position(
+                    &mut game,
+                    policy,
+                    priority,
+                    options.plays_only,
+                    None,
+                    config,
+                    &best_reply_stats,
+                )?,
+                None => None,
+            };
+            let winner = if let Some(winner) = reply {
+                winner
+            } else {
+                game.play_position_policy_turn(policy, priority, options.plays_only)?;
+                while game.turn <= game.total_turns {
+                    if options.plays_only {
+                        game.play_turn_plays_only(policy);
+                    } else {
+                        game.play_turn_actions(policy)?;
+                    }
                 }
-            }
-            estimate.record(game.winner());
+                game.winner()
+            };
+            estimate.record(winner);
         }
         if estimate.samples > 0 {
             let samples = estimate.samples as f64;
@@ -721,6 +770,9 @@ pub(crate) fn advise_with_game(
                 "approximate": incomplete,
             });
         }
+    }
+    if let Some(config) = options.best_reply {
+        result["best_reply"] = best_reply_stats.report(config);
     }
     if options.stake_rollouts > 0 && position.stakes.is_some() && result.get("position").is_some() {
         result["stake_rollouts"] = crate::compare::stake_position_sweep(

@@ -4419,16 +4419,16 @@ impl<'a> Game<'a> {
     }
 
     /// Return whether the discard succeeded, including cards whose discard
-    /// trigger subsequently returns them to hand.
+    /// trigger subsequently returns them to hand. Game::DiscardCard 0x7dabe68
+    /// checks the card's zone is Hand before the Soul Stone check and returns
+    /// false otherwise, e.g. for a card an earlier discard trigger already moved.
     pub fn discard_card(&mut self, seat: usize, card: usize) -> bool {
+        let Some(slot) = self.players[seat].hand.iter().position(|&id| id == card) else {
+            return false;
+        };
         if self.thanos_stone_active(card, "SoulStone") {
             return false;
         }
-        let slot = self.players[seat]
-            .hand
-            .iter()
-            .position(|&id| id == card)
-            .expect("discard card must be in hand");
         self.take_hand(seat, slot);
         self.transition_card_zone(card, crate::zones::CardZone::Discard(seat));
         // MorbiusBehavior::GetPowerChange 0x7f01d3c and

@@ -1,6 +1,7 @@
 //! Building blocks for a deterministic MARVEL SNAP simulator.
 
 pub mod advise;
+pub mod best_reply;
 pub mod cards;
 pub mod compare;
 pub mod coverage;
