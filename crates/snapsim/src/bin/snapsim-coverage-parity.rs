@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         playout: "spread".into(),
         workers: 1,
         plays_only: true,
+        optional_moves: false,
         best_reply: None,
         best_reply_estimate: true,
     };

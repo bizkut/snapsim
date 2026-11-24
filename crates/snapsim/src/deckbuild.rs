@@ -13,12 +13,12 @@ struct Candidate {
     original: Option<Deck>,
 }
 
-struct OpponentDeck {
+pub(crate) struct OpponentDeck {
     cards: Deck,
     cumulative_weight: f64,
 }
 
-fn opponent_decks(value: &Value) -> Result<Vec<OpponentDeck>, String> {
+pub(crate) fn opponent_decks(value: &Value) -> Result<Vec<OpponentDeck>, String> {
     if value.is_null() {
         return Ok(Vec::new());
     }
@@ -53,7 +53,7 @@ fn opponent_decks(value: &Value) -> Result<Vec<OpponentDeck>, String> {
     Ok(pool)
 }
 
-fn pick_opponent(pool: &[OpponentDeck], seed: i128) -> Option<&Deck> {
+pub(crate) fn pick_opponent(pool: &[OpponentDeck], seed: i128) -> Option<&Deck> {
     let total = pool.last()?.cumulative_weight;
     let draw = PythonRandom::seed(seed).random() * total;
     Some(

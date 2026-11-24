@@ -113,6 +113,9 @@ struct Compare {
     mode: Option<String>,
     #[arg(long)]
     hero_deck: Option<String>,
+    /// Weighted JSON array of explicit opponent decks.
+    #[arg(long)]
+    opponent_decks: Option<String>,
     #[arg(long)]
     deck_prior: Option<String>,
     #[arg(long, default_value_t = 10)]
@@ -137,6 +140,11 @@ struct Compare {
     b_playout: String,
     #[arg(long, default_value = "default")]
     b_prior: String,
+    /// Enable optional friendly moves in side A's or B's advisor.
+    #[arg(long)]
+    a_optional_moves: bool,
+    #[arg(long)]
+    b_optional_moves: bool,
     /// Side A (B) searches assuming its opponent plays its best reply to each plan on the final turn(s).
     #[arg(long)]
     a_best_reply: bool,
@@ -312,14 +320,25 @@ fn run(cli: Cli) -> Result<(), String> {
                 playout: "spread".into(),
                 workers: 1,
                 plays_only: a.plays_only,
+                optional_moves: false,
                 best_reply,
                 best_reply_estimate: true,
             };
             snapsim::advise::advise(&p, &options, &|| false)?
         }
-        Command::Compare(a) => snapsim::compare::compare(
-            &json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"a_best_reply":a.a_best_reply,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"b_best_reply":a.b_best_reply,"best_reply_plans":a.best_reply_plans,"best_reply_turns":a.best_reply_turns,"plays_only":a.plays_only,"stakes":a.stakes,"a_snap_threshold":a.a_snap_threshold,"b_snap_threshold":a.b_snap_threshold,"a_retreat_threshold":a.a_retreat_threshold,"b_retreat_threshold":a.b_retreat_threshold,"a_snap_probability":a.a_snap_probability,"b_snap_probability":a.b_snap_probability,"a_retreat_probability":a.a_retreat_probability,"b_retreat_probability":a.b_retreat_probability,"stake_initial":a.stake_initial,"stake_initial_next":a.stake_initial_next,"stake_prevent_raise":a.stake_prevent_raise,"stake_maximum":a.stake_maximum,"stake_final_multiplier":a.stake_final_multiplier}),
-        )?,
+        Command::Compare(a) => {
+            let mut args = json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"a_best_reply":a.a_best_reply,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"b_best_reply":a.b_best_reply,"best_reply_plans":a.best_reply_plans,"best_reply_turns":a.best_reply_turns,"plays_only":a.plays_only,"stakes":a.stakes,"a_snap_threshold":a.a_snap_threshold,"b_snap_threshold":a.b_snap_threshold,"a_retreat_threshold":a.a_retreat_threshold,"b_retreat_threshold":a.b_retreat_threshold,"a_snap_probability":a.a_snap_probability,"b_snap_probability":a.b_snap_probability,"a_retreat_probability":a.a_retreat_probability,"b_retreat_probability":a.b_retreat_probability,"stake_initial":a.stake_initial,"stake_initial_next":a.stake_initial_next,"stake_prevent_raise":a.stake_prevent_raise,"stake_maximum":a.stake_maximum,"stake_final_multiplier":a.stake_final_multiplier});
+            if let Some(path) = a.opponent_decks {
+                args["opponent_decks"] = read(&path)?;
+            }
+            if a.a_optional_moves {
+                args["a_optional_moves"] = json!(true);
+            }
+            if a.b_optional_moves {
+                args["b_optional_moves"] = json!(true);
+            }
+            snapsim::compare::compare(&args)?
+        }
         Command::Benchmark(a) => snapsim::compare::benchmark(
             &json!({"deck_file":a.deck_file,"mode":a.mode,"games":a.games,"seed":a.seed,"rollouts":a.rollouts,"opponent":a.opponent,"plays_only":a.plays_only}),
         )?,

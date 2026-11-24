@@ -198,6 +198,109 @@ fn plays_of(actions: &[Action]) -> Vec<(usize, usize)> {
     plays
 }
 
+/// Enumerate no move and each legal destination for each original board card.
+/// Both the move-prefix count and the accumulated play plans are bounded.
+fn optional_candidates(
+    game: &Game<'_>,
+    default: Vec<Action>,
+    config: BestReplyConfig,
+    stats: &BestReplyStats,
+) -> Vec<Vec<Action>> {
+    fn visit(
+        game: &Game<'_>,
+        board: &[usize],
+        index: usize,
+        prefix: &mut Vec<Action>,
+        plans: &mut Vec<Vec<Action>>,
+        leaves: &mut usize,
+        complete: &mut bool,
+    ) {
+        if plans.len() >= NODE_BUDGET || *leaves >= 64 {
+            *complete = false;
+            return;
+        }
+        if index == board.len() {
+            *leaves += 1;
+            let (plays, finished) = maximal_plans(game, 1);
+            *complete &= finished;
+            for play in plays {
+                if plans.len() >= NODE_BUDGET {
+                    *complete = false;
+                    break;
+                }
+                let mut actions = prefix.clone();
+                actions.extend(
+                    play.into_iter()
+                        .map(|(card, lane)| Action::Play { card, lane }),
+                );
+                plans.push(actions);
+            }
+            return;
+        }
+        visit(game, board, index + 1, prefix, plans, leaves, complete);
+        let card = board[index];
+        for lane in 0..3 {
+            if !game.can_player_move(card, lane, 1) || plans.len() >= NODE_BUDGET {
+                continue;
+            }
+            let mut rng = game.fork_rng();
+            let mut branch = game.fork(rng.as_mut());
+            let action = Action::Move { card, lane };
+            if branch.stage_action(1, action).is_ok() {
+                prefix.push(action);
+                visit(&branch, board, index + 1, prefix, plans, leaves, complete);
+                prefix.pop();
+            }
+        }
+    }
+    let wanted = config.plans.saturating_sub(1);
+    if wanted == 0 {
+        return vec![default];
+    }
+    let mut rng = game.fork_rng();
+    let mut staging = game.fork(rng.as_mut());
+    let board: Vec<_> = game
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.cards.iter().copied())
+        .filter(|&card| game.cards[card].owner == 1)
+        .collect();
+    let mut prefix = Vec::new();
+    for &action in &default {
+        if matches!(action, Action::Activate { .. }) && staging.stage_action(1, action).is_ok() {
+            prefix.push(action);
+        }
+    }
+    let mut plans = Vec::new();
+    let mut complete = true;
+    let mut leaves = 0;
+    visit(
+        &staging,
+        &board,
+        0,
+        &mut prefix,
+        &mut plans,
+        &mut leaves,
+        &mut complete,
+    );
+    if !complete {
+        stats.enumeration_cut.fetch_add(1, Ordering::Relaxed);
+    }
+    plans.retain(|plan| *plan != default);
+    if plans.len() > wanted {
+        stats.sampled_down.fetch_add(1, Ordering::Relaxed);
+        let mut rng = game.fork_rng();
+        for slot in 0..wanted {
+            let pick = slot + rng.randbelow(plans.len() - slot);
+            plans.swap(slot, pick);
+        }
+        plans.truncate(wanted);
+    }
+    let mut all = vec![default];
+    all.extend(plans);
+    all
+}
+
 /// The opponent's candidate plans: the policy's own plan first, then maximal
 /// play plans (after the policy's moves and activations), at most `config.plans`.
 fn candidates(
@@ -299,7 +402,11 @@ pub(crate) fn resolve_position(
     };
     let own = own.map_or_else(|| plan(game, 0), <[Action]>::to_vec);
     let default = plan(game, 1);
-    let candidates = candidates(game, default, plays_only, config, stats);
+    let candidates = if policy.optional_moves() && !plays_only {
+        optional_candidates(game, default, config, stats)
+    } else {
+        candidates(game, default, plays_only, config, stats)
+    };
     stats.samples.fetch_add(1, Ordering::Relaxed);
     // Only the sample's result is kept, so the opponent ranks replies win, draw,
     // loss and the first reply that wins ends the search.
@@ -417,6 +524,106 @@ mod tests {
             .unwrap()
     }
 
+    // Synthetic turn-six board reproducing the slot competition: moving
+    // Nightcrawler into Murderworld prevents Hulk from being played there.
+    fn hulk_moves_position() -> Value {
+        json!({
+            "turn": 6, "total_turns": 6, "energy": 6,
+            "hand": [{"id":"BlueMarvel", "entity_id":1, "power":3}],
+            "deck": [],
+            "locations": [
+                {"id":"FrontierOutpost", "revealed_turn":1,
+                 "mine":[{"id":"Squirrel","entity_id":2,"power":1},
+                         {"id":"Bishop","entity_id":3,"power":6},
+                         {"id":"Hawkeye","entity_id":4,"power":5},
+                         {"id":"Klaw","entity_id":5,"power":3}],
+                 "theirs":[{"id":"Quicksilver","entity_id":6,"power":2},
+                           {"id":"Groot","entity_id":7,"power":9},
+                           {"id":"Sentinel","entity_id":8,"power":3},
+                           {"id":"Starlord","entity_id":9,"power":6}]},
+                {"id":"Murderworld", "revealed_turn":4,
+                 "mine":[{"id":"SquirrelGirl","entity_id":10,"power":2},
+                         {"id":"Sentinel","entity_id":11,"power":3},
+                         {"id":"AntMan","entity_id":12,"power":1}],
+                 "theirs":[{"id":"Sentinel","entity_id":13,"power":3},
+                           {"id":"Wolfsbane","entity_id":14,"power":4},
+                           {"id":"Hawkeye","entity_id":15,"power":1}]},
+                {"id":"Kyln", "revealed_turn":3,
+                 "mine":[{"id":"Squirrel","entity_id":16,"power":1}],
+                 "theirs":[{"id":"Nightcrawler","entity_id":17,"power":3}]}
+            ],
+            "previous_turn_locations":{"complete":true,
+                "ids":[["FrontierOutpost"],["Murderworld"],["Kyln"]]},
+            "opponent":{"hand":1,"deck":0,"energy":6,"known":["Hulk"]}
+        })
+    }
+
+    #[test]
+    fn optional_moves_preserve_hulk_slot_in_synthetic_position() {
+        let position = hulk_moves_position();
+        let mut opts = options(json!(true));
+        opts["rollouts"] = json!(6000);
+        opts["position_rollouts"] = json!(1000);
+        opts["max_plans"] = json!(100);
+        opts["best_reply_estimate"] = json!(false);
+        let baseline = run(&position, &opts);
+        opts["optional_moves"] = json!(true);
+        let result = run(&position, &opts);
+        assert!(win_of(&result, &[("BlueMarvel", 1)]) < 0.5);
+        assert!(win_of(&baseline, &[("BlueMarvel", 1)]) > 0.9);
+        assert!(baseline["position"]["win"].as_f64().unwrap() > 0.9);
+        assert!(result["position"]["win"].as_f64().unwrap() < 0.5);
+    }
+
+    #[test]
+    fn optional_reply_enumerates_keep_and_all_legal_destinations() {
+        let position = hulk_moves_position();
+        let position = Position::from_json(&position.to_string()).unwrap();
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        let nightcrawler = *game.lanes[2]
+            .cards
+            .iter()
+            .find(|&&id| game.cards[id].owner == 1 && game.cards[id].def.id == "Nightcrawler")
+            .unwrap();
+        let hulk = *game.players[1]
+            .hand
+            .iter()
+            .find(|&&id| game.cards[id].def.id == "Hulk")
+            .unwrap();
+        let stats = BestReplyStats::default();
+        let candidates = optional_candidates(
+            &game,
+            vec![],
+            BestReplyConfig {
+                plans: 20000,
+                turns: 1,
+            },
+            &stats,
+        );
+        assert!(candidates.iter().any(|actions| {
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::Move { card, .. } if *card == nightcrawler))
+                && actions.contains(&Action::Play {
+                    card: hulk,
+                    lane: 1,
+                })
+        }));
+        for lane in 0..3 {
+            if game.can_player_move(nightcrawler, lane, 1) {
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|actions| actions.contains(&Action::Move {
+                            card: nightcrawler,
+                            lane
+                        }))
+                );
+            }
+        }
+    }
+
     #[test]
     fn option_parsing() {
         let parse = |value: Value| deserialize_option(value);
@@ -472,6 +679,9 @@ mod tests {
         let position = flip_position();
         let default = run(&position, &options(json!(null)));
         assert_eq!(default, run(&position, &options(json!(false))));
+        let mut explicitly_disabled = options(json!(null));
+        explicitly_disabled["optional_moves"] = json!(false);
+        assert_eq!(default, run(&position, &explicitly_disabled));
         assert!(default.get("best_reply").is_none());
         // Policy plan only: the same random draws as the ordinary playout.
         let single = run(&position, &options(json!({"plans": 1})));

@@ -6373,15 +6373,22 @@ impl<'a> Game<'a> {
                 })
                 .collect()
         });
-        // Card::IsMovableByPlayer (0x7cb0cac) and Card::CanActivate
-        // (0x7cb9a24) evaluate a player's own staging state. Validate each
-        // plan on a separate copy, before the opponent's hidden staging can
-        // move ongoing effects or otherwise change those checks.
+        // Ordinary simultaneous plans use independent staging states.
+        // DaredevilBehavior::ForceOpponentToStageFirst (0x7e87de0) instead
+        // lets its owner stage after the opponent's actions are visible.
         if !already_staged {
             let mut costs: [Vec<i32>; 2] = std::array::from_fn(|_| Vec::new());
-            for seat in 0..2 {
+            let viewer = self.daredevil_viewer();
+            let order = viewer.map_or([0, 1], |seat| [1 - seat, seat]);
+            for seat in order {
                 let mut rng = self.fork_rng();
                 let mut view = self.fork(rng.as_mut());
+                if viewer == Some(seat) {
+                    let first = 1 - seat;
+                    for (&action, &cost) in plans[first].iter().zip(&costs[first]) {
+                        view.apply_staged_action(first, action, cost);
+                    }
+                }
                 for &action in &plans[seat] {
                     let cost = match action {
                         Action::Play { card, .. } => view.card_cost(card),
@@ -6409,8 +6416,8 @@ impl<'a> Game<'a> {
             if !crate::cards::reference_rules_enabled() {
                 self.reveal_priority = Some(priority);
             }
-            for (seat, plan) in plans.iter().enumerate() {
-                for (&action, &cost) in plan.iter().zip(&costs[seat]) {
+            for seat in order {
+                for (&action, &cost) in plans[seat].iter().zip(&costs[seat]) {
                     self.apply_staged_action(seat, action, cost);
                 }
             }
@@ -8393,6 +8400,83 @@ mod staging_tests {
         assert!(game.can_player_move(vision, 2, 0));
         assert!(!game.can_player_move(crawler, 2, 0));
         assert!(game.move_player_card(vision, 2, 0));
+    }
+
+    #[test]
+    fn daredevil_response_uses_opponents_staged_moves_for_winter_soldier() {
+        let mut rng = PythonRandom::seed(1);
+        let mut game = game(&mut rng);
+        game.turn = 5;
+        game.players[0].energy = 5;
+        game.players[1].energy = 5;
+        for (lane, id) in ["JosiesBar", "JeanGreySchool", "Olympia"]
+            .iter()
+            .enumerate()
+        {
+            game.lanes[lane].def = locations::get(id).unwrap();
+        }
+        place(&mut game, "Squirrel", 0, 0);
+        let squirrel_girl = place(&mut game, "SquirrelGirl", 0, 1);
+        let kazar = place(&mut game, "KaZar", 0, 1);
+        game.add_power(kazar, 4, 0);
+        place(&mut game, "Squirrel", 0, 2);
+        place(&mut game, "Bishop", 0, 2);
+        let ghost = place(&mut game, "GhostTheFirstRider", 1, 1);
+        let daredevil = place(&mut game, "Daredevil", 1, 1);
+        place(&mut game, "Iceman", 1, 2);
+        let blue_marvel = game.create_card("BlueMarvel", 0);
+        let soldier = game.create_card("WinterSoldierThunderbolts", 1);
+        let wolverine = game.create_card("WeaponXWolverine", 1);
+        game.players[0].hand.push(blue_marvel);
+        game.players[1].hand.extend([soldier, wolverine]);
+        game.ongoing();
+        let first = vec![
+            Action::Move {
+                card: squirrel_girl,
+                lane: 0,
+            },
+            Action::Move {
+                card: kazar,
+                lane: 0,
+            },
+            Action::Play {
+                card: blue_marvel,
+                lane: 1,
+            },
+        ];
+        let response = vec![
+            Action::Move {
+                card: ghost,
+                lane: 0,
+            },
+            Action::Move {
+                card: daredevil,
+                lane: 0,
+            },
+            Action::Play {
+                card: soldier,
+                lane: 0,
+            },
+            Action::Play {
+                card: wolverine,
+                lane: 0,
+            },
+        ];
+        let mut fork_rng = game.fork_rng();
+        let mut view = game.fork(fork_rng.as_mut());
+        for &action in &response[..2] {
+            view.stage_action(1, action).unwrap();
+        }
+        assert!(view.stage_action(1, response[2]).is_err());
+        let mut fork_rng = game.fork_rng();
+        let mut view = game.fork(fork_rng.as_mut());
+        for &action in &first {
+            view.stage_action(0, action).unwrap();
+        }
+        for &action in &response {
+            view.stage_action(1, action).unwrap();
+        }
+        assert!(game.resolve_action_plans([first, response], 0).is_ok());
     }
 
     #[test]

@@ -72,6 +72,9 @@ pub struct AdviseOptions {
     /// Disable player-chosen moves and activations for frozen-reference comparisons.
     #[serde(default)]
     pub plays_only: bool,
+    /// Consider optional player moves in opponent replies and playouts.
+    #[serde(default)]
+    pub optional_moves: bool,
     /// Let the opponent of every sampled hidden state pick its best reply to our
     /// plan on the final turn (`true`, or `{"plans": N, "turns": 1|2}`); see
     /// `best_reply`. Off by default: the opponent plays the playout policy.
@@ -448,6 +451,11 @@ pub(crate) fn advise_with_game(
         "heuristic" => Policy::Heuristic,
         "margin" => Policy::Margin,
         _ => return Err("unknown playout policy".into()),
+    };
+    let policy = if options.optional_moves {
+        policy.with_optional_moves()
+    } else {
+        policy
     };
     let mut unsupported = coverage(position);
     let priors = sampling_priors(position);

@@ -284,6 +284,10 @@ fn search_plan_with_stop(
             .get("plays_only")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        optional_moves: options
+            .get("optional_moves")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         best_reply,
         best_reply_estimate: true,
     };
@@ -622,6 +626,13 @@ fn side(args: &Value, name: &str) -> Value {
             "turns": args.get("best_reply_turns").and_then(Value::as_u64).unwrap_or(1),
         });
     }
+    if args
+        .get(format!("{name}_optional_moves"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        side["optional_moves"] = json!(true);
+    }
     side
 }
 
@@ -769,6 +780,7 @@ fn stake_estimate(
         playout: "spread".into(),
         workers: 1,
         plays_only: false,
+        optional_moves: false,
         best_reply: None,
         best_reply_estimate: true,
     };
@@ -1453,16 +1465,37 @@ fn compare_stakes(args: &Value) -> Result<Value, String> {
 
 /// Run the duplicate-seat compare harness with seed-ordered pair results.
 pub fn compare(args: &Value) -> Result<Value, String> {
+    if args.get("stakes").and_then(Value::as_bool).unwrap_or(false)
+        && ["a_optional_moves", "b_optional_moves"]
+            .iter()
+            .any(|key| args[*key].as_bool().unwrap_or(false))
+    {
+        return Err("optional moves are not supported with --stakes".into());
+    }
+    let opponents = crate::deckbuild::opponent_decks(&args["opponent_decks"])?;
+    if !opponents.is_empty() && args.get("stakes").and_then(Value::as_bool).unwrap_or(false) {
+        return Err("--opponent-decks is not supported with --stakes".into());
+    }
     if args.get("stakes").and_then(Value::as_bool).unwrap_or(false) {
         return compare_stakes(args);
     }
     use rayon::prelude::*;
     let mode = args.get("mode").and_then(Value::as_str);
     let deck_file = args.get("deck_file").and_then(Value::as_str);
-    if mode.is_some() == deck_file.is_some() {
+    if opponents.is_empty() && mode.is_some() == deck_file.is_some() {
         return Err("pass exactly one of --deck-file and --mode".into());
     }
-    if mode.is_none() && args.get("hero_deck").is_some_and(|v| !v.is_null()) {
+    if !opponents.is_empty()
+        && (mode.is_some()
+            || (deck_file.is_some() == args.get("hero_deck").and_then(Value::as_str).is_some()))
+    {
+        return Err(
+            "--opponent-decks requires exactly one of --hero-deck and --deck-file, without --mode"
+                .into(),
+        );
+    }
+    if opponents.is_empty() && mode.is_none() && args.get("hero_deck").is_some_and(|v| !v.is_null())
+    {
         return Err("--hero-deck requires --mode recruit".into());
     }
     if mode.is_none() && args.get("deck_prior").is_some_and(|v| !v.is_null()) {
@@ -1499,7 +1532,17 @@ pub fn compare(args: &Value) -> Result<Value, String> {
     let pairs: Vec<[char; 2]> = pool.install(|| {
         (0..games)
             .into_par_iter()
-            .map(|index| compare_pair(episode_seed(seed, index, true), &options))
+            .map(|index| {
+                let deal_seed = episode_seed(seed, index, true);
+                if let Some(opponent) = crate::deckbuild::pick_opponent(&opponents, deal_seed) {
+                    let mut deal = options.clone();
+                    deal["decks"][1] = json!(opponent);
+                    deal["hero_seat_swap"] = json!(true);
+                    compare_pair(deal_seed, &deal)
+                } else {
+                    compare_pair(deal_seed, &options)
+                }
+            })
             .collect::<Result<_, _>>()
     })?;
     let mut seats = [[0usize; 3]; 2];
@@ -1527,14 +1570,18 @@ pub fn compare(args: &Value) -> Result<Value, String> {
         })
         .collect();
     let win_rate = overall[0] as f64 / (games * 2) as f64;
-    Ok(json!({
+    let mut result = json!({
         "config": {"a": a, "b": b, "games": games, "seed": seed, "workers": workers, "time_limit": time_limit,
             "mode": mode, "deck_prior": prior, "hero_deck": args.get("hero_deck"),
-            "pairing": if args.get("hero_deck").is_some_and(|v| !v.is_null()) { "hero" } else { "duplicate" }, "deck_file": deck_file},
+            "pairing": if !opponents.is_empty() || args.get("hero_deck").is_some_and(|v| !v.is_null()) { "hero" } else { "duplicate" }, "deck_file": deck_file},
         "overall": counts(overall), "by_seat": {"1": counts(seats[0]), "2": counts(seats[1])}, "win_rate": win_rate,
         "wilson_95": wilson_95(win_rate, games * 2), "paired": paired_95(&scores), "pair_scores": scores,
         "elapsed_seconds": started.elapsed().as_secs_f64()
-    }))
+    });
+    if !opponents.is_empty() {
+        result["config"]["opponent_decks"] = args["opponent_decks"].clone();
+    }
+    Ok(result)
 }
 
 /// Run SearchAI, Spread and Heuristic against the specified benchmark opponent.
@@ -1596,6 +1643,76 @@ pub fn benchmark(args: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pool_draw_is_shared_across_configurations_and_scored_for_hero() {
+        let hero = [
+            "AntMan",
+            "Hawkeye",
+            "SquirrelGirl",
+            "Nightcrawler",
+            "Bishop",
+            "Klaw",
+            "JessicaJones",
+            "KaZar",
+            "IronMan",
+            "BlueMarvel",
+            "Ultron",
+            "Morph",
+        ];
+        let enemy = [
+            "Quicksilver",
+            "MistyKnight",
+            "Shocker",
+            "Cyclops",
+            "TheThing",
+            "Hulk",
+            "Medusa",
+            "Punisher",
+            "Sentinel",
+            "Wolfsbane",
+            "Ironheart",
+            "Odin",
+        ];
+        let pool_value = json!([{"card_ids":hero,"weight":1.0},{"card_ids":enemy,"weight":2.0}]);
+        let pool = crate::deckbuild::opponent_decks(&pool_value).unwrap();
+        for seed in 0..3 {
+            let deal_seed = episode_seed(seed, 0, true);
+            let opponent = crate::deckbuild::pick_opponent(&pool, deal_seed).unwrap();
+            for enabled in [false, true] {
+                let args = json!({"hero_deck":hero.join(","),"opponent_decks":pool_value,"games":1,"seed":seed,"workers":1,"rollouts":1,"a_optional_moves":enabled});
+                let result = super::compare(&args).unwrap();
+                let a = super::side(&args, "a");
+                let b = super::side(&args, "b");
+                let pair = compare_pair(
+                    deal_seed,
+                    &json!({"decks":[hero,opponent],"hero_seat_swap":true,"a":a,"b":b}),
+                )
+                .unwrap();
+                let score = pair
+                    .iter()
+                    .map(|c| match c {
+                        'W' => 1.0,
+                        'D' => 0.5,
+                        _ => 0.0,
+                    })
+                    .sum::<f64>()
+                    / 2.0;
+                assert_eq!(result["pair_scores"][0], json!(score));
+                assert_eq!(result["config"]["pairing"], "hero");
+                assert_eq!(
+                    a.get("optional_moves")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    enabled
+                );
+                assert!(b.get("optional_moves").is_none());
+            }
+        }
+        let args = json!({"b_optional_moves":true});
+        assert_eq!(super::side(&args, "b")["optional_moves"], true);
+        assert!(super::side(&args, "a").get("optional_moves").is_none());
+    }
+
     use super::{compare_pair, episode_seed, paired_95, wilson_95};
     use serde_json::json;
 
