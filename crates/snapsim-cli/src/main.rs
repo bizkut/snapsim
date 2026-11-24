@@ -40,6 +40,12 @@ struct Deckbuild {
     decks: Option<String>,
     #[arg(long)]
     selected: Option<String>,
+    /// Additional current main deck to include among starting candidates.
+    #[arg(long)]
+    main_deck: Option<String>,
+    /// Weighted JSON array of explicit opponent decks for Ranked evaluation.
+    #[arg(long)]
+    opponent_decks: Option<String>,
     #[arg(long)]
     base_deck: Option<String>,
     #[arg(long)]
@@ -47,6 +53,9 @@ struct Deckbuild {
     /// Comma-separated card IDs to keep when completing an incomplete deck.
     #[arg(long, conflicts_with_all = ["try_cards", "base_deck", "selected"])]
     complete: Option<String>,
+    /// Search strategy: legacy (default) or staged.
+    #[arg(long, default_value = "legacy", value_parser = ["legacy", "staged"])]
+    search: String,
     #[arg(long, default_value_t = 3)]
     count: usize,
     #[arg(long)]
@@ -239,7 +248,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     ids.split(',').map(str::trim).collect::<Vec<_>>()
                 }
             });
-            let args = json!({"owned":read(&a.collection)?,"saved":match a.decks {Some(s)=>read(&s)?,None=>Value::Null},"baseline":match a.selected {Some(s)=>read(&s)?,None=>Value::Null},"base":base,"cards":a.try_cards,"complete":complete,"count":a.count,"time_budget":a.time_budget,"workers":a.workers.unwrap_or_else(cli_workers),"seed":a.seed,"confirm_rollouts":a.confirm_rollouts,"plays_only":a.plays_only});
+            let args = json!({"owned":read(&a.collection)?,"saved":match a.decks {Some(s)=>read(&s)?,None=>Value::Null},"baseline":match a.selected {Some(s)=>read(&s)?,None=>Value::Null},"main":match a.main_deck {Some(s)=>read(&s)?,None=>Value::Null},"opponent_decks":match a.opponent_decks {Some(s)=>read(&s)?,None=>Value::Null},"search":a.search,"base":base,"cards":a.try_cards,"complete":complete,"count":a.count,"time_budget":a.time_budget,"workers":a.workers.unwrap_or_else(cli_workers),"seed":a.seed,"confirm_rollouts":a.confirm_rollouts,"plays_only":a.plays_only});
             let mut progress = |v: Value| {
                 if a.progress {
                     println!("{v}");

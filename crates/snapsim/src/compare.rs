@@ -555,10 +555,12 @@ fn run_game(
 }
 
 /// Play both seats from an identical deal; a fixed Recruit hero deck follows A.
+/// Explicit-deck callers can request the same hero-relative scoring in other modes.
 pub fn compare_pair(seed: i128, options: &Value) -> Result<[char; 2], String> {
     let mode = options.get("mode").and_then(Value::as_str);
     let mut decks = supplied_decks(options)?;
-    let hero = mode == Some("recruit") && decks[0].is_some();
+    let hero = (mode == Some("recruit") || options["hero_seat_swap"].as_bool().unwrap_or(false))
+        && decks[0].is_some();
     if mode == Some("recruit") {
         let mut rng = PythonRandom::seed(seed);
         let weighted = options.get("deck_prior").and_then(Value::as_str) == Some("weighted");
@@ -1596,6 +1598,84 @@ pub fn benchmark(args: &Value) -> Result<Value, String> {
 mod tests {
     use super::{compare_pair, episode_seed, paired_95, wilson_95};
     use serde_json::json;
+
+    #[test]
+    fn explicit_hero_swap_scores_hero_in_both_seats() {
+        let hero = [
+            "AntMan",
+            "Hawkeye",
+            "SquirrelGirl",
+            "Nightcrawler",
+            "Bishop",
+            "Klaw",
+            "JessicaJones",
+            "KaZar",
+            "IronMan",
+            "BlueMarvel",
+            "Ultron",
+            "Morph",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let enemy = [
+            "Quicksilver",
+            "MistyKnight",
+            "Shocker",
+            "Cyclops",
+            "TheThing",
+            "Hulk",
+            "Medusa",
+            "Punisher",
+            "Sentinel",
+            "Wolfsbane",
+            "Ironheart",
+            "Odin",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let side = json!({"controller":"heuristic"});
+        let options = json!({"decks":[hero,enemy],"a":side,"b":side,"hero_seat_swap":true});
+        let decks = [hero.clone(), enemy.clone()];
+        let reversed = [enemy, hero];
+        for seed in 0..8 {
+            let pair = compare_pair(seed, &options).unwrap();
+            assert_eq!(
+                pair[0],
+                super::run_game(&decks, seed, 0, [&side, &side], None, None, false).unwrap()
+            );
+            assert_eq!(
+                pair[1],
+                super::run_game(&reversed, seed, 1, [&side, &side], None, None, false).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_hero_swap_mirror_is_balanced() {
+        let deck = [
+            "AntMan",
+            "Hawkeye",
+            "SquirrelGirl",
+            "Nightcrawler",
+            "Bishop",
+            "Klaw",
+            "JessicaJones",
+            "KaZar",
+            "IronMan",
+            "BlueMarvel",
+            "Ultron",
+            "Morph",
+        ];
+        let side = json!({"controller":"heuristic"});
+        let options = json!({"decks":[deck,deck],"a":side,"b":side,"hero_seat_swap":true});
+        for seed in 0..16 {
+            let pair = compare_pair(seed, &options).unwrap();
+            assert!(
+                matches!(pair, ['W', 'L'] | ['L', 'W'] | ['D', 'D']),
+                "{pair:?}"
+            );
+        }
+    }
 
     #[test]
     fn stake_policy_cannot_retreat_from_vesuvius_after_turn_five() {
