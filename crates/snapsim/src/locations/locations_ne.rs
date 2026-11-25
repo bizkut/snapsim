@@ -32,9 +32,10 @@ fn worldship(game: &mut Game<'_>, lane: usize) {
     }
 }
 
-// XMansionBehavior::AddRandomCards (0x7d9a2f0) uses resolution order,
-// chooses once per player excluding Morph and Iron Lad, creates then stages.
-// As elsewhere, random definitions are limited to implemented cards.
+// XMansionBehavior::AddRandomCards (0x7d9a2f0) creates each card directly
+// in the location before calling StageForPlay. CreateCard (0x7dab298) resolves
+// a location spawn immediately, without a player-owned CardStaged context.
+// Random definitions remain limited to implemented cards.
 fn x_mansion(game: &mut Game<'_>, lane: usize) {
     if game.turn != 3 {
         return;
@@ -47,16 +48,13 @@ fn x_mansion(game: &mut Game<'_>, lane: usize) {
             winner as usize
         }
     });
-    let start = game.post_resolve_plays.len();
     for owner in [first, 1 - first] {
         if let Some(id) = game.random_card(|row| {
             row.card_type == "Character" && !matches!(row.carddefid.as_str(), "Morph" | "IronLad")
         }) {
-            let card = game.create_card(id, owner);
-            game.stage_effect_play(card, lane);
+            game.add_created(id, lane, owner);
         }
     }
-    game.resolve_effect_plays(start);
 }
 
 #[cfg(test)]
@@ -119,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn x_mansion_stages_created_cards_even_with_full_hands() {
+    fn x_mansion_creates_cards_even_with_full_hands() {
         let mut rng = PythonRandom::seed(11);
         let deck = [
             "Hulk",
@@ -147,14 +145,53 @@ mod tests {
         game.reveal_priority = Some(1);
         game.turn = 2;
         x_mansion(&mut game, 1);
-        assert!(game.players.iter().all(|p| p.staged_history.is_empty()));
+        assert!(game.lanes[1].cards.is_empty());
         game.turn = 3;
         x_mansion(&mut game, 1);
-        for player in &game.players {
-            assert!(player.staged_history.iter().any(|play| {
-                play.turn == 3 && play.created && !matches!(play.def_id, "Morph" | "IronLad")
+        for seat in 0..2 {
+            assert!(game.lanes[1].cards.iter().any(|&card| {
+                game.cards[card].owner == seat
+                    && game.cards[card].created
+                    && game.cards[card].revealed
+                    && !matches!(game.cards[card].def.id, "Morph" | "IronLad")
             }));
         }
+    }
+
+    #[test]
+    fn location_created_card_resolves_without_bishop_play_trigger() {
+        let mut rng = PythonRandom::seed(7);
+        let deck = [
+            "Hulk",
+            "Wasp",
+            "Cyclops",
+            "Shocker",
+            "Medusa",
+            "IronMan",
+            "Hawkeye",
+            "Sentinel",
+            "TheThing",
+            "MistyKnight",
+            "Abomination",
+            "Quicksilver",
+        ]
+        .map(str::to_owned);
+        let lanes = ["Ruins", "XMansion", "Wakanda"].map(str::to_owned);
+        let mut game = Game::new([&deck, &deck], &lanes, &mut rng).unwrap();
+        game.turn = 3;
+        let bishop = game.create_card("Bishop", 0);
+        assert!(game.add_card(bishop, 1, 0, true));
+        let initial = game.cards[bishop].power();
+        assert!(game.add_created("Caiera", 1, 0));
+        assert_eq!(game.cards[bishop].power(), initial);
+
+        let played = game.create_card("Wasp", 0);
+        game.cards[played].lane = Some(1);
+        game.cards[played].turn_played = game.turn;
+        game.lanes[1].cards.push(played);
+        game.played[0].push((played, 1));
+        game.reveal(played);
+        assert_eq!(game.cards[bishop].power(), initial + 1);
     }
 
     #[test]

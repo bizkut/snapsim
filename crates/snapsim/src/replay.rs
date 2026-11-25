@@ -738,6 +738,68 @@ mod tests {
     }
 
     #[test]
+    fn hidden_angel_responder_is_not_a_replay_rule_failure() {
+        let mut start = identified_observation(3);
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        start["game"]["players"][1]["zones"]["deck"]["count"] = json!(1);
+        start["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 41, "owner_entity_id": 2, "card_id": "Medusa",
+            "revealed": true, "power": 5, "turn_revealed": 2
+        }]);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(3);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][1]["cards"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "entity_id": 42, "owner_entity_id": 2, "revealed": false
+            }));
+        let mut reveal = submitted.clone();
+        reveal["game"]["locations"][1]["cards"][1] = json!({
+            "entity_id": 42, "owner_entity_id": 2, "card_id": "Carnage",
+            "revealed": true, "power": 2, "turn_revealed": 3
+        });
+        let mut next = reveal.clone();
+        next["game"]["turn"] = json!(4);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["players"][1]["zones"]["deck"]["count"] = json!(0);
+        next["game"]["locations"][1]["cards"] = json!([
+            {"entity_id": 42, "owner_entity_id": 2, "card_id": "Carnage",
+             "revealed": true, "power": 4, "turn_revealed": 3},
+            {"entity_id": 43, "owner_entity_id": 2, "card_id": "Angel",
+             "revealed": true, "power": 4, "turn_revealed": 3}
+        ]);
+        let rows = check_observations(
+            vec![(1, start), (2, submitted), (3, reveal), (4, next)],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("hidden hand/deck responder"));
+    }
+
+    #[test]
+    fn mansion_unknown_random_cards_are_not_replay_rule_failures() {
+        let mut start = identified_observation(3);
+        start["game"]["locations"][1]["location_id"] = json!("XMansion");
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(3);
+        let mut next = submitted.clone();
+        next["game"]["turn"] = json!(4);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 50, "owner_entity_id": 2, "card_id": "Lizard",
+            "revealed": true, "power": 6, "turn_revealed": 3,
+            "created_by_location_id": "XMansion"
+        }]);
+        let rows = check_observations(vec![(1, start), (2, submitted), (3, next)], &[], 1).unwrap();
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("X-Mansion random created-card"));
+    }
+
+    #[test]
     fn sequence_gaps_only_taint_the_window_that_contains_them() {
         let start = identified_observation(4);
         let mut submitted = start.clone();

@@ -645,6 +645,38 @@ fn check_observations_impl(
                     None => {}
                 }
                 checked = Some((staged.plays.clone(), delays));
+                if !cards::reference_rules_enabled() {
+                    // AngelBehavior::MoveSelf (0x7e64e38) can respond from a
+                    // hidden hand or deck after a friendly destruction. A
+                    // non-staged arrival does not establish its original zone
+                    // or the other hidden cards and their order.
+                    if used_samples
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(target))
+                        .any(|frame| {
+                            frame.board.iter().any(|card| {
+                                card.revealed
+                                    && card.id == "Angel"
+                                    && card.created_by_location.is_null()
+                                    && entity(start, &card.entity).is_none()
+                                    && !staged
+                                        .plays
+                                        .iter()
+                                        .any(|play| play.card.entity == card.entity)
+                            })
+                        })
+                    {
+                        return Err("non-staged Angel arrival may depend on an unrecorded hidden hand/deck responder".into());
+                    }
+                    // XMansionBehavior::AddRandomCards (0x7d9a2f0) draws
+                    // card definitions in resolution order. The recording
+                    // does not contain the client RNG state; sampling another
+                    // definition cannot establish a card-rule discrepancy.
+                    if turn == 3 && start.locations.iter().any(|id| id == "XMansion") {
+                        return Err("X-Mansion random created-card draws are not determined by the recording".into());
+                    }
+                }
                 // A pending Forge trigger is irrelevant if its owner cannot
                 // play a card this turn. Local staging is recorded; opponent
                 // staging is not, so prove the latter only in an inert board
