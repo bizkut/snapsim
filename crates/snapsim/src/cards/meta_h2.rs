@@ -300,21 +300,21 @@ mod tests {
     }
 
     #[test]
-    fn daredevil_live_coverage_is_fail_closed_only_on_turn_five() {
+    fn daredevil_live_coverage_is_fail_closed_only_for_unshown_turn_five_plays() {
         let mut p = position(json!([{"id":"Daredevil"}]), json!([]));
         let reason = json!("Daredevil-visible opponent plays not exported");
-        assert!(
-            crate::coverage::coverage(&p)["state"]
+        let flagged = |p: &Position| {
+            crate::coverage::coverage(p)["state"]
                 .as_array()
                 .unwrap()
                 .contains(&reason)
-        );
+        };
+        // No face-down opponent play: nothing is missing.
+        assert!(!flagged(&p));
+        // A face-down opponent play the reader did not mark as shown by Daredevil.
+        p.locations[0].theirs_face_down = 1;
+        assert!(flagged(&p));
         p.turn = 4;
-        assert!(
-            !crate::coverage::coverage(&p)["state"]
-                .as_array()
-                .unwrap()
-                .contains(&reason)
-        );
+        assert!(!flagged(&p));
     }
 }

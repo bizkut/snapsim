@@ -579,8 +579,10 @@ pub fn coverage(position: &Position) -> Value {
         .iter()
         .any(|lane| !lane.known_opponent_plays.is_empty())
     {
-        extra_state
-            .insert("known opponent staged card stats and staging effects unknown".to_owned());
+        extra_state.insert(
+            "Daredevil-shown opponent plays: stats, staging effects and cross-lane staging order not exported (lane order assumed)"
+                .to_owned(),
+        );
     }
     if !cards::reference_rules_enabled() && move_source_tie_possible(position) {
         extra_state.insert(
@@ -2442,11 +2444,13 @@ pub fn coverage(position: &Position) -> Value {
     let mut face_down = 0;
     for lane in &position.locations {
         if position.turn == 5
+            && lane.theirs_face_down > 0
             && lane
                 .mine
                 .iter()
                 .any(|card| card.revealed && card.id == "Daredevil")
         {
+            // Face-down opponent plays the reader did not mark as shown by Daredevil.
             extra_state.insert("Daredevil-visible opponent plays not exported".to_owned());
         }
         face_down += lane.theirs_face_down;
