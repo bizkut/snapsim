@@ -10,6 +10,16 @@
 | `created`, `created_by_*`, `merged_to_entity_id` | card provenance; a merge target resolves to its card when it is visible |
 | `stat_updates` | the Power/Cost ledger, with the source player mapped to a seat |
 | graveyard and banished cards | both players' zones; a graveyard card's death lane stays unknown |
+| `card_id` and `visible_by: "Daredevil"` on an opponent face-down board card | `known_opponent_plays` at that lane; the identity stays unrevealed until normal resolution |
+
+`known_opponent_plays` is an optional per-location list of card IDs whose
+opponent plays are already staged for this turn. The opponent hand count is
+the observed remaining hand, excluding cards already on the board. Other
+face-down identities are never forwarded; without this field sampling is
+unchanged.
+The reader does not supply their cross-lane staging order or current stats;
+the simulator uses lane order and printed stats, and marks the result
+approximate.
 
 Stat updates are history, not deltas: the client's power and cost getters already report totals, and the client does not label which rows come from Ongoing effects. A row is removed only when it matches a contribution the engine recomputes from the same named active card or revealed location (same stat, operation, value and source). Rows from faction, augment or league updaters, and rows whose provenance is missing or ambiguous, stay historical. The reader does not report the order of different cards drawn on the same turn or where a graveyard card died.
 

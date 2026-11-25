@@ -160,6 +160,7 @@ pub fn search_position(
             mine,
             theirs,
             theirs_face_down,
+            known_opponent_plays: Vec::new(),
             revealed_turn: if lane.revealed {
                 lane.revealed_turn
             } else {
@@ -257,7 +258,25 @@ fn search_plan_with_stop(
         .get("prior")
         .and_then(Value::as_str)
         .filter(|s| *s != "default");
-    let position = search_position(game, seat, priority, mode, prior);
+    let mut position = search_position(game, seat, priority, mode, prior);
+    if let Some(value) = options.get("opponent_prior") {
+        let prior: position::WeightedPrior =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        let other = 1 - seat;
+        let seen: Vec<_> = game
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.cards.iter().copied())
+            .chain(game.players[other].graveyard.iter().map(|&(id, _)| id))
+            .chain(game.players[other].banished.iter().copied())
+            .filter_map(|id| {
+                let card = &game.cards[id];
+                (card.owner == other && card.revealed && !card.created)
+                    .then(|| card.def.id.to_owned())
+            })
+            .collect();
+        position.opponent.weights = Some(prior.weights_for(&seen)?);
+    }
     let best_reply = crate::best_reply::deserialize_option(
         options.get("best_reply").cloned().unwrap_or(Value::Null),
     )
@@ -614,6 +633,9 @@ fn side(args: &Value, name: &str) -> Value {
         .unwrap_or(32);
     let mut side = json!({"rollouts": rollouts, "playout": args.get(format!("{name}_playout")).and_then(Value::as_str).unwrap_or("spread"),
         "prior": args.get(format!("{name}_prior")).and_then(Value::as_str).unwrap_or("default"), "engine": "rust"});
+    if let Some(prior) = args.get(format!("{name}_opponent_prior")) {
+        side["opponent_prior"] = prior.clone();
+    }
     // Absent unless enabled, so existing configs and their parity oracle are unchanged.
     if args
         .get(format!("{name}_best_reply"))
@@ -1472,6 +1494,13 @@ pub fn compare(args: &Value) -> Result<Value, String> {
     {
         return Err("optional moves are not supported with --stakes".into());
     }
+    if args.get("stakes").and_then(Value::as_bool).unwrap_or(false)
+        && ["a_opponent_prior", "b_opponent_prior"]
+            .iter()
+            .any(|key| args.get(*key).is_some_and(|value| !value.is_null()))
+    {
+        return Err("weighted opponent priors are not supported with --stakes".into());
+    }
     let opponents = crate::deckbuild::opponent_decks(&args["opponent_decks"])?;
     if !opponents.is_empty() && args.get("stakes").and_then(Value::as_bool).unwrap_or(false) {
         return Err("--opponent-decks is not supported with --stakes".into());
@@ -1643,6 +1672,19 @@ pub fn benchmark(args: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opponent_prior_is_per_side_and_disabled_by_default() {
+        let prior = json!({"base":{"AntMan":1.0},"groups":[]});
+        let args = json!({"a_opponent_prior":prior});
+        assert_eq!(super::side(&args, "a")["opponent_prior"], prior);
+        assert!(super::side(&args, "b").get("opponent_prior").is_none());
+        assert!(
+            super::compare(&json!({"stakes":true,"a_opponent_prior":prior}))
+                .unwrap_err()
+                .contains("not supported")
+        );
+    }
+
     #[test]
     fn pool_draw_is_shared_across_configurations_and_scored_for_hero() {
         let hero = [

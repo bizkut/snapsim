@@ -11,6 +11,28 @@ fn position(locations: serde_json::Value) -> Position {
 }
 
 #[test]
+fn known_opponent_play_is_staged_and_not_sampled_in_hand() {
+    let mut p = position(json!([
+        {"id":"Ruins", "mine":[], "theirs":[], "known_opponent_plays":["Hulk"]},
+        {"id":"Ruins", "mine":[], "theirs":[]},
+        {"id":"Ruins", "mine":[], "theirs":[]}
+    ]));
+    p.opponent.hand = 1;
+    p.opponent.pool = Some(vec!["Hulk".into(), "AntMan".into()]);
+    let mut rng = PythonRandom::seed(1);
+    let mut game = build_game(&p, &mut rng).unwrap();
+    assert_eq!(game.players[1].hand.len(), 1);
+    assert_eq!(game.cards[game.players[1].hand[0]].def.id, "AntMan");
+    let staged = game.lanes[0].cards[0];
+    assert_eq!(game.cards[staged].def.id, "Hulk");
+    assert!(!game.cards[staged].revealed);
+    assert_eq!(game.played[1], vec![(staged, 0)]);
+    game.resolve_position_turn(&[], snapsim::policy::Policy::Spread, Some(1));
+    assert!(game.cards[staged].revealed);
+    assert_eq!(game.players[1].hand.len(), 1);
+}
+
+#[test]
 fn post_galactus_position_builds_destroyed_lanes() {
     let p = position(json!([
         {"id":null, "destroyed":true, "mine":[], "theirs":[]},

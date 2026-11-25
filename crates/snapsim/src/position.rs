@@ -431,6 +431,9 @@ pub struct LocationRef {
     pub theirs: Vec<CardRef>,
     #[serde(default)]
     pub theirs_face_down: usize,
+    /// Opponent plays whose identities and lanes are already visible before reveal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_opponent_plays: Vec<String>,
     #[serde(default)]
     pub revealed_turn: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,6 +441,54 @@ pub struct LocationRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_state: Option<LocationHistoryState>,
 }
+/// Generic weighted card prior. Each group contributes its weight to each of
+/// its cards when at least one group card is among the observed opponent cards.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedPrior {
+    pub base: HashMap<String, f64>,
+    pub groups: Vec<WeightedPriorGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedPriorGroup {
+    pub card_ids: Vec<String>,
+    pub weight: f64,
+}
+
+impl WeightedPrior {
+    pub fn weights_for(&self, seen: &[String]) -> Result<HashMap<String, f64>, String> {
+        if self.base.is_empty() || self.base.values().any(|w| !w.is_finite() || *w <= 0.0) {
+            return Err("prior base weights must be finite and positive".into());
+        }
+        let mut weights = self.base.clone();
+        for group in &self.groups {
+            let mut unique = HashSet::new();
+            if !group.weight.is_finite()
+                || group.weight <= 0.0
+                || group.card_ids.is_empty()
+                || group
+                    .card_ids
+                    .iter()
+                    .any(|id| !weights.contains_key(id) || !unique.insert(id))
+            {
+                return Err("invalid weighted prior group".into());
+            }
+            if group.card_ids.iter().any(|id| seen.contains(id)) {
+                for id in &group.card_ids {
+                    let weight = weights.get_mut(id).expect("validated prior card");
+                    *weight += group.weight;
+                    if !weight.is_finite() {
+                        return Err("prior weight overflow".into());
+                    }
+                }
+            }
+        }
+        Ok(weights)
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Opponent {
     pub hand: usize,
@@ -460,6 +511,9 @@ pub struct Opponent {
     pub pending_power: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior: Option<String>,
+    /// Optional positive sampling weights for every candidate hidden card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<HashMap<String, f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graveyard: Option<Vec<CardRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2015,7 +2069,14 @@ pub(crate) fn build_game_with_generated<'a>(
     let recruit = opp.deck_list.is_none()
         && opp.pool.is_none()
         && position.mode.as_deref() == Some("recruit")
-        && !outside(opp.seen.iter().chain(&opp.known));
+        && !outside(
+            opp.seen.iter().chain(&opp.known).chain(
+                position
+                    .locations
+                    .iter()
+                    .flat_map(|lane| &lane.known_opponent_plays),
+            ),
+        );
     let mut pool = if let Some(list) = &opp.deck_list {
         list.clone()
     } else if let Some(list) = &opp.pool {
@@ -2033,6 +2094,11 @@ pub(crate) fn build_game_with_generated<'a>(
         }
         known_set.insert(id);
     }
+    let staged_ids: HashSet<&str> = position
+        .locations
+        .iter()
+        .flat_map(|lane| lane.known_opponent_plays.iter().map(String::as_str))
+        .collect();
     if known_set.len() > 12 {
         return Err("opponent.known contains more than 12 unique card IDs".into());
     }
@@ -2040,12 +2106,16 @@ pub(crate) fn build_game_with_generated<'a>(
     let mut forced: Vec<String> = opp
         .known
         .iter()
-        .filter(|id| !opp.seen.contains(id) && forced_set.insert(*id))
+        .filter(|id| {
+            !opp.seen.contains(id) && !staged_ids.contains(id.as_str()) && forced_set.insert(*id)
+        })
         .cloned()
         .collect();
     let mut candidates: Vec<_> = pool
         .iter()
-        .filter(|id| !opp.seen.contains(id) && !known_set.contains(id))
+        .filter(|id| {
+            !opp.seen.contains(id) && !staged_ids.contains(id.as_str()) && !known_set.contains(id)
+        })
         .cloned()
         .collect();
     let count = opp.hand
@@ -2062,9 +2132,25 @@ pub(crate) fn build_game_with_generated<'a>(
     let mut hidden = if count == 0 {
         Vec::new()
     } else if candidates.len() >= count {
-        if recruit && opp.prior.as_deref() != Some("uniform") {
+        if opp.weights.is_some() || (recruit && opp.prior.as_deref() != Some("uniform")) {
             candidates.dedup();
-            let weights = recruit_weights();
+            let default_weights;
+            let weights = if let Some(weights) = &opp.weights {
+                weights
+            } else {
+                default_weights = recruit_weights();
+                &default_weights
+            };
+            if candidates.iter().any(|id| {
+                !weights
+                    .get(id)
+                    .is_some_and(|weight| weight.is_finite() && *weight > 0.0)
+            }) {
+                return Err(
+                    "opponent.weights must contain a finite positive weight for every candidate"
+                        .into(),
+                );
+            }
             let mut clocks: Vec<_> = candidates
                 .iter()
                 .map(|id| ((-rng.random()).ln_1p() / weights[id], id.clone()))
@@ -2078,6 +2164,9 @@ pub(crate) fn build_game_with_generated<'a>(
             sample(rng, &candidates, count)?
         }
     } else {
+        if opp.weights.is_some() {
+            return Err("not enough distinct weighted cards".into());
+        }
         let fallback = if opp.known.is_empty() {
             &pool
         } else {
@@ -2365,6 +2454,16 @@ pub(crate) fn build_game_with_generated<'a>(
                     powers.push((id, power));
                 }
             }
+        }
+        for card_id in &src.known_opponent_plays {
+            let mut card = make_card(card_id, 1)?;
+            card.lane = Some(lane);
+            card.zone = Some(crate::zones::CardZone::Location(lane));
+            card.turn_played = position.turn;
+            let id = game.cards.len();
+            game.cards.push(card);
+            game.push_location(lane, id);
+            game.restore_opponent_play(id, lane);
         }
         for _ in 0..src.theirs_face_down {
             let mut c = make_card(hidden_board.next().unwrap(), 1)?;
@@ -2885,6 +2984,49 @@ mod observed_history_tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn weighted_prior_conditions_on_any_seen_card_once_per_group() {
+        let prior: WeightedPrior = serde_json::from_value(json!({
+            "base":{"AntMan":1.0,"Hulk":2.0,"Medusa":3.0},
+            "groups":[{"card_ids":["AntMan","Hulk"],"weight":4.0}]
+        }))
+        .unwrap();
+        let weights = prior
+            .weights_for(&["AntMan".into(), "Hulk".into()])
+            .unwrap();
+        assert_eq!(weights["AntMan"], 5.0);
+        assert_eq!(weights["Hulk"], 6.0);
+        assert_eq!(weights["Medusa"], 3.0);
+        assert_eq!(prior.weights_for(&[]).unwrap(), prior.base);
+    }
+
+    #[test]
+    fn weighted_sampling_rejects_missing_and_nonpositive_weights() {
+        let mut position = base();
+        position.opponent.hand = 1;
+        position.opponent.pool = Some(vec!["AntMan".into(), "Hulk".into()]);
+        position.opponent.weights = Some(HashMap::from([("AntMan".into(), 1.0)]));
+        assert_eq!(
+            crate::coverage::sampling_priors(&position)["opponent_cards"]["weighting"],
+            "weighted"
+        );
+        assert!(build_game(&position, &mut PythonRandom::seed(1)).is_err());
+        position
+            .opponent
+            .weights
+            .as_mut()
+            .unwrap()
+            .insert("Hulk".into(), 0.0);
+        assert!(build_game(&position, &mut PythonRandom::seed(1)).is_err());
+        position
+            .opponent
+            .weights
+            .as_mut()
+            .unwrap()
+            .insert("Hulk".into(), 1.0);
+        assert!(build_game(&position, &mut PythonRandom::seed(1)).is_ok());
+    }
+
     #[test]
     fn empty_legality_inventories_require_complete_schema_two_evidence() {
         let empty = json!({"complete":true,"reasons":[],"items":[]});

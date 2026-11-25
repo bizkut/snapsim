@@ -116,6 +116,12 @@ struct Compare {
     /// Weighted JSON array of explicit opponent decks.
     #[arg(long)]
     opponent_decks: Option<String>,
+    /// JSON weighted hidden-card prior for side A.
+    #[arg(long)]
+    a_opponent_prior: Option<String>,
+    /// JSON weighted hidden-card prior for side B.
+    #[arg(long)]
+    b_opponent_prior: Option<String>,
     #[arg(long)]
     deck_prior: Option<String>,
     #[arg(long, default_value_t = 10)]
@@ -330,6 +336,12 @@ fn run(cli: Cli) -> Result<(), String> {
             let mut args = json!({"deck_file":a.deck_file,"mode":a.mode,"hero_deck":a.hero_deck,"deck_prior":a.deck_prior,"games":a.games,"seed":a.seed,"workers":a.workers,"rollouts":a.rollouts,"time_limit":a.time_limit,"a_rollouts":a.a_rollouts,"a_playout":a.a_playout,"a_prior":a.a_prior,"a_best_reply":a.a_best_reply,"b_rollouts":a.b_rollouts,"b_playout":a.b_playout,"b_prior":a.b_prior,"b_best_reply":a.b_best_reply,"best_reply_plans":a.best_reply_plans,"best_reply_turns":a.best_reply_turns,"plays_only":a.plays_only,"stakes":a.stakes,"a_snap_threshold":a.a_snap_threshold,"b_snap_threshold":a.b_snap_threshold,"a_retreat_threshold":a.a_retreat_threshold,"b_retreat_threshold":a.b_retreat_threshold,"a_snap_probability":a.a_snap_probability,"b_snap_probability":a.b_snap_probability,"a_retreat_probability":a.a_retreat_probability,"b_retreat_probability":a.b_retreat_probability,"stake_initial":a.stake_initial,"stake_initial_next":a.stake_initial_next,"stake_prevent_raise":a.stake_prevent_raise,"stake_maximum":a.stake_maximum,"stake_final_multiplier":a.stake_final_multiplier});
             if let Some(path) = a.opponent_decks {
                 args["opponent_decks"] = read(&path)?;
+            }
+            if let Some(path) = a.a_opponent_prior {
+                args["a_opponent_prior"] = read(&path)?;
+            }
+            if let Some(path) = a.b_opponent_prior {
+                args["b_opponent_prior"] = read(&path)?;
             }
             if a.a_optional_moves {
                 args["a_optional_moves"] = json!(true);

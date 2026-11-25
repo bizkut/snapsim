@@ -650,6 +650,7 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         let mut mine = Vec::new();
         let mut theirs = Vec::new();
         let mut face_down = 0;
+        let mut known_opponent_plays = Vec::new();
         let mut board_cards: Vec<_> = array(&location["cards"]).iter().collect();
         board_cards.sort_by_key(|card| card["zone_position"].as_i64().unwrap_or(i64::MAX));
         for card in board_cards {
@@ -698,6 +699,11 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
                 {
                     theirs.push(card_ref(card, true, seats, version == Some(2)));
                     seen.push(card["card_id"].clone());
+                } else if card["revealed"] == false
+                    && card["visible_by"] == "Daredevil"
+                    && card["card_id"].as_str().is_some_and(|id| !id.is_empty())
+                {
+                    known_opponent_plays.push(card["card_id"].clone());
                 } else {
                     face_down += 1;
                 }
@@ -713,6 +719,9 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
                 .unwrap_or(Value::Null)
         };
         let mut lane_ref = json!({"id":id,"mine":mine,"theirs":theirs,"theirs_face_down":face_down,"revealed_turn":revealed});
+        if !known_opponent_plays.is_empty() {
+            lane_ref["known_opponent_plays"] = json!(known_opponent_plays);
+        }
         if version == Some(2)
             && !lane_ref["id"].is_null()
             && let Some(raw) = location.get("history_state").filter(|v| !v.is_null())
@@ -923,6 +932,22 @@ mod tests {
             {"card_id":"Hulk","owner_entity_id":20,"revealed":true},
             {"card_id":"AntMan","owner_entity_id":20,"revealed":false}
         ]},{"location_id":"Ruins","cards":[]},{"location_id":"Ruins","cards":[]}]}})
+    }
+
+    #[test]
+    fn daredevil_only_exports_authorized_staged_identity() {
+        let mut observation = prior_observation();
+        let before = position_from_snap(&observation, &json!({})).unwrap();
+        assert_eq!(before["locations"][0]["theirs_face_down"], 1);
+        assert!(before["locations"][0].get("known_opponent_plays").is_none());
+        observation["game"]["locations"][0]["cards"][1]["visible_by"] = json!("Daredevil");
+        let after = position_from_snap(&observation, &json!({})).unwrap();
+        assert_eq!(
+            after["locations"][0]["known_opponent_plays"],
+            json!(["AntMan"])
+        );
+        assert_eq!(after["locations"][0]["theirs_face_down"], 0);
+        assert_eq!(after["opponent"]["seen"], before["opponent"]["seen"]);
     }
 
     #[test]

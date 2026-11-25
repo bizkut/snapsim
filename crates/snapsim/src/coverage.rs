@@ -42,13 +42,30 @@ fn opponent_candidates(position: &Position) -> (&'static str, Vec<String>) {
     } else if let Some(pool) = &opponent.pool {
         ("pool", pool.clone())
     } else if position.mode.as_deref() == Some("recruit")
-        && !position::outside(opponent.seen.iter().chain(&opponent.known))
+        && !position::outside(
+            opponent.seen.iter().chain(&opponent.known).chain(
+                position
+                    .locations
+                    .iter()
+                    .flat_map(|lane| &lane.known_opponent_plays),
+            ),
+        )
     {
         ("mode:recruit", position::recruit_cards())
     } else {
         ("all-supported", position::all_cards())
     };
-    let excluded: HashSet<_> = opponent.seen.iter().chain(&opponent.known).collect();
+    let excluded: HashSet<_> = opponent
+        .seen
+        .iter()
+        .chain(&opponent.known)
+        .chain(
+            position
+                .locations
+                .iter()
+                .flat_map(|lane| &lane.known_opponent_plays),
+        )
+        .collect();
     let mut remaining: Vec<_> = pool
         .into_iter()
         .filter(|id| !excluded.contains(id))
@@ -110,7 +127,9 @@ pub fn sampling_priors(position: &Position) -> Value {
             pool.iter().filter(|id| !known.contains(id)).count(),
         )
     };
-    json!({"opponent_cards": {"source":source,"size":cards.len(),"weighting":if source == "mode:recruit" && position.opponent.prior.as_deref() != Some("uniform") {"weighted"} else {"uniform"}}, "hidden_locations":{"source":loc_source,"size":loc_count}, "own_deck":{"source":deck_source,"size":deck_size}})
+    let weighted = position.opponent.weights.is_some()
+        || (source == "mode:recruit" && position.opponent.prior.as_deref() != Some("uniform"));
+    json!({"opponent_cards": {"source":source,"size":cards.len(),"weighting":if weighted {"weighted"} else {"uniform"}}, "hidden_locations":{"source":loc_source,"size":loc_count}, "own_deck":{"source":deck_source,"size":deck_size}})
 }
 
 // Player-owned triggers survive their source. A card's staging turn is not a
@@ -534,6 +553,12 @@ pub fn coverage(position: &Position) -> Value {
                 .flat_map(|lane| lane.mine.iter().chain(&lane.theirs))
                 .map(|card| card.id.as_str()),
         )
+        .chain(
+            position
+                .locations
+                .iter()
+                .flat_map(|lane| lane.known_opponent_plays.iter().map(String::as_str)),
+        )
         .chain(position.opponent.seen.iter().map(String::as_str))
         .chain(position.opponent.known.iter().map(String::as_str))
         .chain(
@@ -549,6 +574,14 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    if position
+        .locations
+        .iter()
+        .any(|lane| !lane.known_opponent_plays.is_empty())
+    {
+        extra_state
+            .insert("known opponent staged card stats and staging effects unknown".to_owned());
+    }
     if !cards::reference_rules_enabled() && move_source_tie_possible(position) {
         extra_state.insert(
             "move_source_tie_unknown: MovableByPlayerComponent.CreatedTimestamp not exported"

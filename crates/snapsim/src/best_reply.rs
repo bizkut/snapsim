@@ -378,6 +378,7 @@ pub(crate) fn resolve_position(
         || remaining > i32::from(config.turns)
         || (0..2).any(|seat| game.autoplay_controller(seat).is_some())
         || game.daredevil_viewer().is_some()
+        || !game.played[1].is_empty()
     {
         return Ok(None);
     }
@@ -556,6 +557,81 @@ mod tests {
                 "ids":[["FrontierOutpost"],["Murderworld"],["Kyln"]]},
             "opponent":{"hand":1,"deck":0,"energy":6,"known":["Hulk"]}
         })
+    }
+
+    #[test]
+    fn smart_opponent_leaves_our_playout_and_early_turns_unchanged() {
+        let mut fixture = hulk_moves_position();
+        for turn in [4, 6] {
+            fixture["turn"] = json!(turn);
+            let position = Position::from_json(&fixture.to_string()).unwrap();
+            let mut rng = PythonRandom::seed(1);
+            let game = build_game(&position, &mut rng).unwrap();
+            for seat in 0..=usize::from(turn == 4) {
+                let mut a = PythonRandom::seed(100);
+                let mut b = PythonRandom::seed(100);
+                assert_eq!(
+                    Policy::SmartOpponent.plan_actions(&game, seat, &mut a),
+                    Policy::Spread.plan_actions(&game, seat, &mut b)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn smart_opponent_can_keep_nightcrawler_and_play_hulk() {
+        let position = Position::from_json(&hulk_moves_position().to_string()).unwrap();
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        let hulk = game.players[1].hand[0];
+        let nightcrawler = game.lanes[2]
+            .cards
+            .iter()
+            .copied()
+            .find(|&card| game.cards[card].def.id == "Nightcrawler")
+            .unwrap();
+        let found = (0..100).any(|seed| {
+            let mut rng = PythonRandom::seed(seed);
+            let actions = Policy::SmartOpponent.plan_actions(&game, 1, &mut rng);
+            actions.contains(&Action::Play {
+                card: hulk,
+                lane: 1,
+            }) && !actions
+                .iter()
+                .any(|action| matches!(action, Action::Move { card, .. } if *card == nightcrawler))
+        });
+        assert!(found);
+    }
+
+    #[test]
+    fn smart_opponent_can_play_cap_and_ant_man_together() {
+        let position = json!({
+            "turn":5, "total_turns":6, "energy":5,
+            "hand":[], "deck":[],
+            "locations":[
+                {"id":"Ruins","mine":[{"id":"Hawkeye","power":1},{"id":"Bishop","power":4},{"id":"Nightcrawler","power":3}],
+                 "theirs":[{"id":"KaZar","power":9}]},
+                {"id":"Ruins","mine":[{"id":"BlueMarvel","power":3}],
+                 "theirs":[{"id":"Medusa","power":5},{"id":"MrFantastic","power":1}]},
+                {"id":"Ruins","mine":[{"id":"Odin","power":10}],"theirs":[{"id":"RocketRaccoon","power":5}]}
+            ],
+            "previous_turn_locations":{"complete":true,"ids":[["Ruins"],["Ruins"],["Ruins"]]},
+            "opponent":{"hand":2,"deck":0,"energy":5,"known":["CaptainAmerica","AntMan"]}
+        });
+        let position = Position::from_json(&position.to_string()).unwrap();
+        let mut rng = PythonRandom::seed(2);
+        let game = build_game(&position, &mut rng).unwrap();
+        let found = (0..100).any(|seed| {
+            let mut rng = PythonRandom::seed(seed);
+            let actions = Policy::SmartOpponent.plan_actions(&game, 1, &mut rng);
+            ["CaptainAmerica", "AntMan"].iter().all(|id| {
+                actions.iter().any(|action| match action {
+                    Action::Play { card, lane } => *lane == 1 && game.cards[*card].def.id == *id,
+                    _ => false,
+                })
+            })
+        });
+        assert!(found);
     }
 
     #[test]

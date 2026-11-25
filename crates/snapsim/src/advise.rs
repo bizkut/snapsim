@@ -450,6 +450,7 @@ pub(crate) fn advise_with_game(
         "spread" => Policy::Spread,
         "heuristic" => Policy::Heuristic,
         "margin" => Policy::Margin,
+        "smart_opponent" => Policy::SmartOpponent,
         _ => return Err("unknown playout policy".into()),
     };
     let policy = if options.optional_moves {
@@ -1082,6 +1083,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn visible_staged_play_changes_advice_without_changing_absent_default() {
+        let mut position = json!({
+            "turn":6,"total_turns":6,"energy":6,"hand":[{"id":"Hulk"}],"deck":[],
+            "locations":[
+                {"id":"Ruins","mine":[],"theirs":[],"theirs_face_down":1},
+                {"id":"Ruins","mine":[],"theirs":[]},
+                {"id":"Ruins","mine":[],"theirs":[]}
+            ],
+            "opponent":{"hand":0,"deck":0,"pool":["Wasp"]}
+        });
+        let options = json!({"rollouts":40,"seed":42,"max_plans":3,"time_limit":null,
+                             "approximate":true,"playout":"spread","workers":1});
+        let hidden = advise_json(&position.to_string(), &options.to_string()).unwrap();
+        position["locations"][0]["known_opponent_plays"] = json!([]);
+        assert_eq!(
+            hidden,
+            advise_json(&position.to_string(), &options.to_string()).unwrap()
+        );
+        position["locations"][0]["theirs_face_down"] = json!(0);
+        position["locations"][0]["known_opponent_plays"] = json!(["Hulk"]);
+        let shown = advise_json(&position.to_string(), &options.to_string()).unwrap();
+        let hidden: Value = serde_json::from_str(&hidden).unwrap();
+        let shown: Value = serde_json::from_str(&shown).unwrap();
+        assert_ne!(hidden["plans"], shown["plans"]);
     }
 
     #[test]

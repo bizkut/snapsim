@@ -3925,6 +3925,26 @@ impl<'a> Game<'a> {
         }
     }
 
+    /// Restore an observed play already on the board without replaying staging effects.
+    pub(crate) fn restore_opponent_play(&mut self, card: usize, lane: usize) {
+        let printed_cost = self.printed_cost(card);
+        self.played[1].push((card, lane));
+        self.players[1].staged_history.push(StagedPlay {
+            turn: self.turn,
+            card,
+            def_id: self.cards[card].def.id,
+            printed_cost,
+            created: self.cards[card].created,
+            resolved: false,
+        });
+        self.players[1].staged_lane_history.push((self.turn, lane));
+        self.players[1].staged_actions.push(StagedAction {
+            action: Action::Play { card, lane },
+            cost: 0,
+            hand_index: None,
+        });
+    }
+
     pub(crate) fn apply_staged_action(&mut self, seat: usize, action: Action, cost: i32) {
         match action {
             Action::Play { card, lane } => {
@@ -6617,6 +6637,18 @@ impl<'a> Game<'a> {
         priority: Option<usize>,
         plays_only: bool,
     ) -> Result<TurnTrace, String> {
+        if !self.played[1].is_empty() {
+            let priority = self.action_priority(priority);
+            let own = {
+                let mut rng = self.rng.borrow_mut();
+                if plays_only {
+                    self.autoplay_or_plays(0, policy, &mut **rng)
+                } else {
+                    policy.plan_actions(self, 0, &mut **rng)
+                }
+            };
+            return self.resolve_action_plans([own, Vec::new()], priority);
+        }
         self.pending_plays = std::array::from_fn(|seat| {
             self.delayed_reveals[seat]
                 .iter()
@@ -6720,9 +6752,11 @@ impl<'a> Game<'a> {
             || actions.to_vec(),
             |controller| self.autoplay_plan(0, controller),
         );
-        let opponent = {
+        let opponent = if self.played[1].is_empty() {
             let mut rng = self.rng.borrow_mut();
             policy.plan_actions(self, 1, &mut **rng)
+        } else {
+            Vec::new()
         };
         self.resolve_action_plans([own, opponent], priority)
     }
@@ -6835,6 +6869,21 @@ impl<'a> Game<'a> {
         policy: crate::policy::Policy,
         priority: Option<usize>,
     ) -> TurnTrace {
+        if !self.played[1].is_empty() {
+            let priority = self.action_priority(priority);
+            let own = self.autoplay_controller(0).map_or_else(
+                || {
+                    my_plan
+                        .iter()
+                        .map(|&(card, lane)| Action::Play { card, lane })
+                        .collect()
+                },
+                |controller| self.autoplay_plan(0, controller),
+            );
+            return self
+                .resolve_action_plans([own, Vec::new()], priority)
+                .expect("built-in policies always plan");
+        }
         if (0..2).any(|seat| self.autoplay_controller(seat).is_some()) {
             let priority = self.action_priority(priority);
             let own = self.autoplay_controller(0).map_or_else(

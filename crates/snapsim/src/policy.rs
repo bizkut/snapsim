@@ -18,12 +18,18 @@ pub enum Policy {
     OptionalHeuristic,
     OptionalSpread,
     OptionalMargin,
+    /// Mix spread with a lane-margin opponent in the last two turns.
+    SmartOpponent,
+    OptionalSmartOpponent,
 }
 impl Policy {
     pub(crate) fn optional_moves(self) -> bool {
         matches!(
             self,
-            Self::OptionalHeuristic | Self::OptionalSpread | Self::OptionalMargin
+            Self::OptionalHeuristic
+                | Self::OptionalSpread
+                | Self::OptionalMargin
+                | Self::OptionalSmartOpponent
         )
     }
 
@@ -32,6 +38,7 @@ impl Policy {
             Self::Heuristic | Self::OptionalHeuristic => Self::OptionalHeuristic,
             Self::Spread | Self::OptionalSpread => Self::OptionalSpread,
             Self::Margin | Self::OptionalMargin => Self::OptionalMargin,
+            Self::SmartOpponent | Self::OptionalSmartOpponent => Self::OptionalSmartOpponent,
         }
     }
 
@@ -40,6 +47,7 @@ impl Policy {
             Self::OptionalHeuristic => Self::Heuristic,
             Self::OptionalSpread => Self::Spread,
             Self::OptionalMargin => Self::Margin,
+            Self::OptionalSmartOpponent => Self::SmartOpponent,
             other => other,
         }
     }
@@ -50,6 +58,14 @@ impl Policy {
         seat: usize,
         rng: &mut R,
     ) -> Vec<(usize, usize)> {
+        if matches!(self.base(), Self::SmartOpponent) {
+            let policy = if seat == 1 && game.total_turns - game.turn < 2 && rng.randbelow(2) == 0 {
+                Self::Margin
+            } else {
+                Self::Spread
+            };
+            return policy.plan(game, seat, rng);
+        }
         let this = self.base();
         let player = &game.players[seat];
         let mut hand = player.hand.clone();
@@ -172,6 +188,16 @@ impl Policy {
 
     /// Plan player actions on an isolated staging state, then choose normal plays.
     pub fn plan_actions(self, game: &Game<'_>, seat: usize, rng: &mut dyn GameRng) -> Vec<Action> {
+        if matches!(self.base(), Self::SmartOpponent) {
+            let policy = if seat == 1 && game.total_turns - game.turn < 2 && rng.randbelow(2) == 0 {
+                Self::OptionalMargin
+            } else if self.optional_moves() {
+                Self::OptionalSpread
+            } else {
+                Self::Spread
+            };
+            return policy.plan_actions(game, seat, rng);
+        }
         if let Some(controller) = game.autoplay_controller(seat) {
             return game.autoplay_plan_with_rng(seat, controller, rng);
         }
