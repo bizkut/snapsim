@@ -318,6 +318,22 @@ fn check_observations_impl(
                         history.embassy_reveals += 1;
                     }
                 }
+                if !cards::reference_rules_enabled() {
+                    for (lane, location) in start.locations.iter().enumerate() {
+                        if *location == "CastleZemo"
+                            && !history.castle.iter().any(|(i, turn, _)| {
+                                *i == lane && *turn == start.location_turns[lane]
+                            })
+                        {
+                            let fresh = start.location_turns[lane].as_i64() == Some(turn);
+                            history.castle.push((
+                                lane,
+                                start.location_turns[lane].clone(),
+                                [fresh.then_some(false); 2],
+                            ));
+                        }
+                    }
+                }
                 seen_locations.clone_from(&start.locations);
             }
             let next = groups.get(group_index + 1).copied().unwrap_or(&[]);
@@ -946,6 +962,22 @@ fn check_observations_impl(
             }
             output.push(row);
             if let Some(start) = start {
+                if !cards::reference_rules_enabled() {
+                    for (lane, reveal, spent) in &mut history.castle {
+                        if start.locations[*lane] != "CastleZemo"
+                            || start.location_turns[*lane] != *reveal
+                        {
+                            continue;
+                        }
+                        if let Some((plays, false)) = &checked {
+                            for play in plays.iter().filter(|p| p.card.lane == *lane) {
+                                spent[play.card.owner] = Some(true);
+                            }
+                        } else {
+                            *spent = [None; 2];
+                        }
+                    }
+                }
                 if let Some((plays, delays)) = &checked {
                     if !delays {
                         for play in plays {

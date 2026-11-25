@@ -68,7 +68,8 @@ fn shuris_lab_uses_play_location_when_spider_island_moves_a_card() {
     assert_eq!(g.cards[card].permanent, 6);
 
     let card = play(&mut g, "MistyKnight", 0);
-    assert_eq!(g.cards[card].permanent, 7); // 3 base + (3 base + KaZar's 1)
+    assert_eq!(g.cards[card].permanent, 6); // 3 base × 2
+    assert_eq!(g.cards[card].power(), 7); // Ka-Zar's Ongoing +1 follows the multiplier
 }
 #[test]
 fn mosh_pit_and_stark_tower_respect_order_and_turn() {

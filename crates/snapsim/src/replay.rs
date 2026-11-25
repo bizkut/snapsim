@@ -693,6 +693,7 @@ struct History {
     chavez_reveals: usize,
     lab_spent: Vec<(usize, Value, usize)>,
     lab_unknown: Vec<(usize, Value)>,
+    castle: Vec<(usize, Value, [Option<bool>; 2])>,
 }
 
 mod check;
@@ -735,6 +736,62 @@ mod tests {
             value["game"]["locations"][lane]["location_id"] = json!("Ruins");
         }
         value
+    }
+    #[test]
+    fn castle_zemo_replay_preserves_each_players_first_betrayal() {
+        let mut start = identified_observation(1);
+        start["game"]["locations"][0]["location_id"] = json!("CastleZemo");
+        start["game"]["players"][0]["zones"]["hand"] = json!({
+            "count": 1, "cards": [{"entity_id": 30, "card_id": "Wasp", "cost": 0, "power": 1}]
+        });
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(1);
+        submitted["game"]["players"][0]["zones"]["hand"] = json!({"count": 0, "cards": []});
+        submitted["game"]["locations"][0]["cards"] = json!([
+            {"entity_id": 30, "owner_entity_id": 1, "card_id": "Wasp", "revealed": false, "power": 1}
+        ]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][0]["cards"][0]["revealed"] = json!(true);
+        revealed["game"]["locations"][0]["cards"][0]["turn_revealed"] = json!(1);
+        let mut second = revealed.clone();
+        second["game"]["turn"] = json!(2);
+        second["game"]["players"][0]["ended_turn"] = json!(0);
+        second["game"]["locations"][0]["cards"][0]["owner_entity_id"] = json!(2);
+        second["game"]["players"][0]["zones"]["hand"] = json!({
+            "count": 1, "cards": [{"entity_id": 31, "card_id": "Hawkeye", "cost": 1, "power": 1}]
+        });
+        let mut second_submitted = second.clone();
+        second_submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        second_submitted["game"]["players"][0]["zones"]["hand"] = json!({"count": 0, "cards": []});
+        second_submitted["game"]["locations"][0]["cards"].as_array_mut().unwrap().push(json!({
+            "entity_id": 31, "owner_entity_id": 1, "card_id": "Hawkeye", "revealed": false, "power": 1
+        }));
+        let mut second_revealed = second_submitted.clone();
+        second_revealed["game"]["locations"][0]["cards"][1]["revealed"] = json!(true);
+        second_revealed["game"]["locations"][0]["cards"][1]["turn_revealed"] = json!(2);
+        let mut third = second_revealed.clone();
+        third["game"]["turn"] = json!(3);
+        third["game"]["players"][0]["ended_turn"] = json!(0);
+        let rows = check_observations(
+            vec![
+                (1, start),
+                (2, submitted),
+                (3, revealed),
+                (4, second),
+                (5, second_submitted),
+                (6, second_revealed),
+                (7, third),
+            ],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            rows[1].status,
+            super::Status::Consistent,
+            "{}",
+            rows[1].detail
+        );
     }
 
     #[test]

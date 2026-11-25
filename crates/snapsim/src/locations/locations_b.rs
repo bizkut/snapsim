@@ -274,9 +274,9 @@ fn stark_tower(game: &mut Game<'_>, lane: usize) {
 fn proscenium(game: &mut Game<'_>, _: usize, card: usize) {
     game.add_power(card, 2, game.cards[card].owner);
 }
-// ShurisLabBehavior::DoublePower @ 0x7d7fb10 checks
-// Location::IsCardPlayedHereByPlayer on PostCardResolved, not the card's
-// current location. Keep the frozen reference's current-location hook.
+// ShurisLabBehavior::DoublePower (0x7d7fb10) calls
+// Card::MultiplyPowerPermanently (0x7cb7bb8) with factor 2 after checking
+// Location::IsCardPlayedHereByPlayer at PostCardResolved.
 fn shuris_lab(game: &mut Game<'_>, _: usize, card: usize) {
     if crate::cards::reference_rules_enabled() {
         game.add_power(card, game.cards[card].power(), game.cards[card].owner);
@@ -291,7 +291,7 @@ fn shuris_lab_resolved(game: &mut Game<'_>, lane: usize, event: Event) {
             .played_cards_at(game.cards[card].owner, lane)
             .any(|id| id == card)
     {
-        game.add_power(card, game.cards[card].power(), game.cards[card].owner);
+        game.multiply_power(card, 2, game.cards[card].owner);
         game.ongoing();
     }
 }
@@ -317,6 +317,37 @@ mod tests {
     use super::*;
     use crate::locations::test_support::rng_game;
     use crate::random::PythonRandom;
+
+    #[test]
+    fn shuris_lab_multiplies_permanent_power_before_ongoing() {
+        let mut rng = PythonRandom::seed(7);
+        let mut game = rng_game(&mut rng);
+        let punisher = game.create_card("Punisher", 0);
+        let enemy = game.create_card("Squirrel", 1);
+        assert!(game.add_card(punisher, 0, 0, false));
+        assert!(game.add_card(enemy, 0, 1, false));
+        game.cards[punisher].turn_played = 4;
+        game.played[0].push((punisher, 0));
+        game.ongoing();
+        shuris_lab_resolved(&mut game, 0, Event::CardResolved { card: punisher });
+        assert_eq!(game.cards[punisher].power(), 7);
+    }
+    #[test]
+    fn permanent_multiply_and_set_precede_ongoing_without_a_location() {
+        let mut rng = PythonRandom::seed(8);
+        let mut game = rng_game(&mut rng);
+        let punisher = game.create_card("Punisher", 0);
+        let enemy = game.create_card("Squirrel", 1);
+        assert!(game.add_card(punisher, 0, 0, false));
+        assert!(game.add_card(enemy, 0, 1, false));
+        game.ongoing();
+        game.multiply_power(punisher, 2, 0);
+        game.ongoing();
+        assert_eq!(game.cards[punisher].power(), 7);
+        game.set_power(punisher, 4, 0);
+        game.ongoing();
+        assert_eq!(game.cards[punisher].power(), 5);
+    }
 
     #[test]
     fn token_locations_create_for_initiative_player_first() {

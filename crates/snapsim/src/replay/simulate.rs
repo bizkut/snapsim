@@ -517,7 +517,16 @@ pub(super) fn simulate(
             .and_then(locations::get)
             .unwrap_or(&position::UNKNOWN_LOCATION);
         let revealed_turn = start.location_turns[i].as_u64().map(|v| v as u8);
-        let state = if id == Some("OttosLab") {
+        let state = if id == Some("CastleZemo") && !crate::cards::reference_rules_enabled() {
+            history
+                .castle
+                .iter()
+                .find(|(lane, turn, _)| *lane == i && *turn == start.location_turns[i])
+                .map(|(_, _, spent)| {
+                    Box::new(spent.map(|value| value.unwrap_or(false)))
+                        as Box<dyn crate::game::CardState>
+                })
+        } else if id == Some("OttosLab") {
             Some(Box::new(std::array::from_fn::<_, 2, _>(|seat| {
                 history
                     .lab_spent
@@ -565,6 +574,18 @@ pub(super) fn simulate(
     });
     for i in 0..3 {
         if let Some(id) = start.locations[i].as_str() {
+            if id == "CastleZemo" && !crate::cards::reference_rules_enabled() {
+                let spent = history
+                    .castle
+                    .iter()
+                    .find(|(lane, turn, _)| *lane == i && *turn == start.location_turns[i])
+                    .map(|(_, _, spent)| spent);
+                if staged.plays.iter().any(|play| {
+                    play.card.lane == i && spent.and_then(|spent| spent[play.card.owner]).is_none()
+                }) {
+                    return Err("Castle Zemo prior per-player betrayal state is unknown".into());
+                }
+            }
             if start.location_turns[i].is_null() && matches!(id, "Lemuria" | "Sakaar") {
                 return Err(format!("reveal turn of {id} is unknown"));
             }

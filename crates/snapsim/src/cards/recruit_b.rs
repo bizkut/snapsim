@@ -114,12 +114,17 @@ fn nova(g: &mut Game, id: usize) {
         }
     }
 }
+// PunisherBehavior::BuffSelf (0x7f1c474) counts Location::GetAllCards
+// for the opposing player, including staged, face-down cards.
 fn punisher(g: &mut Game, id: usize) {
     let card = &g.cards[id];
     let count = g.lanes[card.lane.unwrap()]
         .cards
         .iter()
-        .filter(|&&other| g.cards[other].revealed && g.cards[other].owner != card.owner)
+        .filter(|&&other| {
+            g.cards[other].owner != card.owner
+                && (g.cards[other].revealed || !super::reference_rules_enabled())
+        })
         .count();
     g.add_ongoing_power(id, count as i32, g.cards[id].owner);
 }
@@ -363,6 +368,31 @@ mod tests {
     use crate::position::{Position, build_game};
     use crate::random::PythonRandom;
     use serde_json::json;
+
+    #[test]
+    fn punisher_counts_face_down_opponents() {
+        let position: Position = serde_json::from_value(json!({
+            "turn": 4, "energy": 4, "hand": [], "deck": [],
+            "locations": [
+                {"id": null, "mine": [{"id": "Punisher"}],
+                 "theirs": [{"id": "Squirrel"}, {"id": "Hulk", "revealed": false}]},
+                {"id": null, "mine": [], "theirs": []},
+                {"id": null, "mine": [], "theirs": []}
+            ],
+            "opponent": {"hand": 0, "deck": 0}
+        }))
+        .unwrap();
+        let mut rng = PythonRandom::seed(4);
+        let mut game = build_game(&position, &mut rng).unwrap();
+        game.ongoing();
+        let punisher = game.lanes[0]
+            .cards
+            .iter()
+            .copied()
+            .find(|&id| game.cards[id].def.id == "Punisher")
+            .unwrap();
+        assert_eq!(game.cards[punisher].power(), 5);
+    }
 
     #[test]
     fn yondu_rolls_once_among_current_lowest_cost_cards() {
