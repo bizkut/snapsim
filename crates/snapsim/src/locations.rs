@@ -210,6 +210,7 @@ pub static REGISTRY: &[LocationDef] = &[
     recruit_a::MACHINEWORLD,
     recruit_a::MINDSCAPE,
     locations_b_extra::TITAN,
+    locations_b_extra::ROUND_TABLE,
     locations_b_extra::SANDBAR,
     locations_b_extra::STARK_ISLAND,
     locations_b_extra::ICE_BOX,
@@ -357,8 +358,8 @@ pub fn get(id: &str) -> Option<&'static LocationDef> {
 /// Crown City 0x7d4c498, Monster Metropolis 0x7d67480,
 /// Wakandan Throne Room 0x7d95318, Hospice 0x7d59744, Nexus 0x7d8b588.
 /// Cost constructor RVAs: Dream Dimension 0x7d4fd68, Elysium 0x7d50f18,
-/// Fractured Frontier 0x7d54638, Sandbar 0x7d8c8b8, Titan 0x7d8e4d0,
-/// Utopia 0x7d90820; all use the default priority.
+/// Fractured Frontier 0x7d54638, Round Table 0x7d79c58, Sandbar 0x7d8c8b8,
+/// Titan 0x7d8e4d0, Utopia 0x7d90820; all use the default priority.
 /// Returns priority, active-while-staging, active-when-staged-for-play,
 /// and active-when-staged-for-move. The client constructors leave all three
 /// staging flags false for these location-owned effects.
@@ -366,8 +367,8 @@ pub fn ongoing_stat_schedule(id: &str) -> Option<(u8, bool, bool, bool)> {
     let priority = match id {
         "Xandar" | "NegativeZone" | "Necrosha" | "Nidavellir" | "SewerSystem" | "WashingtonDC"
         | "Mojoworld" | "Atlantis" | "LakeHellas" | "Panoptichron" | "SmithsonianMuseum"
-        | "DreamDimension" | "Elysium" | "FracturedFrontier" | "TheSandbar" | "Titan"
-        | "Utopia" => 0,
+        | "DreamDimension" | "Elysium" | "FracturedFrontier" | "RoundTable" | "TheSandbar"
+        | "Titan" | "Utopia" => 0,
         "MonsterMetropolis" | "WakandanThroneRoom" => 2,
         "BaxterBuilding" | "CrownCity" | "Hospice" | "TheNexus" => 3,
         _ => return None,

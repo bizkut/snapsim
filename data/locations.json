@@ -1155,7 +1155,7 @@
     "carddefid": "RoundTable",
     "name": "Round Table",
     "ability": "4-Cost or more cards cost 1 less.",
-    "status": "unreleased",
+    "status": "released",
     "rarity": "rare",
     "difficulty": "Complex"
   },

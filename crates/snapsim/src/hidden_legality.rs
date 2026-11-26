@@ -836,6 +836,7 @@ const LOCATION_HOOKS: &[(&str, Classification)] = &[
     ("Vault", Safe),
     ("DreamDimension", Safe),
     ("Elysium", Safe),
+    ("RoundTable", Safe),
     ("Titan", Safe),
     ("Utopia", Safe),
     // Sandbar reads card.created, which need not be exported.
@@ -1328,7 +1329,10 @@ mod tests {
                 );
                 assert_eq!(
                     d.modify_cost.is_some(),
-                    matches!(*id, "DreamDimension" | "Elysium" | "Titan" | "Utopia"),
+                    matches!(
+                        *id,
+                        "DreamDimension" | "Elysium" | "RoundTable" | "Titan" | "Utopia"
+                    ),
                     "{id}"
                 );
                 assert_eq!(d.after_card_play.is_some(), *id == "Machineworld", "{id}");

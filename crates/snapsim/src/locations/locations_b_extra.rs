@@ -10,6 +10,10 @@ pub const TITAN: LocationDef = LocationDef {
     modify_cost: Some(titan),
     ..location("Titan", 0, 0, 1, false)
 };
+pub const ROUND_TABLE: LocationDef = LocationDef {
+    modify_cost: Some(round_table),
+    ..location("RoundTable", 0, 0, 1, false)
+};
 pub const SANDBAR: LocationDef = LocationDef {
     modify_cost: Some(sandbar),
     ..location("TheSandbar", 0, 0, 1, false)
@@ -78,6 +82,12 @@ pub const WHITE_PALACE: LocationDef = LocationDef {
 
 fn titan(game: &Game<'_>, _: usize, card: usize, _: i32) -> Option<CostUpdate> {
     (game.cards[card].cost == 6).then_some(CostUpdate::Add(-1))
+}
+// RoundTableBehavior::ReduceCardCost (0x7d79a20) checks DefCost, not
+// current cost, for both hands and applies AddCost(-1). The definition
+// constructor (0x7a70590) supplies the threshold 4 and reduction 1.
+fn round_table(game: &Game<'_>, _: usize, card: usize, _: i32) -> Option<CostUpdate> {
+    (game.printed_cost(card) >= 4).then_some(CostUpdate::Add(-1))
 }
 // TheSandbarBehavior::IncreaseCardCost (0x7d8c410) targets only created
 // cards and uses AddCostWithMax(+1, max(current, 6)).
@@ -601,6 +611,38 @@ mod tests {
         .collect();
         let locations = ["Ruins", "Xandar", "Wakanda"].map(str::to_owned);
         Game::new([&deck, &deck], &locations, rng).unwrap()
+    }
+    #[test]
+    fn round_table_uses_printed_cost_for_both_hands_and_stacks() {
+        let mut rng = PythonRandom::seed(1);
+        let mut game = rng_game(&mut rng);
+        for lane in &mut game.lanes {
+            lane.def = crate::locations::get("Ruins").unwrap();
+            lane.revealed = true;
+        }
+        game.lanes[0].def = crate::locations::get("RoundTable").unwrap();
+        game.lanes[1].def = crate::locations::get("Elysium").unwrap();
+        for player in &mut game.players {
+            player.hand.clear();
+            player.deck.clear();
+        }
+        let four = game.create_card("TheThing", 0);
+        let three = game.create_card("Cyclops", 0);
+        let other = game.create_card("Hulk", 1);
+        let deck = game.create_card("Hulk", 0);
+        game.cards[four].cost = 1;
+        game.cards[three].cost = 5;
+        game.players[0].hand.extend([four, three]);
+        game.players[1].hand.push(other);
+        game.players[0].deck.push(deck);
+        game.ongoing();
+        assert_eq!(game.card_cost(four), 0);
+        assert_eq!(game.card_cost(three), 4);
+        assert_eq!(game.card_cost(other), 4);
+        assert_eq!(game.card_cost(deck), 6);
+        game.lanes[0].revealed = false;
+        game.ongoing();
+        assert_eq!(game.card_cost(other), 5);
     }
 
     // StarkIslandBehavior::ReduceCardCostInEachHand (0x7d83498) shuffles a non-empty hand
