@@ -50,6 +50,8 @@ Registering new cards changes `cards::deck_eligible_ids()`, which Agent 13 draws
 
 The same pin restricts random location pools to `parity/reference-locations.json`, the reference's 84 locations, so locations added since do not change its draws. Gate scripts treat cards and locations beyond the reference as new content: coverage must still list every reference entry, and recordings containing new content are excluded from the Python replay comparison (the client replay gate still checks them).
 
+Client replay hydration uses observed local remaining energy, public discard transitions for Colleen Wing and Gambit, and observed board-to-graveyard destruction history; the frozen-reference replay keeps its earlier sampling. Opponent Sunspot energy remains uncheckable when it is not recorded. Unmatched turns under the default 128-seed budget are escalated to at most 2,048 client-rule trials; explicitly selected budgets and frozen-reference replay are unchanged.
+
 Two kinds of record are reported rather than compared:
 
 * New content: a position, case or recording that contains a card with rules here but not in the reference (`cards::beyond_reference`). The reference played such cards as unsupported stand-ins.

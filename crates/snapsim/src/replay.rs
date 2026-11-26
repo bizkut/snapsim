@@ -50,6 +50,8 @@ pub struct Frame {
     pub hand_counts: [Value; 2],
     pub deck_counts: [Value; 2],
     pub out_of_play: Vec<(Value, &'static str)>,
+    pub(crate) graveyard: [Vec<Value>; 2],
+    pub(crate) local_energy: Option<i32>,
     /// Local client staging sequence, when the reader could establish it.
     pub local_staged_order: Value,
 }
@@ -119,6 +121,30 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+// History is accumulated by the reader independently of the sampled game state.
+fn same_sample_except_history(left: &Value, right: &Value) -> bool {
+    let (Some(left), Some(right)) = (left.as_object(), right.as_object()) else {
+        return false;
+    };
+    left.len() == right.len()
+        && left.iter().all(|(key, value)| {
+            if key == "game" {
+                let (Some(a), Some(b)) =
+                    (value.as_object(), right.get(key).and_then(Value::as_object))
+                else {
+                    return false;
+                };
+                a.iter().filter(|(key, _)| *key != "history").count()
+                    == b.iter().filter(|(key, _)| *key != "history").count()
+                    && a.iter()
+                        .filter(|(key, _)| *key != "history")
+                        .all(|(key, value)| b.get(key) == Some(value))
+            } else {
+                right.get(key) == Some(value)
+            }
+        })
+}
+
 /// Split valid schema-one or schema-two observations at SNAP match boundaries.
 pub fn matches(
     observations: impl IntoIterator<Item = (usize, Value)>,
@@ -128,8 +154,10 @@ pub fn matches(
     let mut watch = LocationWatch::default();
     let mut lane_entities: Option<[Value; 3]> = None;
     let mut destroyed_lanes = [false; 3];
-    for (line, observation) in observations {
-        if !truthy(&observation) || observation["status"] == "no-active-game" {
+    let observations: Vec<_> = observations.into_iter().collect();
+    for (index, (line, observation)) in observations.iter().enumerate() {
+        let line = *line;
+        if !truthy(observation) || observation["status"] == "no-active-game" {
             continue;
         }
         if observation["schema_version"] != 1 && observation["schema_version"] != 2 {
@@ -155,6 +183,30 @@ pub fn matches(
         let players = [local, opponent];
         let ids = [local["entity_id"].clone(), opponent["entity_id"].clone()];
         let terminal = truthy(&observation["source"]["terminal"]);
+        // A delayed repeat of an earlier sample can appear with newer reader history.
+        // Require both an exact earlier sample and an immediate return to the current
+        // turn; an actual rewind or a different game remains a match boundary.
+        if let Some(last) = frames.last()
+            && turn < last.turn
+            && !last.terminal
+            && !terminal
+            && game["game_key"].as_str().is_some_and(|key| !key.is_empty())
+            && game["game_key"] == last.key
+            && ids == last.players
+            && observations[..index].iter().any(|(prior_line, prior)| {
+                *prior_line >= frames[0].line && same_sample_except_history(prior, observation)
+            })
+            && observations[index + 1..].iter().find_map(|(_, next)| {
+                let next_turn = next["game"]["turn"].as_i64().filter(|turn| *turn != 0)?;
+                Some(
+                    next["game"]["game_key"] == last.key
+                        && next_turn >= last.turn
+                        && !truthy(&next["source"]["terminal"]),
+                )
+            }) == Some(true)
+        {
+            continue;
+        }
         if frames.last().is_some_and(|last| {
             turn < last.turn
                 || game["game_key"] != last.key
@@ -407,6 +459,12 @@ pub fn matches(
                 zones[1]["deck"]["count"].clone(),
             ],
             out_of_play,
+            graveyard: std::array::from_fn(|seat| {
+                array(&zones[seat]["graveyard"]["cards"]).to_vec()
+            }),
+            local_energy: local["energy"]
+                .as_i64()
+                .and_then(|value| i32::try_from(value).ok()),
             local_staged_order: game["history"]["local_staged_order"].clone(),
         });
     }
@@ -737,6 +795,91 @@ mod tests {
         }
         value
     }
+    #[test]
+    fn delayed_duplicate_does_not_split_match() {
+        let first = observation(1, "game", false);
+        let third = observation(3, "game", false);
+        let mut delayed = first.clone();
+        delayed["game"]["history"] = json!({"actions": [1]});
+        let groups = matches(vec![
+            (1, first.clone()),
+            (2, third.clone()),
+            (3, delayed),
+            (4, third.clone()),
+        ])
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].iter().map(|frame| frame.line).collect::<Vec<_>>(),
+            [1, 2, 4]
+        );
+
+        // Without a return to the old turn, preserve a genuine rewind.
+        let groups = matches(vec![(1, first.clone()), (2, third.clone()), (3, first)]).unwrap();
+        assert_eq!(groups.len(), 2);
+
+        // A different snapshot must not be silently discarded.
+        let mut rewind = observation(1, "game", false);
+        rewind["game"]["players"][0]["ended_turn"] = json!(1);
+        let groups = matches(vec![
+            (1, observation(1, "game", false)),
+            (2, third.clone()),
+            (3, rewind),
+            (4, third),
+        ])
+        .unwrap();
+        assert_eq!(groups.len(), 2);
+    }
+    #[test]
+    fn replay_identifies_public_discard_without_guessing_board_deaths() {
+        let mut before = identified_observation(3);
+        before["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 34, "owner_entity_id": 2, "card_id": "ColleenWing",
+            "revealed": true, "power": 5, "turn_revealed": 3
+        }]);
+        let mut after = before.clone();
+        after["game"]["players"][1]["zones"]["graveyard"] = json!({
+            "cards": [{"entity_id": 35, "card_id": "Marrow", "cost": 2, "power": 3}]
+        });
+        let groups = matches(vec![(1, before.clone()), (2, after.clone())]).unwrap();
+        let discards = super::simulate::observed_discards(&groups[0], 2);
+        assert_eq!(discards.len(), 1);
+        assert_eq!(discards[0].1["card_id"], "Marrow");
+
+        before["game"]["locations"][1]["cards"] = json!([{
+            "entity_id": 35, "owner_entity_id": 2, "card_id": "Marrow",
+            "revealed": true, "power": 3
+        }]);
+        let groups = matches(vec![(1, before), (2, after)]).unwrap();
+        assert!(super::simulate::observed_discards(&groups[0], 2).is_empty());
+        let deaths = super::simulate::observed_destructions(&groups[0], 2);
+        assert_eq!(deaths.len(), 1);
+        assert_eq!((deaths[0].0, deaths[0].2, deaths[0].3), (1, 3, 1));
+    }
+
+    #[test]
+    fn unknown_opponent_sunspot_energy_is_named_uncheckable() {
+        let mut start = identified_observation(4);
+        start["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 30, "owner_entity_id": 2, "card_id": "Sunspot",
+            "revealed": true, "power": 0, "turn_revealed": 1
+        }]);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        let mut next = submitted.clone();
+        next["game"]["turn"] = json!(5);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["locations"][0]["cards"][0]["power"] = json!(4);
+        let rows = check_observations(vec![(1, start), (2, submitted), (3, next)], &[], 1).unwrap();
+        assert_eq!(
+            rows[0].status,
+            super::Status::Uncheckable,
+            "{}",
+            rows[0].detail
+        );
+        assert!(rows[0].detail.contains("opponent Sunspot unspent energy"));
+    }
+
     #[test]
     fn castle_zemo_replay_preserves_each_players_first_betrayal() {
         let mut start = identified_observation(1);

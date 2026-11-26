@@ -24,6 +24,88 @@ fn number(value: &Value) -> Option<i32> {
     value.as_i64().and_then(|n| i32::try_from(n).ok())
 }
 
+// A newly public graveyard card, never observed on the board, appearing during
+// one of these discard reveals identifies the hidden discarded hand card.
+pub(super) fn observed_discards(frames: &[Frame], through: usize) -> Vec<(usize, Value, u8)> {
+    let mut result = Vec::new();
+    for pair in frames.windows(2).filter(|pair| pair[1].line <= through) {
+        let (before, after) = (&pair[0], &pair[1]);
+        if before.turn != after.turn {
+            continue;
+        }
+        for seat in 0..2 {
+            let source = after.board.iter().any(|card| {
+                card.owner == seat
+                    && card.revealed
+                    && card.flipped.as_i64() == Some(after.turn)
+                    && matches!(card.id.as_str(), Some("ColleenWing" | "Gambit"))
+            });
+            if !source {
+                continue;
+            }
+            for card in &after.graveyard[seat] {
+                let id = &card["entity_id"];
+                if before.graveyard[seat]
+                    .iter()
+                    .any(|old| old["entity_id"] == *id)
+                    || frames
+                        .iter()
+                        .take_while(|frame| frame.line <= after.line)
+                        .any(|frame| entity(frame, id).is_some())
+                {
+                    continue;
+                }
+                if card["card_id"]
+                    .as_str()
+                    .and_then(crate::cards::get)
+                    .is_some()
+                {
+                    result.push((seat, card.clone(), after.turn as u8));
+                }
+            }
+        }
+    }
+    result
+}
+
+// A visible board entity entering its owner's graveyard during the same turn
+// is evidence of a destruction, retaining the last observed physical lane.
+pub(super) fn observed_destructions(
+    frames: &[Frame],
+    through: usize,
+) -> Vec<(usize, Value, u8, usize)> {
+    let mut result = Vec::new();
+    for pair in frames.windows(2).filter(|pair| pair[1].line <= through) {
+        let (before, after) = (&pair[0], &pair[1]);
+        if before.turn != after.turn {
+            continue;
+        }
+        for seat in 0..2 {
+            for card in &after.graveyard[seat] {
+                let id = &card["entity_id"];
+                if before.graveyard[seat]
+                    .iter()
+                    .any(|old| old["entity_id"] == *id)
+                    || entity(after, id).is_some()
+                {
+                    continue;
+                }
+                if let Some(previous) = entity(before, id)
+                    && previous.owner == seat
+                    && previous.revealed
+                    && card["card_id"]
+                        .as_str()
+                        .and_then(crate::cards::get)
+                        .is_some()
+                {
+                    result.push((seat, card.clone(), after.turn as u8, previous.lane));
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Recover only modifications proven to predate this turn; the first visible
 /// ledger may also contain effects produced by the current resolution.
 fn hidden_preplay_power(
@@ -724,6 +806,36 @@ pub(super) fn simulate(
             game.push_deck(1, index);
         }
     }
+    if !crate::cards::reference_rules_enabled() {
+        for (seat, observed, turn) in observed_discards(frames, start.line) {
+            let id = observed["card_id"].as_str().unwrap();
+            let index = push(&mut game, id, seat, &observed["cost"], &observed["power"])?;
+            game.push_discard(seat, index);
+            game.players[seat].graveyard_order.push(index);
+            game.players[seat]
+                .discard_history
+                .push(crate::game::CardZoneEvent {
+                    turn,
+                    card: index,
+                    power: game.cards[index].power(),
+                    lane: None,
+                });
+        }
+        for (seat, observed, turn, lane) in observed_destructions(frames, start.line) {
+            let id = observed["card_id"].as_str().unwrap();
+            let index = push(&mut game, id, seat, &observed["cost"], &observed["power"])?;
+            game.push_graveyard(seat, index, Some(lane));
+            game.players[seat].graveyard_order.push(index);
+            game.players[seat]
+                .destruction_history
+                .push(crate::game::CardZoneEvent {
+                    turn,
+                    card: index,
+                    power: game.cards[index].power(),
+                    lane: Some(lane),
+                });
+        }
+    }
     let mut cards: Vec<(Value, usize)> = Vec::new();
     let mut board: Vec<_> = start.board.iter().filter(|c| c.revealed).collect();
     board.sort_by_key(|c| (c.lane, c.owner, c.slot.as_i64().unwrap_or(0)));
@@ -952,6 +1064,25 @@ pub(super) fn simulate(
     }
     game.is_wait_for_staging = true;
     game.truncate_sampled_hand(1, staged.opponent_count.max(0) as usize);
+    if !crate::cards::reference_rules_enabled() {
+        game.players[0].energy = staged.before.local_energy.unwrap_or(0);
+        let discards: Vec<_> = observed_discards(frames, target.line)
+            .into_iter()
+            .filter(|(seat, card, _)| {
+                *seat == 1
+                    && !start.graveyard[1]
+                        .iter()
+                        .any(|old| old["entity_id"] == card["entity_id"])
+            })
+            .collect();
+        if let [(seat, observed, _)] = discards.as_slice()
+            && let Some(&slot) = game.players[*seat].hand.first()
+        {
+            let id = observed["card_id"].as_str().unwrap();
+            game.cards[slot] = make(id, *seat, &observed["cost"], &observed["power"])?;
+            game.cards[slot].zone = Some(CardZone::Hand(*seat));
+        }
+    }
     // A resolved Morph's observed identity proves that card was in the
     // opposing hand when it resolved. Include it in the sampled hand rather
     // than hoping a small seed budget rediscovers a now-large card pool.

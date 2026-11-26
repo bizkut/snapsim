@@ -11,6 +11,28 @@ fn quantum_unknown(reveal: Option<i64>, played: Option<i64>, turn: i64) -> bool 
     played.is_none_or(|played| played < turn && reveal.is_none_or(|r| played >= r))
 }
 
+fn matched_seed(
+    match_number: usize,
+    turn: i64,
+    lines: (usize, usize),
+    seed: usize,
+    budgets: (usize, usize),
+) -> ResultRow {
+    let (normal, extended) = budgets;
+    let mut row = report::consistent(
+        match_number,
+        turn,
+        lines.0,
+        lines.1,
+        seed,
+        if seed < normal { normal } else { extended },
+    );
+    if seed >= normal {
+        row.detail.push_str("; escalated");
+    }
+    row
+}
+
 /// Largest number of tied move/play pairs whose relative order is enumerated
 /// (2^3 = 8 orders).
 const MAX_ORDER_TIES: usize = 3;
@@ -812,7 +834,13 @@ fn check_observations_impl(
                 };
                 let mut best = None;
                 let mut last_error = None;
-                for seed in 0..seeds {
+                // Retry only unmatched client-rule turns under the default budget.
+                let trial_seeds = if seeds == 128 && !cards::reference_rules_enabled() {
+                    2048
+                } else {
+                    seeds
+                };
+                for seed in 0..trial_seeds {
                     for order in 0..variants {
                         let (diffs, hooks) = match super::simulate::simulate(
                             start,
@@ -830,13 +858,12 @@ fn check_observations_impl(
                             }
                         };
                         if diffs.is_empty() {
-                            let mut row = report::consistent(
+                            let mut row = matched_seed(
                                 index + 1,
                                 turn,
-                                staged.before.line,
-                                target.line,
+                                (staged.before.line, target.line),
                                 seed,
-                                seeds,
+                                (seeds, trial_seeds),
                             );
                             row.hooks = hooks;
                             if variants > 1 {
@@ -862,6 +889,24 @@ fn check_observations_impl(
                     return Err(error);
                 }
                 let (seed, differences, hooks) = best.expect("positive seeds");
+                if !cards::reference_rules_enabled()
+                    && let Some(sunspot) = target
+                        .board
+                        .iter()
+                        .find(|card| card.owner == 1 && card.revealed && card.id == "Sunspot")
+                    && differences.iter().any(|difference| {
+                        difference.cards.iter().any(|card| card == "Sunspot")
+                            && difference.item.contains(" power:")
+                    })
+                    && differences.iter().all(|difference| {
+                        (difference.cards.as_slice() == ["Sunspot"]
+                            && difference.item.contains(" power:"))
+                            || (difference.lanes.as_slice() == [sunspot.lane]
+                                && difference.item.contains("opponent visible total:"))
+                    })
+                {
+                    return Err("opponent Sunspot unspent energy is not recorded".into());
+                }
                 // With schema-v1 observations an opponent's first revealed
                 // power may include hidden hand buffs or effects already
                 // resolved in the same sample. If trials disagree, a changed
@@ -920,7 +965,7 @@ fn check_observations_impl(
                     index + 1,
                     turn,
                     (staged.before.line, target.line),
-                    (seeds, seed),
+                    (trial_seeds, seed),
                     differences,
                     cards.into_iter().collect(),
                     locations.into_iter().collect(),
@@ -1024,7 +1069,17 @@ fn check_observations_impl(
 }
 #[cfg(test)]
 mod location_state_tests {
-    use super::{order_variants, quantum_unknown, theater_unknown};
+    use super::{matched_seed, order_variants, quantum_unknown, theater_unknown};
+
+    #[test]
+    fn seed_escalation_reports_the_budget_actually_used() {
+        let normal = matched_seed(1, 2, (3, 4), 5, (128, 2048));
+        assert!(normal.detail.contains("matched after 6/128 attempts"));
+        assert!(!normal.detail.contains("escalated"));
+        let extended = matched_seed(1, 2, (3, 4), 1974, (128, 2048));
+        assert!(extended.detail.contains("matched after 1975/2048 attempts"));
+        assert!(extended.detail.contains("escalated"));
+    }
 
     #[test]
     fn stat_update_evidence_requires_a_new_entry_on_the_same_visible_entity() {

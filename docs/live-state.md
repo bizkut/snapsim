@@ -64,6 +64,21 @@ state. `state_json` provides a canonical dump for differential testing. Known
 catalog cards without rules and unknown locations use inert approximate
 stand-ins; the Rust coverage layer reports unsupported content and state.
 
+For Ranked observations, hidden locations are sampled without replacement using
+the client build's default rarity weights (common 200, uncommon 125, rare 75,
+ultra rare 15). Other modes retain uniform sampling. The optional position field
+`location_rarity_prior` overrides this choice; `mode: "ranked"` selects it by
+default. The client's applicable pool, rarity overrides, and dated tag multipliers
+are not available, so this is an approximation. Recruit keeps its Basic/Standard
+filter. The optional position field `spotlight_location` supplies an externally
+known location ID; with the normal-selection weighted prior, when the location
+is still hidden and eligible, the simulator forces it into a hidden slot with
+probability 50%, otherwise sampling normally. The field is ignored for uniform
+mode priors. This simplified conditional prior is not the exact posterior after
+locations have already been revealed. Omit it when the promotion is unknown,
+disabled for the game mode, or not visible to the owner. Frozen reference rules
+retain uniform sampling and ignore this field.
+
 Generate positions from both seats of seeded SearchAI games, hand-made edge
 cases, and recorded SNAP observations (using `LocationWatch` and `DeckWatch`):
 

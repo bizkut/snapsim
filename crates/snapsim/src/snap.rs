@@ -773,6 +773,13 @@ pub fn position_from_snap(observation: &Value, options: &Value) -> Result<Value,
         options["deck_added"].as_array().map(Vec::as_slice),
     );
     let mut position = json!({"turn":game["turn"],"total_turns":game["total_turns"],"energy":local["energy"],"hand":hand,"deck":remaining_cards.unwrap_or_default(),"deck_count":zones["deck"]["count"],"locations":locations,"opponent":{"hand":opponent_zones["hand"]["count"],"deck":opponent_zones["deck"]["count"],"energy":null,"seen":seen,"deck_list":null,"pool":null},"priority":null,"mode":mode});
+    if !crate::cards::reference_rules_enabled()
+        && source["ranked"] == true
+        && source["recruit"] != true
+        && source["league"] != "RankedRecruit"
+    {
+        position["location_rarity_prior"] = json!(true);
+    }
     if version == Some(2)
         && let Some(provenance) = game.get("provenance")
     {
@@ -932,6 +939,31 @@ mod tests {
             {"card_id":"Hulk","owner_entity_id":20,"revealed":true},
             {"card_id":"AntMan","owner_entity_id":20,"revealed":false}
         ]},{"location_id":"Ruins","cards":[]},{"location_id":"Ruins","cards":[]}]}})
+    }
+    #[test]
+    fn ranked_location_prior_excludes_recruit_and_conquest() {
+        let mut observation = prior_observation();
+        observation["source"] = json!({"ranked": true, "recruit": false, "league": "Ranked"});
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        assert_eq!(position["location_rarity_prior"], json!(true));
+
+        observation["source"] = json!({"ranked": true, "recruit": true, "league": "RankedRecruit"});
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        assert!(position.get("location_rarity_prior").is_none());
+
+        observation["source"] =
+            json!({"ranked": true, "recruit": false, "league": "RankedRecruit"});
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        assert!(position.get("location_rarity_prior").is_none());
+
+        observation["source"] = json!({});
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        assert!(position.get("location_rarity_prior").is_none());
+
+        observation["source"] =
+            json!({"ranked": false, "recruit": false, "league": "ConquestSilver"});
+        let position = position_from_snap(&observation, &json!({})).unwrap();
+        assert!(position.get("location_rarity_prior").is_none());
     }
 
     #[test]

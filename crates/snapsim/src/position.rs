@@ -699,6 +699,10 @@ pub struct Position {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deck_created: Option<Vec<Option<bool>>>,
     pub locations: [LocationRef; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotlight_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_rarity_prior: Option<bool>,
     pub opponent: Opponent,
     #[serde(default)]
     pub priority: Option<String>,
@@ -1534,6 +1538,65 @@ fn sample<T: Clone>(rng: &mut PythonRandom, pool: &[T], count: usize) -> Result<
         .map(|i| pool[i].clone())
         .collect())
 }
+
+// Game.GetRandomStartingLocationTable (0x7db2644) calls GetLocationWeight
+// (0x7dca580). Config overrides, dated pools and tag multipliers are unavailable,
+// so bundled rarity values are an approximation rather than the exact table.
+fn location_weight(id: &str) -> f64 {
+    match LOCATION_DATA.get(id).map(|d| d.rarity.as_str()) {
+        Some("common") => 200.0,
+        Some("uncommon") => 125.0,
+        Some("rare") => 75.0,
+        Some("ultra rare") => 15.0,
+        _ => 125.0,
+    }
+}
+
+fn sample_hidden_locations(
+    rng: &mut PythonRandom,
+    pool: &[String],
+    count: usize,
+    spotlight: Option<&str>,
+    weighted: bool,
+) -> Result<Vec<String>, String> {
+    if count > pool.len() {
+        return Err(format!(
+            "cannot draw {count} distinct items from a pool of {}",
+            pool.len()
+        ));
+    }
+    let mut selected = Vec::with_capacity(count);
+    if count > 0
+        && let Some(id) = spotlight
+        && pool.iter().any(|candidate| candidate == id)
+        && rng.random() < 0.5
+    {
+        selected.push(id.to_owned());
+    }
+    while selected.len() < count {
+        let total: f64 = pool
+            .iter()
+            .filter(|id| !selected.contains(id))
+            .map(|id| if weighted { location_weight(id) } else { 1.0 })
+            .sum();
+        let mut roll = rng.random() * total;
+        for id in pool {
+            if selected.contains(id) {
+                continue;
+            }
+            roll -= if weighted { location_weight(id) } else { 1.0 };
+            if roll < 0.0 {
+                selected.push(id.clone());
+                break;
+            }
+        }
+    }
+    if spotlight.is_some() && selected.len() > 1 {
+        rng.shuffle(&mut selected);
+    }
+    Ok(selected)
+}
+
 pub(crate) fn make_card(id: &str, owner: usize) -> Result<Card, String> {
     let def = card_def(id)?;
     let row = CARD_DATA
@@ -2212,7 +2275,22 @@ pub(crate) fn build_game_with_generated<'a>(
         .iter()
         .filter(|lane| lane.id.is_none() && !lane.destroyed)
         .count();
-    let hidden_locations = sample(rng, &possible, hidden_count)?;
+    let weighted = !matches!(
+        position.mode.as_deref(),
+        Some("recruit" | "conquest" | "scenario")
+    ) && position
+        .location_rarity_prior
+        .unwrap_or(position.mode.as_deref() == Some("ranked"));
+    let spotlight = if weighted {
+        position.spotlight_location.as_deref()
+    } else {
+        None
+    };
+    let hidden_locations = if cards::reference_rules_enabled() || !weighted {
+        sample(rng, &possible, hidden_count)?
+    } else {
+        sample_hidden_locations(rng, &possible, hidden_count, spotlight, weighted)?
+    };
     let mut selected = hidden_locations.into_iter();
     let lanes: [Lane; 3] = std::array::from_fn(|i| {
         let src = &position.locations[i];
@@ -2971,6 +3049,33 @@ pub fn state_json(game: &Game<'_>) -> Value {
 #[cfg(test)]
 mod observed_history_tests {
     use super::*;
+
+    #[test]
+    fn hidden_locations_use_rarity_and_optional_spotlight() {
+        let pool = vec!["Asgard".to_owned(), "Cancun".to_owned()];
+        let mut rng = PythonRandom::seed(19);
+        let mut common = 0;
+        for _ in 0..2000 {
+            let result = sample_hidden_locations(&mut rng, &pool, 1, None, true).unwrap();
+            common += usize::from(result[0] == "Asgard");
+        }
+        assert!(common > 1750);
+
+        let mut rng = PythonRandom::seed(19);
+        let mut spotlight = 0;
+        for _ in 0..2000 {
+            let result = sample_hidden_locations(&mut rng, &pool, 1, Some("Cancun"), true).unwrap();
+            spotlight += usize::from(result[0] == "Cancun");
+        }
+        assert!((950..=1200).contains(&spotlight));
+        assert!(sample_hidden_locations(&mut rng, &pool, 3, None, true).is_err());
+        assert_eq!(
+            sample_hidden_locations(&mut rng, &pool, 0, Some("Cancun"), true).unwrap(),
+            Vec::<String>::new()
+        );
+        let both = sample_hidden_locations(&mut rng, &pool, 2, Some("Cancun"), true).unwrap();
+        assert_ne!(both[0], both[1]);
+    }
 
     fn base() -> Position {
         serde_json::from_value(json!({
