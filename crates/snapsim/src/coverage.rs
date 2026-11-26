@@ -576,6 +576,10 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    if position.opponent.known.iter().collect::<HashSet<_>>().len() > 12 {
+        extra_state
+            .insert("opponent_known_exceeds_deck_size: sampled twelve known identities".to_owned());
+    }
     if position::opponent_forced_count(position) > position::opponent_hidden_count(position) {
         extra_state.insert(
             "opponent_known_exceeds_hidden_count: sampled a subset of known cards".to_owned(),

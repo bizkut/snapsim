@@ -525,6 +525,7 @@ pub(crate) fn advise_with_game(
             Value::Array(values) if key == "state" => values.iter().any(|value| {
                 !value.as_str().is_some_and(|reason| {
                     reason.starts_with("opponent_known_exceeds_hidden_count:")
+                        || reason.starts_with("opponent_known_exceeds_deck_size:")
                         || reason.starts_with("opponent_fully_known_hidden_count_mismatch:")
                 })
             }),

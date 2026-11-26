@@ -2231,15 +2231,21 @@ pub(crate) fn build_game_with_generated<'a>(
         }
         known_set.insert(id);
     }
-    let visible_ids = opponent_visible_ids(position);
     if known_set.len() > 12 {
-        return Err("opponent.known contains more than 12 unique card IDs".into());
+        let mut bounded: Vec<_> = known_set.into_iter().collect();
+        bounded.sort();
+        rng.shuffle(&mut bounded);
+        bounded.truncate(12);
+        known_set = bounded.into_iter().collect();
     }
+    let visible_ids = opponent_visible_ids(position);
     let mut forced_set = HashSet::new();
     let mut forced: Vec<String> = opp
         .known
         .iter()
-        .filter(|id| !visible_ids.contains(id.as_str()) && forced_set.insert(*id))
+        .filter(|id| {
+            known_set.contains(id) && !visible_ids.contains(id.as_str()) && forced_set.insert(*id)
+        })
         .cloned()
         .collect();
     let mut candidates: Vec<_> = pool

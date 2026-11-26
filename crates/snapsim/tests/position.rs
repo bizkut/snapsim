@@ -94,6 +94,40 @@ fn opponent_known_samples_subset_for_impossible_hidden_state() {
 }
 
 #[test]
+fn opponent_more_than_twelve_known_is_bounded_and_approximate() {
+    let mut p = position(json!([
+        {"id":"Xandar", "mine":[], "theirs":[]},
+        {"id":"OttosLab", "mine":[], "theirs":[]},
+        {"id":"KamarTaj", "mine":[], "theirs":[]}
+    ]));
+    p.opponent.known = snapsim::cards::deck_eligible_ids()[..13]
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
+    p.opponent.hand = 7;
+    p.opponent.deck = 5;
+    let mut rng = PythonRandom::seed(42);
+    let game = build_game(&p, &mut rng).unwrap();
+    let hidden: std::collections::HashSet<_> = game.players[1]
+        .hand
+        .iter()
+        .chain(&game.players[1].deck)
+        .map(|&id| game.cards[id].def.id)
+        .collect();
+    assert_eq!(hidden.len(), 12);
+    assert!(
+        hidden
+            .iter()
+            .all(|id| p.opponent.known.iter().any(|known| known == id))
+    );
+    assert!(
+        snapsim::coverage::coverage(&p)["state"]
+            .to_string()
+            .contains("opponent_known_exceeds_deck_size")
+    );
+}
+
+#[test]
 fn fully_known_deck_never_fills_from_pool_and_excludes_public_zones() {
     let mut p = position(json!([
         {"id":"Xandar", "mine":[], "theirs":[{"id":"Hulk"}]},

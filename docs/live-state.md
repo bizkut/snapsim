@@ -71,6 +71,9 @@ sampling source, with hidden slots drawn only from that deck. If the evidence
 exceeds the hidden slot count, a random subset is used and coverage reports
 `opponent_known_exceeds_hidden_count`; a fully known deck with extra hidden
 slots is likewise approximate and samples repeated known IDs.
+More than twelve distinct known identities are contradictory evidence: the
+simulator samples a bounded subset and reports
+`opponent_known_exceeds_deck_size` instead of declaring the deck fully known.
 
 For Ranked observations, hidden locations are sampled without replacement using
 the client build's default rarity weights (common 200, uncommon 125, rare 75,

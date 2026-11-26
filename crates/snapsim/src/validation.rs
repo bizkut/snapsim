@@ -207,7 +207,6 @@ impl Position {
             Some(0),
         )?;
         card_ids(opponent.get("seen").unwrap_or(&empty), "opponent.seen")?;
-        let mut known = HashSet::new();
         for id in array(
             opponent.get("known").unwrap_or(&empty),
             "opponent.known",
@@ -219,10 +218,6 @@ impl Position {
             if id.is_empty() || crate::cards::get(id).is_none() || crate::cards::is_token(id) {
                 return Err("opponent.known contains a non-deck-eligible card ID".into());
             }
-            known.insert(id);
-        }
-        if known.len() > 12 {
-            return Err("opponent.known contains more than 12 unique card IDs".into());
         }
         for field in ["deck_list", "pool"] {
             let v = opponent.get(field).unwrap_or(&null);
@@ -282,7 +277,6 @@ mod tests {
             json!([""]),
             json!(["Rock"]),
             json!(["NotACard"]),
-            json!(&crate::cards::deck_eligible_ids()[..13]),
         ] {
             input["opponent"]["known"] = invalid;
             assert!(
@@ -294,6 +288,8 @@ mod tests {
         let mut ids = crate::cards::deck_eligible_ids()[..12].to_vec();
         ids.push(ids[0]);
         input["opponent"]["known"] = json!(ids);
+        assert!(Position::from_json(&input.to_string()).is_ok());
+        input["opponent"]["known"] = json!(&crate::cards::deck_eligible_ids()[..13]);
         assert!(Position::from_json(&input.to_string()).is_ok());
     }
 
