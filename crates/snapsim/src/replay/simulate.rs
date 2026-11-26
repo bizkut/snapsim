@@ -179,6 +179,20 @@ fn hidden_preplay_power(
     let Some(updates) = visible.stat_updates.as_array() else {
         return Ok(None);
     };
+    // Cloning Vats copies the card's accumulated modifiers. A copied self-source
+    // update is indistinguishable from one caused by this play's own reveal:
+    // the exported ledger does not identify the source entity or copy time.
+    if visible.created_by_location == "CloningVats"
+        && updates
+            .iter()
+            .any(|update| update["stat"] == "Power" && update["updater_card_id"] == play.id)
+    {
+        return Err(format!(
+            "Cloning Vats copied self-sourced Power updates for {} [{}] cannot be timed",
+            label(&play.id),
+            label(&play.card.entity)
+        ));
+    }
     let prior = |update: &Value| {
         let source = update["updater_card_id"].as_str();
         // PyramidOfRamaTutBehavior::AddRock (0x7d75c10) creates this
@@ -660,6 +674,15 @@ pub(super) fn simulate(
                     Box::new(spent.map(|value| value.unwrap_or(false)))
                         as Box<dyn crate::game::CardState>
                 })
+        } else if id == Some("BlackVortex") && !crate::cards::reference_rules_enabled() {
+            history
+                .vortex
+                .iter()
+                .find(|(lane, turn, _)| *lane == i && *turn == start.location_turns[i])
+                .map(|(_, _, spent)| {
+                    Box::new(spent.map(|value| value.unwrap_or(false)))
+                        as Box<dyn crate::game::CardState>
+                })
         } else if id == Some("OttosLab") {
             Some(Box::new(std::array::from_fn::<_, 2, _>(|seat| {
                 history
@@ -718,6 +741,20 @@ pub(super) fn simulate(
                     play.card.lane == i && spent.and_then(|spent| spent[play.card.owner]).is_none()
                 }) {
                     return Err("Castle Zemo prior per-player betrayal state is unknown".into());
+                }
+            }
+            if id == "BlackVortex" && !crate::cards::reference_rules_enabled() {
+                let spent = history
+                    .vortex
+                    .iter()
+                    .find(|(lane, turn, _)| *lane == i && *turn == start.location_turns[i])
+                    .map(|(_, _, spent)| spent);
+                if staged.plays.iter().any(|play| {
+                    play.card.lane == i && spent.and_then(|spent| spent[play.card.owner]).is_none()
+                }) {
+                    return Err(
+                        "Black Vortex per-player transformation flags are not recorded".into(),
+                    );
                 }
             }
             if start.location_turns[i].is_null() && matches!(id, "Lemuria" | "Sakaar") {
@@ -1161,6 +1198,13 @@ pub(super) fn simulate(
         && let Some(&slot) = game.players[1].hand.first()
     {
         game.cards[slot] = make(observed, 1, &Value::Null, &Value::Null)?;
+        game.cards[slot].zone = Some(CardZone::Hand(1));
+        // PyramidOfRamaTutBehavior::AddRock (0x7d75c10) creates a
+        // 3-Power Rock in each hand. Morph copies its current Power, not
+        // the printed 0-Power definition.
+        if observed == "Rock" && start.locations.iter().any(|id| id == "PyramidOfRamaTut") {
+            game.set_power(slot, 3, 1);
+        }
     }
     // Staged cards can already be present when a later manual move fires.
     // Preserve the observed order rather than always applying moves first.

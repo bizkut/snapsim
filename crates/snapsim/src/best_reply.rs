@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn maximal_plans_cover_every_way_to_spend_the_hand() {
         let mut position = flip_position();
-        position["opponent"]["known"] = json!(["MistyKnight", "Shocker"]);
+        position["opponent"]["known"] = json!(["MistyKnight", "Medusa"]);
         position["opponent"]["hand"] = json!(2);
         let mut rng = PythonRandom::seed(3);
         let count = |position: &Value, rng: &mut PythonRandom| {

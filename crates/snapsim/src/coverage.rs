@@ -37,7 +37,9 @@ pub fn supported() -> Value {
 
 fn opponent_candidates(position: &Position) -> (&'static str, Vec<String>) {
     let opponent = &position.opponent;
-    let (source, pool) = if let Some(pool) = &opponent.deck_list {
+    let (source, pool) = if position::opponent_deck_fully_known(position) {
+        ("fully-known", opponent.known.clone())
+    } else if let Some(pool) = &opponent.deck_list {
         ("deck_list", pool.clone())
     } else if let Some(pool) = &opponent.pool {
         ("pool", pool.clone())
@@ -574,6 +576,17 @@ pub fn coverage(position: &Position) -> Value {
     let mut loc_ids = BTreeSet::new();
     let mut state = BTreeSet::new();
     let mut extra_state = BTreeSet::new();
+    if position::opponent_forced_count(position) > position::opponent_hidden_count(position) {
+        extra_state.insert(
+            "opponent_known_exceeds_hidden_count: sampled a subset of known cards".to_owned(),
+        );
+    }
+    if position::opponent_deck_fully_known(position)
+        && position::opponent_forced_count(position) < position::opponent_hidden_count(position)
+    {
+        extra_state
+            .insert("opponent_fully_known_hidden_count_mismatch: repeated known cards".to_owned());
+    }
     if position
         .locations
         .iter()
@@ -1854,7 +1867,7 @@ pub fn coverage(position: &Position) -> Value {
                 }))
     {
         extra_state
-            .insert("Mr Negative deck card cost and power modifications not exported".to_owned());
+            .insert("Mr Negative swap applied by turn-draw count; extra draws and intervening plays are approximated".to_owned());
     }
     // MonstroOctopusBehavior::ReduceCost 0x7efec0c reads the ordered deck top.
     if !cards::reference_rules_enabled() && position.turn > 1 && card_ids.contains("MonstroOctopus")
@@ -2085,7 +2098,7 @@ pub fn coverage(position: &Position) -> Value {
         })
     {
         // BlackVortexBehavior 0x7d407d4 uses per-player consumed flags.
-        extra_state.insert("Black Vortex per-player transformation flags not exported".to_owned());
+        extra_state.insert("Black Vortex first-play state unknown".to_owned());
     }
     if !cards::reference_rules_enabled()
         && position
@@ -2744,7 +2757,7 @@ pub fn coverage(position: &Position) -> Value {
         .filter(|&n| n != position.deck.len())
         .map(|n| json!({"listed":position.deck.len(),"counted":n}));
     let hidden = position.opponent.hand + position.opponent.deck + face_down;
-    let unseen = opponent_candidates(position).1.len();
+    let unseen = opponent_candidates(position).1.len() + position::opponent_forced_count(position);
     let opponent = (hidden > unseen).then(|| json!({"hidden":hidden,"unseen_in_pool":unseen}));
     let state: BTreeSet<String> = state
         .into_iter()
@@ -3034,6 +3047,27 @@ mod location_change_tests {
         assert!(coverage(&position)["state"].to_string().contains(reason));
         position.hand[0].turns_drawn = Some(vec![(3, false)]);
         assert!(!coverage(&position)["state"].to_string().contains(reason));
+    }
+
+    #[test]
+    fn black_vortex_prior_play_is_approximate() {
+        let mut position = Position {
+            turn: 4,
+            ..Position::default()
+        };
+        position.locations[0].id = Some("BlackVortex".into());
+        position.locations[0].revealed_turn = Some(3);
+        position.locations[0].mine.push(crate::position::CardRef {
+            id: "Galactus".into(),
+            revealed: true,
+            played_turn: Some(3),
+            ..Default::default()
+        });
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Black Vortex first-play state unknown")
+        );
     }
 
     #[test]

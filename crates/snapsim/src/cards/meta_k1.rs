@@ -205,9 +205,9 @@ fn zombie_nova(game: &mut Game<'_>, card: usize) {
     }
 }
 
-// DebriiBehavior::AddRocks (0x7e8a6ac) creates Rocks for both players
-// at each other location; DrDoomBehavior::AddDoombot (0x7e93cf0)
-// creates one allied DoomBot at each other location.
+// DebriiBehavior::AddRocks (0x7e8a6ac) creates Rocks at other locations.
+// The live 3/7 version adds them only for its owner, as observed in replay;
+// the frozen reference retains the older both-player behavior.
 fn debrii(game: &mut Game<'_>, card: usize) {
     let Some(source) = game.cards[card].lane else {
         return;
@@ -215,11 +215,15 @@ fn debrii(game: &mut Game<'_>, card: usize) {
     let owner = game.cards[card].owner;
     for lane in 0..3 {
         if lane != source {
-            for seat in [owner, 1 - owner] {
-                let token = game.create_card("Rock", seat);
+            let token = game.create_card("Rock", owner);
+            game.cards[token].created_by_card_id = Some("Debrii".to_owned());
+            game.cards[token].created_by_player = Some(owner);
+            game.add_card(token, lane, owner, true);
+            if super::reference_rules_enabled() {
+                let token = game.create_card("Rock", 1 - owner);
                 game.cards[token].created_by_card_id = Some("Debrii".to_owned());
                 game.cards[token].created_by_player = Some(owner);
-                game.add_card(token, lane, seat, true);
+                game.add_card(token, lane, 1 - owner, true);
             }
         }
     }
@@ -388,19 +392,19 @@ mod tests {
         assert_eq!(g.cards[v].permanent, before + 8);
     }
     #[test]
-    fn debrii_creates_both_sides_at_other_lanes() {
+    fn debrii_creates_allied_rocks_at_other_lanes() {
         let mut rng = PythonRandom::seed(1);
         let mut g = setup(&mut rng);
         let c = place(&mut g, "Debrii", 0, 1, true);
         debrii(&mut g, c);
-        assert_eq!(g.lanes[0].cards.len(), 2);
+        assert_eq!(g.lanes[0].cards.len(), 1);
         assert_eq!(g.lanes[1].cards.len(), 1);
-        assert_eq!(g.lanes[2].cards.len(), 2);
+        assert_eq!(g.lanes[2].cards.len(), 1);
         assert!(
             g.lanes[0]
                 .cards
                 .iter()
-                .all(|&i| g.cards[i].def.id == "Rock")
+                .all(|&i| g.cards[i].def.id == "Rock" && g.cards[i].owner == 0)
         );
     }
     #[test]

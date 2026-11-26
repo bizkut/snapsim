@@ -74,7 +74,7 @@ fn opponent_known_is_forced_hidden_without_resampling_seen() {
 }
 
 #[test]
-fn opponent_known_rejects_impossible_hidden_state() {
+fn opponent_known_samples_subset_for_impossible_hidden_state() {
     let mut p = position(json!([
         {"id":"Xandar", "mine":[], "theirs":[]},
         {"id":"OttosLab", "mine":[], "theirs":[]},
@@ -82,10 +82,68 @@ fn opponent_known_rejects_impossible_hidden_state() {
     ]));
     p.opponent.known = vec!["Hulk".into()];
     let mut rng = PythonRandom::seed(34);
-    assert!(build_game(&p, &mut rng).is_err());
+    assert!(build_game(&p, &mut rng).is_ok());
+    assert!(
+        snapsim::coverage::coverage(&p)["state"]
+            .to_string()
+            .contains("opponent_known_exceeds_hidden_count")
+    );
     p.opponent.hand = 1;
     p.opponent.known = vec!["Rock".into()];
     assert!(build_game(&p, &mut rng).is_err());
+}
+
+#[test]
+fn fully_known_deck_never_fills_from_pool_and_excludes_public_zones() {
+    let mut p = position(json!([
+        {"id":"Xandar", "mine":[], "theirs":[{"id":"Hulk"}]},
+        {"id":"OttosLab", "mine":[], "theirs":[]},
+        {"id":"KamarTaj", "mine":[], "theirs":[]}
+    ]));
+    p.opponent.known = [
+        "Hulk",
+        "AntMan",
+        "Cyclops",
+        "Medusa",
+        "IronMan",
+        "Wong",
+        "Mystique",
+        "Wolfsbane",
+        "Ironheart",
+        "Psylocke",
+        "Magik",
+        "JaneFoster",
+    ]
+    .iter()
+    .map(|id| (*id).to_owned())
+    .collect();
+    p.opponent.graveyard = Some(vec![
+        serde_json::from_value(json!({"id":"AntMan"})).unwrap(),
+    ]);
+    p.opponent.banished = Some(vec![
+        serde_json::from_value(json!({"id":"Cyclops"})).unwrap(),
+    ]);
+    p.opponent.hand = 4;
+    p.opponent.deck = 5;
+    p.opponent.pool = Some(vec!["Abomination".into()]);
+    let mut rng = PythonRandom::seed(55);
+    let game = build_game(&p, &mut rng).unwrap();
+    let ids: Vec<_> = game.players[1]
+        .hand
+        .iter()
+        .chain(&game.players[1].deck)
+        .map(|&i| game.cards[i].def.id)
+        .collect();
+    assert_eq!(ids.len(), 9);
+    assert!(
+        ids.iter()
+            .all(|id| p.opponent.known.iter().any(|known| known == id))
+    );
+    assert!(!ids.contains(&"Hulk") && !ids.contains(&"AntMan") && !ids.contains(&"Cyclops"));
+    assert_eq!(
+        snapsim::coverage::sampling_priors(&p)["opponent_cards"]["source"],
+        "fully-known"
+    );
 }
 
 #[test]

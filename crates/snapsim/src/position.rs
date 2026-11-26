@@ -2057,6 +2057,77 @@ impl FrozenGeneratedAbilities {
     }
 }
 
+pub(crate) fn opponent_visible_ids(position: &Position) -> HashSet<&str> {
+    if position.opponent.known.is_empty() {
+        return position
+            .opponent
+            .seen
+            .iter()
+            .map(String::as_str)
+            .chain(
+                position
+                    .locations
+                    .iter()
+                    .flat_map(|lane| lane.known_opponent_plays.iter().map(String::as_str)),
+            )
+            .collect();
+    }
+    position
+        .opponent
+        .seen
+        .iter()
+        .map(String::as_str)
+        .chain(position.locations.iter().flat_map(|lane| {
+            lane.theirs
+                .iter()
+                .map(|card| card.id.as_str())
+                .chain(lane.known_opponent_plays.iter().map(String::as_str))
+        }))
+        .chain(
+            position
+                .opponent
+                .graveyard
+                .iter()
+                .flatten()
+                .map(|card| card.id.as_str()),
+        )
+        .chain(
+            position
+                .opponent
+                .banished
+                .iter()
+                .flatten()
+                .map(|card| card.id.as_str()),
+        )
+        .collect()
+}
+
+pub(crate) fn opponent_hidden_count(position: &Position) -> usize {
+    position.opponent.hand
+        + position.opponent.deck
+        + position
+            .locations
+            .iter()
+            .map(|lane| lane.theirs_face_down)
+            .sum::<usize>()
+}
+
+pub(crate) fn opponent_forced_count(position: &Position) -> usize {
+    let visible = opponent_visible_ids(position);
+    position
+        .opponent
+        .known
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !visible.contains(id))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+pub(crate) fn opponent_deck_fully_known(position: &Position) -> bool {
+    position.opponent.known.iter().collect::<HashSet<_>>().len() == 12
+}
+
 pub fn build_game<'a>(position: &Position, rng: &'a mut PythonRandom) -> Result<Game<'a>, String> {
     build_game_with_generated(position, rng, None)
 }
@@ -2140,7 +2211,10 @@ pub(crate) fn build_game_with_generated<'a>(
                     .flat_map(|lane| &lane.known_opponent_plays),
             ),
         );
-    let mut pool = if let Some(list) = &opp.deck_list {
+    let full_deck = opponent_deck_fully_known(position);
+    let mut pool = if full_deck {
+        opp.known.clone()
+    } else if let Some(list) = &opp.deck_list {
         list.clone()
     } else if let Some(list) = &opp.pool {
         list.clone()
@@ -2157,11 +2231,7 @@ pub(crate) fn build_game_with_generated<'a>(
         }
         known_set.insert(id);
     }
-    let staged_ids: HashSet<&str> = position
-        .locations
-        .iter()
-        .flat_map(|lane| lane.known_opponent_plays.iter().map(String::as_str))
-        .collect();
+    let visible_ids = opponent_visible_ids(position);
     if known_set.len() > 12 {
         return Err("opponent.known contains more than 12 unique card IDs".into());
     }
@@ -2169,27 +2239,18 @@ pub(crate) fn build_game_with_generated<'a>(
     let mut forced: Vec<String> = opp
         .known
         .iter()
-        .filter(|id| {
-            !opp.seen.contains(id) && !staged_ids.contains(id.as_str()) && forced_set.insert(*id)
-        })
+        .filter(|id| !visible_ids.contains(id.as_str()) && forced_set.insert(*id))
         .cloned()
         .collect();
     let mut candidates: Vec<_> = pool
         .iter()
-        .filter(|id| {
-            !opp.seen.contains(id) && !staged_ids.contains(id.as_str()) && !known_set.contains(id)
-        })
+        .filter(|id| !visible_ids.contains(id.as_str()) && !known_set.contains(id))
         .cloned()
         .collect();
-    let count = opp.hand
-        + opp.deck
-        + position
-            .locations
-            .iter()
-            .map(|l| l.theirs_face_down)
-            .sum::<usize>();
+    let count = opponent_hidden_count(position);
     if forced.len() > count {
-        return Err("opponent.known exceeds the hidden card count".into());
+        rng.shuffle(&mut forced);
+        forced.truncate(count);
     }
     let count = count - forced.len();
     let mut hidden = if count == 0 {
@@ -2230,7 +2291,7 @@ pub(crate) fn build_game_with_generated<'a>(
         if opp.weights.is_some() {
             return Err("not enough distinct weighted cards".into());
         }
-        let fallback = if opp.known.is_empty() {
+        let fallback = if full_deck || opp.known.is_empty() {
             &pool
         } else {
             &candidates
@@ -2483,6 +2544,31 @@ pub(crate) fn build_game_with_generated<'a>(
             game.push_hand(1, index);
         } else {
             game.push_deck(1, index);
+        }
+    }
+    // Assume one start-of-turn draw after the public reveal turn. Assign those
+    // draws to sampled hand slots; intervening plays and extra draws are unknown.
+    // SwapPowerAndCost (0x7f04ce0) applies only to characters in the deck.
+    if !cards::reference_rules_enabled()
+        && let Some(turn) = position
+            .locations
+            .iter()
+            .flat_map(|lane| &lane.theirs)
+            .filter(|card| card.id == "MrNegative" && card.revealed)
+            .filter_map(|card| card.turn_revealed.or(card.played_turn))
+            .filter(|&turn| turn > 0 && turn < position.turn)
+            .min()
+    {
+        let possible_draws = usize::from(position.turn - turn).min(opp.hand);
+        let mut targets = game.players[1].deck.clone();
+        targets.extend(game.players[1].hand.iter().take(possible_draws).copied());
+        for target in targets {
+            if game.is_character(target) {
+                let power = game.cards[target].power();
+                let cost = game.cards[target].cost;
+                game.set_power(target, cost, 1);
+                game.set_cost(target, power.min(6), 1);
+            }
         }
     }
     let delayed = position.turn.checked_sub(1).filter(|&t| {
@@ -3089,6 +3175,81 @@ mod observed_history_tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn negative_samples_post_reveal_hand_and_swaps_opponent_deck() {
+        let mut position = base();
+        position.turn = 5;
+        position.opponent.hand = 3;
+        position.opponent.deck = 1;
+        position.opponent.pool = Some(vec![
+            "IronMan".into(),
+            "Wolfsbane".into(),
+            "Hulk".into(),
+            "Mystique".into(),
+        ]);
+        position.locations[0].theirs.push(CardRef {
+            id: "MrNegative".into(),
+            revealed: true,
+            turn_revealed: Some(4),
+            ..CardRef::default()
+        });
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        let card = &game.cards[game.players[1].deck[0]];
+        let printed = &CARD_DATA[card.def.id];
+        assert_eq!(card.cost, printed.power.min(6));
+        assert_eq!(card.power(), printed.cost);
+        for (index, &id) in game.players[1].hand.iter().enumerate() {
+            let card = &game.cards[id];
+            let printed = &CARD_DATA[card.def.id];
+            if index == 0 {
+                assert_eq!(card.cost, printed.power.min(6));
+                assert_eq!(card.power(), printed.cost);
+            } else {
+                assert_eq!(card.cost, printed.cost);
+                assert_eq!(card.power(), printed.power);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_swaps_deck_cost_before_elysium_hand_discount() {
+        let mut position = base();
+        position.turn = 5;
+        position.opponent.hand = 1;
+        position.opponent.pool = Some(vec!["Wolfsbane".into()]);
+        position.locations[0].id = Some("Elysium".into());
+        position.locations[0].theirs.push(CardRef {
+            id: "MrNegative".into(),
+            revealed: true,
+            turn_revealed: Some(4),
+            ..CardRef::default()
+        });
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        let id = game.players[1].hand[0];
+        assert_eq!(game.cards[id].power(), 3);
+        assert_eq!(game.card_cost(id), 1);
+    }
+
+    #[test]
+    fn own_negative_does_not_swap_opponent_deck() {
+        let mut position = base();
+        position.turn = 5;
+        position.opponent.deck = 1;
+        position.opponent.pool = Some(vec!["IronMan".into()]);
+        position.locations[0].mine.push(CardRef {
+            id: "MrNegative".into(),
+            revealed: true,
+            turn_revealed: Some(4),
+            ..CardRef::default()
+        });
+        let mut rng = PythonRandom::seed(1);
+        let game = build_game(&position, &mut rng).unwrap();
+        let card = &game.cards[game.players[1].deck[0]];
+        assert_eq!((card.cost, card.power()), (5, 0));
+    }
+
     #[test]
     fn weighted_prior_conditions_on_any_seen_card_once_per_group() {
         let prior: WeightedPrior = serde_json::from_value(json!({

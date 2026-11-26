@@ -64,6 +64,14 @@ state. `state_json` provides a canonical dump for differential testing. Known
 catalog cards without rules and unknown locations use inert approximate
 stand-ins; the Rust coverage layer reports unsupported content and state.
 
+`opponent.known` carries confirmed starting-deck IDs, including evidence from
+earlier Conquest rounds. Visible board and public discard/banish cards are not
+forced into hidden slots. Twelve distinct known IDs select the `fully-known`
+sampling source, with hidden slots drawn only from that deck. If the evidence
+exceeds the hidden slot count, a random subset is used and coverage reports
+`opponent_known_exceeds_hidden_count`; a fully known deck with extra hidden
+slots is likewise approximate and samples repeated known IDs.
+
 For Ranked observations, hidden locations are sampled without replacement using
 the client build's default rarity weights (common 200, uncommon 125, rare 75,
 ultra rare 15). Other modes retain uniform sampling. The optional position field

@@ -354,6 +354,18 @@ fn check_observations_impl(
                                 [fresh.then_some(false); 2],
                             ));
                         }
+                        if *location == "BlackVortex"
+                            && !history.vortex.iter().any(|(i, reveal, _)| {
+                                *i == lane && *reveal == start.location_turns[lane]
+                            })
+                        {
+                            let fresh = start.location_turns[lane].as_i64() == Some(turn);
+                            history.vortex.push((
+                                lane,
+                                start.location_turns[lane].clone(),
+                                [fresh.then_some(false); 2],
+                            ));
+                        }
                     }
                 }
                 seen_locations.clone_from(&start.locations);
@@ -1039,6 +1051,24 @@ fn check_observations_impl(
                         if let Some((plays, false)) = &checked {
                             for play in plays.iter().filter(|p| p.card.lane == *lane) {
                                 spent[play.card.owner] = Some(true);
+                            }
+                        } else {
+                            *spent = [None; 2];
+                        }
+                    }
+                    for (lane, reveal, spent) in &mut history.vortex {
+                        if start.locations[*lane] != "BlackVortex"
+                            || start.location_turns[*lane] != *reveal
+                        {
+                            continue;
+                        }
+                        if let (Some((plays, false)), Some(target)) = (&checked, target) {
+                            for play in plays.iter().filter(|play| play.card.lane == *lane) {
+                                if spent[play.card.owner] != Some(true) {
+                                    spent[play.card.owner] = entity(target, &play.card.entity)
+                                        .filter(|card| card.id != play.id)
+                                        .map(|_| true);
+                                }
                             }
                         } else {
                             *spent = [None; 2];

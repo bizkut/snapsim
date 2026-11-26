@@ -516,8 +516,24 @@ pub(crate) fn advise_with_game(
             Value::Bool(value) => *value,
             _ => true,
         });
+    let incomplete_except_known_count = unsupported
+        .as_object()
+        .expect("coverage is an object")
+        .iter()
+        .any(|(key, value)| match value {
+            Value::Null => false,
+            Value::Array(values) if key == "state" => values.iter().any(|value| {
+                !value.as_str().is_some_and(|reason| {
+                    reason.starts_with("opponent_known_exceeds_hidden_count:")
+                        || reason.starts_with("opponent_fully_known_hidden_count_mismatch:")
+                })
+            }),
+            Value::Array(values) => !values.is_empty(),
+            Value::Bool(value) => *value,
+            _ => true,
+        });
     let status = if incomplete {
-        if options.approximate {
+        if options.approximate || !incomplete_except_known_count {
             "approximate"
         } else {
             "unsupported"
@@ -525,7 +541,7 @@ pub(crate) fn advise_with_game(
     } else {
         "ok"
     };
-    if incomplete && !options.approximate {
+    if incomplete_except_known_count && !options.approximate {
         return Ok(
             json!({"engine":"simulator-rollout", "status":status, "rollouts":0, "plans":[], "unsupported":unsupported, "priors":priors}),
         );

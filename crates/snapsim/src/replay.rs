@@ -752,6 +752,7 @@ struct History {
     lab_spent: Vec<(usize, Value, usize)>,
     lab_unknown: Vec<(usize, Value)>,
     castle: Vec<(usize, Value, [Option<bool>; 2])>,
+    vortex: Vec<(usize, Value, [Option<bool>; 2])>,
     last_resolved: [Option<(i64, Value)>; 2],
 }
 
@@ -796,6 +797,50 @@ mod tests {
         }
         value
     }
+    #[test]
+    fn older_black_vortex_without_player_flags_is_not_checkable() {
+        let mut start = identified_observation(4);
+        start["game"]["locations"][0]["location_id"] = json!("BlackVortex");
+        start["game"]["players"][0]["zones"]["hand"] = json!({
+            "count": 1, "cards": [{"entity_id": 30, "card_id": "KaZar", "cost": 4, "power": 6}]
+        });
+        let mut prior = start.clone();
+        prior["game"]["turn"] = json!(3);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        submitted["game"]["players"][0]["zones"]["hand"] = json!({"count": 0, "cards": []});
+        submitted["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 30, "owner_entity_id": 1, "card_id": "KaZar",
+            "revealed": false, "staged_turn": 4
+        }]);
+        let mut revealed = submitted.clone();
+        revealed["game"]["locations"][0]["cards"][0] = json!({
+            "entity_id": 30, "owner_entity_id": 1, "card_id": "KaZar",
+            "revealed": true, "power": 6, "turn_revealed": 4
+        });
+        let mut next = revealed.clone();
+        next["game"]["turn"] = json!(5);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        let rows = check_observations(
+            vec![
+                (1, prior),
+                (2, start),
+                (3, submitted),
+                (4, revealed),
+                (5, next),
+            ],
+            &[],
+            1,
+        )
+        .unwrap();
+        let row = rows.iter().find(|row| row.turn == 4).unwrap();
+        assert_eq!(row.status, super::Status::Uncheckable);
+        assert!(
+            row.detail
+                .contains("Black Vortex per-player transformation flags")
+        );
+    }
+
     #[test]
     fn sakaar_replay_conditions_on_public_pulls_and_resolves_them() {
         let mut start = identified_observation(2);
@@ -866,6 +911,61 @@ mod tests {
             super::Status::Consistent,
             "{}",
             rows[1].detail
+        );
+    }
+
+    #[test]
+    fn morph_conditions_on_observed_rock_in_hidden_hand() {
+        let mut start = identified_observation(4);
+        start["game"]["locations"][1]["location_id"] = json!("PyramidOfRamaTut");
+        start["game"]["players"][0]["zones"]["hand"] = json!({
+            "count": 2, "cards": [
+                {"entity_id": 30, "card_id": "Morph", "cost": 3, "power": 0},
+                {"entity_id": 31, "card_id": "Rock", "cost": 1, "power": 3}
+            ]
+        });
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        submitted["game"]["players"][0]["zones"]["hand"] = json!({
+            "count": 1, "cards": [{"entity_id": 31, "card_id": "Rock", "cost": 1, "power": 3}]
+        });
+        submitted["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 30, "owner_entity_id": 1, "card_id": "Morph",
+            "revealed": false, "staged_turn": 4
+        }]);
+        let mut flipped = submitted.clone();
+        flipped["game"]["locations"][0]["cards"][0] = json!({
+            "entity_id": 30, "owner_entity_id": 1, "card_id": "Morph",
+            "revealed": true, "power": 0, "turn_revealed": 4
+        });
+        let mut reveal = submitted.clone();
+        reveal["game"]["locations"][0]["cards"][0] = json!({
+            "entity_id": 30, "owner_entity_id": 1, "card_id": "Rock",
+            "revealed": true, "power": 3, "turn_revealed": 4,
+            "created_by_card_id": "Morph"
+        });
+        let mut next = reveal.clone();
+        next["game"]["turn"] = json!(5);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        let rows = check_observations(
+            vec![
+                (1, start),
+                (2, submitted),
+                (3, flipped),
+                (4, reveal),
+                (5, next),
+            ],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            rows[0].status,
+            super::Status::Consistent,
+            "{} {:?}",
+            rows[0].detail,
+            rows[0].differences
         );
     }
 
@@ -1564,6 +1664,21 @@ mod tests {
         let rows = hidden_power_case_for("Rock", Value::Null, update, 3);
         assert_eq!(rows[0].status, super::Status::Uncheckable);
         assert!(rows[0].detail.contains("cannot be timed"));
+    }
+
+    #[test]
+    fn cloning_vats_copied_self_power_is_not_mistaken_for_current_reveal() {
+        let rows = hidden_power_case_for(
+            "Wolfsbane",
+            json!("CloningVats"),
+            json!([
+                {"stat":"Power","update":"Add","value":4,"updater_card_id":"Wolfsbane"},
+                {"stat":"Power","update":"Add","value":4,"updater_card_id":"Wolfsbane"}
+            ]),
+            10,
+        );
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("Cloning Vats copied self-sourced"));
     }
 
     fn forge_no_play_case(owner: usize, opponent_hand: u8) -> Vec<super::ResultRow> {
