@@ -1006,6 +1006,28 @@ fn check_observations_impl(
                 row.observed = Some(observed_evidence(&used_samples, target, plays));
             }
             output.push(row);
+            if !cards::reference_rules_enabled() {
+                if let (Some(start), Some(target), Some((plays, false))) = (start, target, &checked)
+                {
+                    for seat in 0..2 {
+                        let mut own = plays.iter().filter(|play| play.card.owner == seat);
+                        let first = own.next();
+                        let second = own.next();
+                        let unexplained = target.board.iter().any(|card| {
+                            card.owner == seat
+                                && entity(start, &card.entity).is_none()
+                                && !plays.iter().any(|play| play.card.entity == card.entity)
+                        });
+                        if unexplained || second.is_some() {
+                            history.last_resolved[seat] = None;
+                        } else if let Some(play) = first {
+                            history.last_resolved[seat] = Some((turn, play.card.entity.clone()));
+                        }
+                    }
+                } else {
+                    history.last_resolved = [None, None];
+                }
+            }
             if let Some(start) = start {
                 if !cards::reference_rules_enabled() {
                     for (lane, reveal, spent) in &mut history.castle {

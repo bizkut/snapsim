@@ -752,6 +752,7 @@ struct History {
     lab_spent: Vec<(usize, Value, usize)>,
     lab_unknown: Vec<(usize, Value)>,
     castle: Vec<(usize, Value, [Option<bool>; 2])>,
+    last_resolved: [Option<(i64, Value)>; 2],
 }
 
 mod check;
@@ -795,6 +796,153 @@ mod tests {
         }
         value
     }
+    #[test]
+    fn sakaar_replay_conditions_on_public_pulls_and_resolves_them() {
+        let mut start = identified_observation(2);
+        start["game"]["locations"][1]["location_id"] = json!("Sakaar");
+        start["game"]["players"][0]["zones"]["hand"] = json!({
+            "count": 1, "cards": [{"entity_id": 30, "card_id": "Ultron", "cost": 6, "power": 8}]
+        });
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(2);
+        let mut before = start.clone();
+        before["game"]["turn"] = json!(1);
+        before["game"]["locations"][1]["location_id"] = json!("RevealOn2");
+        before["game"]["legal_actions"] = json!([]);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(2);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        submitted["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 40, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut rock = submitted.clone();
+        rock["game"]["locations"][0]["cards"][0] = json!({
+            "entity_id": 40, "owner_entity_id": 2, "card_id": "Rock",
+            "revealed": true, "power": 0, "turn_revealed": 2
+        });
+        let mut pulls = rock.clone();
+        pulls["game"]["players"][0]["zones"]["hand"] = json!({"count": 0, "cards": []});
+        pulls["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        pulls["game"]["locations"][1]["cards"] = json!([
+            {"entity_id": 30, "owner_entity_id": 1, "revealed": false, "card_id": "Ultron"},
+            {"entity_id": 41, "owner_entity_id": 2, "revealed": false}
+        ]);
+        let mut reveal = pulls.clone();
+        reveal["game"]["locations"][1]["cards"] = json!([
+            {"entity_id": 30, "owner_entity_id": 1, "revealed": true, "card_id": "Ultron",
+             "power": 8, "turn_revealed": 2},
+            {"entity_id": 41, "owner_entity_id": 2, "revealed": true, "card_id": "BruceBanner",
+             "power": 1, "turn_revealed": 2}
+        ]);
+        for lane in [0, 2] {
+            for id in 50 + lane * 4..54 + lane * 4 {
+                reveal["game"]["locations"][lane]["cards"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({
+                        "entity_id": id, "owner_entity_id": 1, "card_id": "Drone",
+                        "revealed": true, "power": 2, "turn_revealed": 2
+                    }));
+            }
+        }
+        let mut next = reveal.clone();
+        next["game"]["turn"] = json!(3);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        let rows = check_observations(
+            vec![
+                (1, before),
+                (2, start),
+                (3, submitted),
+                (4, rock),
+                (5, pulls),
+                (6, reveal),
+                (7, next),
+            ],
+            &[],
+            16,
+        )
+        .unwrap();
+        assert_eq!(
+            rows[1].status,
+            super::Status::Consistent,
+            "{}",
+            rows[1].detail
+        );
+    }
+
+    #[test]
+    fn mystique_uses_uniquely_observed_previous_opponent_play() {
+        let mut start = identified_observation(3);
+        start["game"]["locations"][0]["location_id"] = json!("SmithsonianMuseum");
+        start["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut submitted = start.clone();
+        submitted["game"]["players"][0]["ended_turn"] = json!(3);
+        submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        submitted["game"]["locations"][0]["cards"] = json!([{
+            "entity_id": 20, "owner_entity_id": 2, "revealed": false
+        }]);
+        let mut reveal = submitted.clone();
+        reveal["game"]["locations"][0]["cards"][0] = json!({
+            "entity_id": 20, "owner_entity_id": 2, "card_id": "Wong",
+            "revealed": true, "power": 3, "turn_revealed": 3
+        });
+        let mut next = reveal.clone();
+        next["game"]["turn"] = json!(4);
+        next["game"]["players"][0]["ended_turn"] = json!(0);
+        next["game"]["players"][1]["zones"]["hand"]["count"] = json!(1);
+        let mut next_submitted = next.clone();
+        next_submitted["game"]["players"][0]["ended_turn"] = json!(4);
+        next_submitted["game"]["players"][1]["zones"]["hand"]["count"] = json!(0);
+        next_submitted["game"]["locations"][0]["cards"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "entity_id": 21, "owner_entity_id": 2, "revealed": false
+            }));
+        let mut next_reveal = next_submitted.clone();
+        next_reveal["game"]["locations"][0]["cards"][1] = json!({
+            "entity_id": 21, "owner_entity_id": 2, "card_id": "Mystique",
+            "revealed": true, "power": 3, "turn_revealed": 4
+        });
+        next_reveal["game"]["locations"][0]["cards"][0]["power"] = json!(4);
+        let mut final_frame = next_reveal.clone();
+        final_frame["game"]["turn"] = json!(5);
+        final_frame["game"]["players"][0]["ended_turn"] = json!(0);
+        let rows = check_observations(
+            vec![
+                (1, start),
+                (2, submitted),
+                (3, reveal),
+                (4, next.clone()),
+                (5, next_submitted.clone()),
+                (6, next_reveal.clone()),
+                (7, final_frame.clone()),
+            ],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            rows[1].status,
+            super::Status::Consistent,
+            "{}",
+            rows[1].detail
+        );
+
+        let rows = check_observations(
+            vec![
+                (1, next),
+                (2, next_submitted),
+                (3, next_reveal),
+                (4, final_frame),
+            ],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(rows[0].status, super::Status::Uncheckable);
+        assert!(rows[0].detail.contains("Mystique previous resolved play"));
+    }
+
     #[test]
     fn delayed_duplicate_does_not_split_match() {
         let first = observation(1, "game", false);

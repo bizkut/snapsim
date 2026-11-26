@@ -236,10 +236,19 @@ fn zenn_la(game: &mut Game<'_>, lane: usize) {
         }
     }
 }
-fn put_from_hand(game: &mut Game<'_>, lane: usize, seat: usize, reveal: bool) {
+fn put_from_hand(
+    game: &mut Game<'_>,
+    lane: usize,
+    seat: usize,
+    reveal: bool,
+    observed: Option<usize>,
+) {
     let len = game.players[seat].hand.len();
     if len > 0 {
-        let slot = game.rng.borrow_mut().randbelow(len);
+        let random_slot = game.rng.borrow_mut().randbelow(len);
+        let slot = observed
+            .and_then(|card| game.players[seat].hand.iter().position(|&id| id == card))
+            .unwrap_or(random_slot);
         let card = game.players[seat].hand[slot];
         if game.can_add(card, lane, seat) {
             game.take_hand(seat, slot);
@@ -250,13 +259,60 @@ fn put_from_hand(game: &mut Game<'_>, lane: usize, seat: usize, reveal: bool) {
 // SakaarBehavior::PlayCards 0x7d7aab8 calls ordered players at 0x7d7ab74.
 fn sakaar(game: &mut Game<'_>, lane: usize) {
     if game.lanes[lane].revealed_turn == Some(game.turn) {
+        let observed = game.lanes[lane]
+            .state
+            .as_deref()
+            .and_then(|state| state.as_any().downcast_ref::<[Option<usize>; 2]>())
+            .copied()
+            .unwrap_or_default();
         let first = if crate::cards::reference_rules_enabled() {
             0
         } else {
             game.reveal_priority.unwrap_or(0)
         };
+        if crate::cards::reference_rules_enabled() {
+            for seat in [first, 1 - first] {
+                put_from_hand(game, lane, seat, false, None);
+            }
+            return;
+        }
+        // PlayCards calls Location::StageForPlay (0x7ddd3f0) for each
+        // ordered player before the resulting staged cards resolve.
+        let deferred_start = game.deferred_added_reveals.len();
         for seat in [first, 1 - first] {
-            put_from_hand(game, lane, seat, false);
+            let len = game.players[seat].hand.len();
+            if len == 0 {
+                continue;
+            }
+            let random_slot = game.rng.borrow_mut().randbelow(len);
+            let slot = observed[seat]
+                .and_then(|card| game.players[seat].hand.iter().position(|&id| id == card))
+                .unwrap_or(random_slot);
+            let card = game.players[seat].hand[slot];
+            if !game.can_add(card, lane, seat) {
+                continue;
+            }
+            game.take_hand(seat, slot);
+            game.add_card_deferred(card, lane, seat);
+            game.cards[card].turn_played = game.turn;
+            game.played[seat].push((card, lane));
+            game.players[seat]
+                .staged_history
+                .push(crate::game::StagedPlay {
+                    turn: game.turn,
+                    card,
+                    def_id: game.cards[card].def.id,
+                    printed_cost: game.printed_cost(card),
+                    created: game.cards[card].created,
+                    resolved: false,
+                });
+            game.players[seat]
+                .staged_lane_history
+                .push((game.turn, lane));
+        }
+        for card in game.deferred_added_reveals.split_off(deferred_start) {
+            let seat = game.cards[card].owner;
+            game.reveal_with_staging(card, Some(crate::game::StagingContext { seat, lane }));
         }
     }
 }
@@ -278,7 +334,7 @@ fn ottos_lab(game: &mut Game<'_>, lane: usize, card: usize) {
     // (0x7e06e70) on the opponent's hand and then Location::StageForPlay without a prior
     // space test, so a full side still consumes the roll. The reference skipped the roll.
     if !crate::cards::reference_rules_enabled() || game.has_space(lane, opponent, 0) {
-        put_from_hand(game, lane, opponent, true);
+        put_from_hand(game, lane, opponent, true, None);
     }
 }
 fn strange_academy(game: &mut Game<'_>, lane: usize) {

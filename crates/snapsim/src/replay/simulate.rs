@@ -24,6 +24,58 @@ fn number(value: &Value) -> Option<i32> {
     value.as_i64().and_then(|n| i32::try_from(n).ok())
 }
 
+// SakaarBehavior::PlayCards (0x7d7aab8) randomly pulls one card per player.
+// A hand-count drop and new board entity identifies a pull; its identity may
+// only become visible in a later frame.
+fn observed_sakaar(
+    frames: &[Frame],
+    start: &Frame,
+    target: &Frame,
+    staged: &Staging<'_>,
+    lane: usize,
+) -> [Option<super::BoardCard>; 2] {
+    let mut choices: [Option<super::BoardCard>; 2] = [None, None];
+    for pair in frames
+        .windows(2)
+        .filter(|pair| pair[0].line >= staged.before.line && pair[1].line <= target.line)
+    {
+        let (before, after) = (&pair[0], &pair[1]);
+        for (seat, choice) in choices.iter_mut().enumerate() {
+            if choice.is_some()
+                || before.hand_counts[seat]
+                    .as_i64()
+                    .zip(after.hand_counts[seat].as_i64())
+                    .is_none_or(|(a, b)| a - b != 1)
+            {
+                continue;
+            }
+            let mut added = after.board.iter().filter(|card| {
+                card.owner == seat
+                    && card.lane == lane
+                    && entity(start, &card.entity).is_none()
+                    && entity(before, &card.entity).is_none()
+                    && !staged
+                        .plays
+                        .iter()
+                        .any(|play| play.card.entity == card.entity)
+            });
+            let Some(card) = added.next() else { continue };
+            if added.next().is_some() {
+                continue;
+            }
+            *choice = frames
+                .iter()
+                .take_while(|frame| frame.line <= target.line)
+                .find_map(|frame| {
+                    entity(frame, &card.entity)
+                        .filter(|visible| visible.revealed && visible.id.is_string())
+                        .cloned()
+                });
+        }
+    }
+    choices
+}
+
 // A newly public graveyard card, never observed on the board, appearing during
 // one of these discard reveals identifies the hidden discarded hand card.
 pub(super) fn observed_discards(frames: &[Frame], through: usize) -> Vec<(usize, Value, u8)> {
@@ -894,6 +946,17 @@ pub(super) fn simulate(
                         game.players[seat].play_history.push((action.turn, *index));
                     }
                 }
+            } else if staged
+                .plays
+                .iter()
+                .any(|play| play.card.owner == seat && play.id == "Mystique")
+            {
+                let (turn, entity_id) = history.last_resolved[seat]
+                    .as_ref()
+                    .ok_or("Mystique previous resolved play is not observable")?;
+                if let Some((_, index)) = cards.iter().find(|(entity, _)| entity == entity_id) {
+                    game.players[seat].play_history.push((*turn as u8, *index));
+                }
             }
         }
     }
@@ -1280,6 +1343,44 @@ pub(super) fn simulate(
     game.replay_hooks = Some(RefCell::new(Default::default()));
     game.is_wait_for_staging = false;
     game.ongoing();
+    if !crate::cards::reference_rules_enabled() {
+        for lane in 0..3 {
+            if start.locations[lane] != "Sakaar"
+                || start.location_turns[lane].as_i64() != Some(start.turn)
+            {
+                continue;
+            }
+            let observed = observed_sakaar(frames, start, target, staged, lane);
+            let mut selected = [None; 2];
+            for (seat, card) in observed.iter().enumerate() {
+                let Some(card) = card else { continue };
+                let id = card.id.as_str().ok_or("Sakaar pull identity is missing")?;
+                let index = if seat == 0 {
+                    let position = start
+                        .hand
+                        .iter()
+                        .position(|held| held["entity_id"] == card.entity)
+                        .ok_or("Sakaar local pull was not observed in hand")?;
+                    original[position]
+                } else {
+                    let index = *game.players[seat]
+                        .hand
+                        .first()
+                        .ok_or("Sakaar opponent hand is not observable")?;
+                    game.cards[index] = make(id, seat, &Value::Null, &Value::Null)?;
+                    game.cards[index].zone = Some(CardZone::Hand(seat));
+                    index
+                };
+                if !game.players[seat].hand.contains(&index) {
+                    return Err("Sakaar pulled card is no longer in the simulated hand".into());
+                }
+                selected[seat] = Some(index);
+            }
+            if selected.iter().any(Option::is_some) {
+                game.lanes[lane].state = Some(Box::new(selected));
+            }
+        }
+    }
     for play in &staged.plays {
         let index = cards
             .iter()

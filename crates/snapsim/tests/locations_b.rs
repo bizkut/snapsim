@@ -93,7 +93,7 @@ fn mosh_pit_and_stark_tower_respect_order_and_turn() {
     assert_eq!(g.cards[cards[0]].permanent, 6);
 }
 #[test]
-fn sakaar_uses_reveal_turn_and_does_not_trigger_reveal() {
+fn sakaar_uses_reveal_turn_and_resolves_staged_cards() {
     let mut rng = PythonRandom::seed(4);
     let mut g = game(&mut rng, "Sakaar");
     g.lanes[0].revealed_turn = Some(4);
@@ -107,8 +107,37 @@ fn sakaar_uses_reveal_turn_and_does_not_trigger_reveal() {
         g.lanes[0]
             .cards
             .iter()
-            .all(|&id| g.cards[id].revealed && g.cards[id].turn_played == 0)
+            .all(|&id| g.cards[id].revealed && g.cards[id].turn_played == 4)
     );
+}
+
+#[test]
+fn sakaar_stages_both_before_resolving_ultron() {
+    let mut rng = PythonRandom::seed(4);
+    let mut g = game(&mut rng, "Sakaar");
+    let ultron = g.create_card("Ultron", 0);
+    let wasp = g.create_card("Wasp", 1);
+    assert!(g.add_hand(0, ultron, false));
+    assert!(g.add_hand(1, wasp, false));
+    g.lanes[0].state = Some(Box::new([Some(ultron), Some(wasp)]));
+    g.turn = 4;
+    g.lanes[0].revealed_turn = Some(4);
+    (g.lanes[0].def.on_turn_end.unwrap())(&mut g, 0);
+    assert!(g.cards[ultron].revealed && g.cards[wasp].revealed);
+    assert_eq!(
+        g.players[0].resolved_play_history.last().unwrap().card,
+        ultron
+    );
+    for lane in 1..3 {
+        assert_eq!(
+            g.lanes[lane]
+                .cards
+                .iter()
+                .filter(|&&id| g.cards[id].def.id == "Drone" && g.cards[id].owner == 0)
+                .count(),
+            4
+        );
+    }
 }
 #[test]
 fn ottos_lab_is_spent_per_player() {
