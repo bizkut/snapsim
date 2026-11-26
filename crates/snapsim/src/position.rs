@@ -364,6 +364,8 @@ pub struct LocationHistoryState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_theater_used: Option<SeatFlags>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub black_vortex_consumed: Option<SeatFlags>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_given: Option<bool>,
 }
 
@@ -2393,6 +2395,11 @@ pub(crate) fn build_game_with_generated<'a>(
                     }
                     let history = src.history_state.as_ref()?;
                     match src.id.as_deref()? {
+                        "BlackVortex" => history
+                            .black_vortex_consumed
+                            .as_ref()?
+                            .complete()
+                            .map(|spent| Box::new(spent) as Box<dyn crate::game::CardState>),
                         "Vormir" => history
                             .vormir_consumed
                             .as_ref()?

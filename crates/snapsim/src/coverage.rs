@@ -2095,10 +2095,14 @@ pub fn coverage(position: &Position) -> Value {
         extra_state.insert("Panoptichron card creation provenance not exported".to_owned());
     }
     if !cards::reference_rules_enabled()
-        && position.turn > 1
         && position.locations.iter().any(|lane| {
             lane.id.as_deref() == Some("BlackVortex")
-                && lane.revealed_turn.is_none_or(|turn| turn < position.turn)
+                && lane
+                    .history_state
+                    .as_ref()
+                    .and_then(|history| history.black_vortex_consumed.as_ref())
+                    .and_then(|flags| flags.complete())
+                    .is_none()
         })
     {
         // BlackVortexBehavior 0x7d407d4 uses per-player consumed flags.
@@ -3057,6 +3061,7 @@ mod location_change_tests {
     fn black_vortex_prior_play_is_approximate() {
         let mut position = Position {
             turn: 4,
+            total_turns: 6,
             ..Position::default()
         };
         position.locations[0].id = Some("BlackVortex".into());
@@ -3067,6 +3072,39 @@ mod location_change_tests {
             played_turn: Some(3),
             ..Default::default()
         });
+        assert!(
+            coverage(&position)["state"]
+                .to_string()
+                .contains("Black Vortex first-play state unknown")
+        );
+        position.locations[0].history_state = serde_json::from_value(serde_json::json!({
+            "black_vortex_consumed": {"local": true, "opponent": false}
+        }))
+        .unwrap();
+        assert!(
+            !coverage(&position)["state"]
+                .to_string()
+                .contains("Black Vortex first-play state unknown")
+        );
+        let mut rng = crate::random::PythonRandom::seed(1);
+        let game = crate::position::build_game(&position, &mut rng).unwrap();
+        assert_eq!(
+            game.lanes[0]
+                .state
+                .as_deref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<[bool; 2]>(),
+            Some(&[true, false])
+        );
+        position.locations[0]
+            .history_state
+            .as_mut()
+            .unwrap()
+            .black_vortex_consumed
+            .as_mut()
+            .unwrap()
+            .opponent = None;
         assert!(
             coverage(&position)["state"]
                 .to_string()

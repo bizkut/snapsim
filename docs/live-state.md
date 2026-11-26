@@ -55,6 +55,15 @@ including through `snapsim_py.advise`, and overrides the position field.
 Missing evidence yields a coverage reason: approximate mode continues with an
 approximate result, while exact mode declines.
 
+The position's optional per-location `history_state.black_vortex_consumed`
+contains `local` and `opponent` booleans. Both are required for exact coverage
+and restoration; a missing or null seat remains unknown. Consumers must not
+infer an unconsumed flag from the current board alone. Snapper-Assist tracks
+visible history from match start and leaves ambiguous play provenance or gaps
+unknown. `BlackVortexBehavior.TransformCardInto6Cost` (0x7d407d4) selects
+the player's key and sets it after attempting a transformation, even if the
+card identity remains the same.
+
 ## Position materialization parity
 
 `position::Position` deserializes Python's `Position.to_dict()` shape.
